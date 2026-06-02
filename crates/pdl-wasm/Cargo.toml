@@ -1,0 +1,22 @@
+[package]
+name = "pdl-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pdl-core = { workspace = true }
+pdl-data = { workspace = true }
+pdl-driver = { workspace = true }
+pdl-editor-services = { workspace = true }
+pdl-exec = { workspace = true }
+pdl-semantics = { workspace = true }
+pdl-syntax = { workspace = true }
+lsp-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

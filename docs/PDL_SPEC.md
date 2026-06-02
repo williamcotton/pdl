@@ -9,16 +9,18 @@ Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading
 The current repository implementation is `0.1.0-alpha.1`.
 
 This alpha is the first runnable slice of the draft v0.1 language. It implements
-the `pdl` CLI commands `run`, `check`, and `version`; CSV file loading; CSV file
-and stdout output; deterministic in-memory execution for `load`, `filter`,
-`select`, `drop`, `rename`, `group_by`, `agg`, `sort`, `limit`, and `save`; and
-the aggregate functions `count`, `sum`, `mean`, `min`, and `max`.
+the `pdl` CLI commands `run`, `check`, and `version`; CSV file loading with
+header rows; CSV file and stdout output; deterministic in-memory execution for
+`load`, `filter`, `select`, `drop`, `rename`, `group_by`, `agg`, `sort`,
+`limit`, and `save`; and the aggregate functions `count`, `sum`, `mean`, `min`,
+and `max`.
 
 The alpha does not yet implement Arrow IPC, Parquet, JSON Lines, stdin loading,
-stream sniffing, `mutate`, `join`, `union`, `distinct`, manifests, schema/plan
-subcommands, formatting, LSP, WASM, VS Code, or browser demo support. Those
-features remain part of the draft v0.1 target and are tracked as deferred work
-in `docs/V0_1_PLAN.md`.
+stream sniffing, configurable CSV dialect options, `mutate`, `join`, `union`,
+`distinct`, manifests, schema/plan subcommands, formatting, full LSP behavior,
+WASM entry points, VS Code, or browser demo support. Those features remain part
+of the draft v0.1 target and are tracked as deferred work in
+`docs/V0_1_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -2390,7 +2392,6 @@ pdl-syntax = { workspace = true }
 pdl-semantics = { workspace = true }
 pdl-driver = { workspace = true }
 pdl-data = { workspace = true }
-lsp-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -2634,7 +2635,8 @@ PDL SHOULD use `pdl-exec` for this crate because the language executes data pipe
 - references
 - rename
 - document symbols
-- diagnostics publication helpers
+- editor-neutral diagnostics helpers
+- conversion between byte spans and editor-neutral UTF-16 text ranges
 
 `pdl-lsp` owns:
 
@@ -2643,7 +2645,7 @@ PDL SHOULD use `pdl-exec` for this crate because the language executes data pipe
 - LSP transport
 - request routing
 - cancellation
-- conversion between byte spans and UTF-16 LSP ranges
+- conversion from editor-service ranges and diagnostics into LSP protocol types
 
 `pdl-cli` owns:
 

@@ -1,0 +1,21 @@
+[package]
+name = "pdl-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pdl"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+pdl-core = { workspace = true }
+pdl-data = { workspace = true, features = ["native-formats"] }
+pdl-driver = { workspace = true, features = ["native-formats"] }
+pdl-exec = { workspace = true, features = ["native-formats"] }
+pdl-lsp = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

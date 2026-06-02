@@ -1,0 +1,20 @@
+[package]
+name = "pdl-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dashmap = { workspace = true }
+pdl-core = { workspace = true }
+pdl-data = { workspace = true, features = ["native-formats"] }
+pdl-driver = { workspace = true, features = ["native-formats"] }
+pdl-editor-services = { workspace = true, features = ["native-formats"] }
+pdl-exec = { workspace = true, features = ["native-formats"] }
+pdl-semantics = { workspace = true, features = ["native-formats"] }
+pdl-syntax = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tower-lsp = { workspace = true }

@@ -1,0 +1,29 @@
+[package]
+name = "pdl-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pdl-core = { workspace = true }
+arrow-array = { workspace = true, optional = true }
+arrow-ipc = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+chrono = { workspace = true }
+csv = { workspace = true }
+indexmap = { workspace = true }
+parquet = { workspace = true, optional = true, features = ["arrow"] }
+polars = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = ["native-formats"]
+polars-engine = ["dep:polars"]
+native-formats = ["polars-engine", "arrow-ipc", "parquet"]
+arrow-ipc = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:bytes"]
+parquet = ["dep:parquet", "arrow-ipc"]

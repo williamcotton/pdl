@@ -1,0 +1,16 @@
+[package]
+name = "pdl-semantics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pdl-core = { workspace = true }
+pdl-data = { workspace = true }
+pdl-syntax = { workspace = true }
+
+[features]
+default = ["native-formats"]
+native-formats = ["pdl-data/native-formats"]

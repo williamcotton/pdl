@@ -1,0 +1,80 @@
+# PDL v0.1 Plan
+
+Status: Active
+Target version: 0.1.0
+
+## Release Thesis
+
+PDL v0.1 establishes the standalone command-line data preparation language:
+load deterministic tabular inputs, apply pure pipeline stages, and write stable
+artifacts or stdout streams that can feed downstream tools such as Algraf.
+
+The first alpha is intentionally narrow. It makes the language runnable with a
+CSV-backed in-memory engine while preserving the planned crate boundaries for
+parser, semantics, data, driver, execution, and CLI work.
+
+## Must
+
+### CLI Alpha
+
+Status: Landed in 0.1.0-alpha.1.
+
+Implement `pdl run`, `pdl check`, and `pdl version` with human diagnostics on
+stderr and data output kept clean on stdout.
+
+### CSV Files
+
+Status: Landed in 0.1.0-alpha.1.
+
+Load UTF-8 CSV files with a header row and write deterministic CSV files with
+stable column order, LF line endings, and header rows.
+
+### Core Pipeline Stages
+
+Status: Landed in 0.1.0-alpha.1.
+
+Implement deterministic in-memory execution for `load`, `filter`, `select`,
+`drop`, `rename`, `group_by`, `agg`, `sort`, `limit`, and `save`.
+
+### Aggregate Functions
+
+Status: Landed in 0.1.0-alpha.1.
+
+Implement `count`, `sum`, `mean`, `min`, and `max` in aggregate context.
+
+### Runnable Examples
+
+Status: Landed in 0.1.0-alpha.1.
+
+Ship small CSV examples that can be run in CI and by users from the repository
+root.
+
+## Should
+
+### Shared Crate Boundaries
+
+Status: Landed in 0.1.0-alpha.1.
+
+Keep the initial implementation split across the future runtime crates even
+where individual crates are still small.
+
+### Static Analysis
+
+Status: Landed in 0.1.0-alpha.1.
+
+`pdl check` should parse and analyze source without executing pipeline writes,
+including cheap CSV header-based schema checks.
+
+## Deferred
+
+- Arrow IPC stream input and output.
+- Arrow IPC file input and output.
+- Parquet input and output.
+- JSON Lines input and output.
+- Stdin loading and stream sniffing.
+- `mutate`, `join`, `union`, and `distinct`.
+- Manifests, `schema`, `plan`, `fmt`, `ast`, and `ir` subcommands.
+- LSP, VS Code, WASM, and browser demo behavior.
+- Full Polars-backed native dataframe execution beyond the alpha backend hook.
+- Full native `polars` feature set for Arrow, Parquet, JSON, lazy execution,
+  strings, temporal data, ranking, and regex.

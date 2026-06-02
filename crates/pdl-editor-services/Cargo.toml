@@ -1,0 +1,20 @@
+[package]
+name = "pdl-editor-services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pdl-core = { workspace = true }
+pdl-data = { workspace = true }
+pdl-driver = { workspace = true }
+pdl-semantics = { workspace = true }
+pdl-syntax = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = ["native-formats"]
+native-formats = ["pdl-data/native-formats", "pdl-driver/native-formats", "pdl-semantics/native-formats"]

@@ -1,0 +1,23 @@
+[package]
+name = "pdl-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+indexmap = { workspace = true }
+pdl-core = { workspace = true }
+pdl-data = { workspace = true }
+pdl-driver = { workspace = true }
+pdl-semantics = { workspace = true }
+pdl-syntax = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = ["native-formats"]
+native-formats = ["pdl-data/native-formats", "pdl-semantics/native-formats", "pdl-driver/native-formats"]

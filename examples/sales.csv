@@ -1,0 +1,8 @@
+region,status,amount,customer_age
+North,completed,120,34
+South,pending,75,41
+North,completed,80,29
+West,completed,200,37
+South,completed,50,45
+West,completed,150,31
+East,completed,90,28

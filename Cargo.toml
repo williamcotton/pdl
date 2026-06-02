@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pdl-core",
+    "crates/pdl-syntax",
+    "crates/pdl-data",
+    "crates/pdl-semantics",
+    "crates/pdl-driver",
+    "crates/pdl-exec",
+    "crates/pdl-editor-services",
+    "crates/pdl-lsp",
+    "crates/pdl-cli",
+    "crates/pdl-wasm",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/williamcotton/pdl"
+rust-version = "1.80"
+
+[workspace.dependencies]
+pdl-core = { path = "crates/pdl-core" }
+pdl-syntax = { path = "crates/pdl-syntax" }
+pdl-data = { path = "crates/pdl-data", default-features = false }
+pdl-semantics = { path = "crates/pdl-semantics", default-features = false }
+pdl-driver = { path = "crates/pdl-driver", default-features = false }
+pdl-exec = { path = "crates/pdl-exec", default-features = false }
+pdl-editor-services = { path = "crates/pdl-editor-services", default-features = false }
+pdl-lsp = { path = "crates/pdl-lsp" }
+
+arrow-array = "53"
+arrow-ipc = "53"
+arrow-schema = "53"
+bytes = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+dashmap = "6"
+indexmap = "2"
+insta = "1"
+logos = "0.14"
+lsp-types = "0.94.1"
+parquet = "53"
+polars = { version = "0.53", default-features = false, features = ["fmt"] }
+pretty_assertions = "1"
+rowan = "0.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }
+tower-lsp = "0.20"
