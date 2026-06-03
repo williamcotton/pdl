@@ -345,7 +345,7 @@ impl<T> Spanned<T> {
 
 pub fn parse(source: &str) -> ParseResult {
     let lexed = lex_source(source);
-    let mut parser = Parser::new(lexed.parse_tokens, lexed.diagnostics);
+    let mut parser = Parser::new(source, lexed.parse_tokens, lexed.diagnostics);
     let (program, diagnostics) = parser.parse_program();
     let syntax = SyntaxNode::new_root(build_cst(&lexed.tokens, &program, source.len()));
     ParseResult {
@@ -355,15 +355,17 @@ pub fn parse(source: &str) -> ParseResult {
     }
 }
 
-struct Parser {
+struct Parser<'a> {
+    source: &'a str,
     tokens: Vec<Token>,
     pos: usize,
     diagnostics: Vec<Diagnostic>,
 }
 
-impl Parser {
-    fn new(tokens: Vec<Token>, diagnostics: Vec<Diagnostic>) -> Self {
+impl<'a> Parser<'a> {
+    fn new(source: &'a str, tokens: Vec<Token>, diagnostics: Vec<Diagnostic>) -> Self {
         Self {
+            source,
             tokens,
             pos: 0,
             diagnostics,
@@ -390,6 +392,14 @@ impl Parser {
         } else {
             self.parse_pipeline()
         };
+        if main.is_some() && !self.at_eof() {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E0021,
+                "trailing tokens after pipeline",
+                self.current().span,
+            ));
+            self.recover_to_eof();
+        }
 
         (
             Program { bindings, main },
@@ -502,7 +512,34 @@ impl Parser {
     }
 
     fn parse_filter(&mut self, name_span: Span) -> Option<Stage> {
-        let expr = self.parse_expr(0)?;
+        let mut expr = self.parse_expr(0)?;
+        if self.current().kind == TokenKind::Equal
+            && self.current_is_on_same_line_after(expr.span())
+        {
+            let operator_span = self.advance().span;
+            self.diagnostics.push(Diagnostic::error(
+                codes::E0001,
+                "expected operator in filter expression",
+                operator_span,
+            ));
+            if let Some(rhs) = self.parse_expr(0) {
+                let span = expr.span().join(rhs.span());
+                expr = Expr::Binary {
+                    left: Box::new(expr),
+                    op: BinaryOp::Eq,
+                    right: Box::new(rhs),
+                    span,
+                };
+            }
+        }
+        if !self.at_stage_boundary() && self.current_is_on_same_line_after(expr.span()) {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E0001,
+                "expected operator in filter expression",
+                self.current().span,
+            ));
+            self.recover_to_pipe_or_eof();
+        }
         let span = name_span.join(expr.span());
         Some(Stage::Filter { expr, span })
     }
@@ -595,10 +632,15 @@ impl Parser {
                 .expect_rparen()
                 .map_or(function.span, |token| token.span);
             if !self.consume_ident("as") {
+                let diagnostic_span = if self.at_ident_followed_by_column_name() {
+                    self.advance().span
+                } else {
+                    close_span
+                };
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1213,
                     "aggregate items require `as`",
-                    close_span,
+                    diagnostic_span,
                 ));
             }
             let alias = self.expect_column_name()?;
@@ -622,37 +664,91 @@ impl Parser {
 
     fn parse_sort(&mut self, name_span: Span) -> Option<Stage> {
         let mut items = Vec::new();
-        loop {
+        let stage_end = loop {
             let column = self.expect_column_name()?;
-            let direction = if self.consume_ident("desc") {
-                SortDirection::Desc
-            } else {
-                self.consume_ident("asc");
-                SortDirection::Asc
-            };
-            let nulls = if self.consume_ident("nulls_first") {
-                Some(NullsOrder::First)
-            } else if self.consume_ident("nulls_last") {
-                Some(NullsOrder::Last)
-            } else {
-                None
-            };
+            let mut item_end = column.span.end;
+            let direction = self.parse_sort_direction(&mut item_end);
+            let nulls = self.parse_sort_nulls(&mut item_end);
+            if !self.at_sort_item_boundary() {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1214,
+                    "malformed sort item",
+                    self.current().span,
+                ));
+                while !self.at_sort_item_boundary() {
+                    item_end = self.advance().span.end;
+                }
+            }
             items.push(SortItem {
                 column,
                 direction,
                 nulls,
             });
             if !self.consume_comma() {
-                break;
+                break item_end;
             }
-        }
-        let end = items
-            .last()
-            .map_or(name_span.end, |item| item.column.span.end);
+        };
         Some(Stage::Sort {
             items,
-            span: Span::new(name_span.start, end),
+            span: Span::new(name_span.start, stage_end),
         })
+    }
+
+    fn parse_sort_direction(&mut self, item_end: &mut usize) -> SortDirection {
+        let token = self.current().clone();
+        match token.kind {
+            TokenKind::Ident(value) if value == "desc" => {
+                self.advance();
+                *item_end = token.span.end;
+                SortDirection::Desc
+            }
+            TokenKind::Ident(value) if value == "asc" => {
+                self.advance();
+                *item_end = token.span.end;
+                SortDirection::Asc
+            }
+            TokenKind::Ident(value) if value.starts_with("nulls") => SortDirection::Asc,
+            TokenKind::Ident(value) => {
+                self.advance();
+                *item_end = token.span.end;
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1210,
+                    format!("invalid sort direction `{value}`; expected `asc` or `desc`"),
+                    token.span,
+                ));
+                SortDirection::Asc
+            }
+            _ => SortDirection::Asc,
+        }
+    }
+
+    fn parse_sort_nulls(&mut self, item_end: &mut usize) -> Option<NullsOrder> {
+        let token = self.current().clone();
+        match token.kind {
+            TokenKind::Ident(value) if value == "nulls_first" => {
+                self.advance();
+                *item_end = token.span.end;
+                Some(NullsOrder::First)
+            }
+            TokenKind::Ident(value) if value == "nulls_last" => {
+                self.advance();
+                *item_end = token.span.end;
+                Some(NullsOrder::Last)
+            }
+            TokenKind::Ident(value) if value.starts_with("nulls") => {
+                self.advance();
+                *item_end = token.span.end;
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1210,
+                    format!(
+                        "invalid sort null order `{value}`; expected `nulls_first` or `nulls_last`"
+                    ),
+                    token.span,
+                ));
+                None
+            }
+            _ => None,
+        }
     }
 
     fn parse_limit(&mut self, name_span: Span) -> Option<Stage> {
@@ -1040,10 +1136,29 @@ impl Parser {
         self.current().kind == TokenKind::RParen
     }
 
+    fn at_ident_followed_by_column_name(&self) -> bool {
+        matches!(self.current().kind, TokenKind::Ident(_))
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| matches!(token.kind, TokenKind::String(_)))
+    }
+
     fn at_expr_boundary(&self) -> bool {
         matches!(
             self.current().kind,
             TokenKind::Comma | TokenKind::Pipe | TokenKind::RParen | TokenKind::Eof
+        )
+    }
+
+    fn at_stage_boundary(&self) -> bool {
+        matches!(self.current().kind, TokenKind::Pipe | TokenKind::Eof)
+    }
+
+    fn at_sort_item_boundary(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Comma | TokenKind::Pipe | TokenKind::Eof
         )
     }
 
@@ -1069,6 +1184,16 @@ impl Parser {
         while !matches!(self.current().kind, TokenKind::Pipe | TokenKind::Eof) {
             self.pos += 1;
         }
+    }
+
+    fn recover_to_eof(&mut self) {
+        while !self.at_eof() {
+            self.pos += 1;
+        }
+    }
+
+    fn current_is_on_same_line_after(&self, span: Span) -> bool {
+        !self.source[span.end..self.current().span.start].contains('\n')
     }
 
     fn consume_until_stage_boundary(&mut self, start: Span) -> Span {
@@ -1154,5 +1279,94 @@ mod tests {
     fn reports_unknown_stage() {
         let result = parse(r#"load "sales.csv" | nope "x""#);
         assert_eq!(result.diagnostics[0].code, "E1201");
+    }
+
+    #[test]
+    fn reports_invalid_sort_direction() {
+        let source = r#"load "sales.csv"
+  | filter "status" == "completed"
+  | group_by "region"
+  | agg sum("amount") as "total_revenue"
+  | sort "total_revenue" des"#;
+        let result = parse(source);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "E1210");
+        assert_eq!(
+            result.diagnostics[0].span.start,
+            source.find("des").expect("direction offset")
+        );
+    }
+
+    #[test]
+    fn reports_missing_filter_operator_and_recovers_to_next_stage() {
+        let source = r#"load "sales.csv"
+  | filter "status" "completed"
+  | sort "status" desc"#;
+        let result = parse(source);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "E0001");
+        assert_eq!(
+            result.diagnostics[0].span.start,
+            source.find("\"completed\"").expect("literal offset")
+        );
+        let main = result.program.main.expect("main pipeline");
+        assert_eq!(main.stages.len(), 2);
+    }
+
+    #[test]
+    fn reports_single_equal_filter_operator_and_recovers_comparison() {
+        let source = r#"load "sales.csv" | filter "staus" = "completed""#;
+        let result = parse(source);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "E0001");
+        assert_eq!(
+            result.diagnostics[0].span.start,
+            source.find('=').expect("operator offset")
+        );
+        let main = result.program.main.expect("main pipeline");
+        let Stage::Filter { expr, .. } = &main.stages[0] else {
+            panic!("filter stage");
+        };
+        assert!(matches!(
+            expr,
+            Expr::Binary {
+                op: BinaryOp::Eq,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reports_mistyped_aggregate_as_without_extra_alias_error() {
+        let source = r#"load "sales.csv" | agg sum("amount") a "total_revenue""#;
+        let result = parse(source);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "E1213");
+        assert_eq!(
+            result.diagnostics[0].span.start,
+            source.find(" a ").expect("mistyped as offset") + 1
+        );
+        let main = result.program.main.expect("main pipeline");
+        let Stage::Agg { items, .. } = &main.stages[0] else {
+            panic!("agg stage");
+        };
+        assert_eq!(items[0].alias.value, "total_revenue");
+    }
+
+    #[test]
+    fn reports_trailing_tokens_after_pipeline() {
+        let source = r#"load "sales.csv" "extra""#;
+        let result = parse(source);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "E0021");
+        assert_eq!(
+            result.diagnostics[0].span.start,
+            source.find("\"extra\"").expect("trailing offset")
+        );
     }
 }
