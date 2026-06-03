@@ -31,3 +31,93 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+  build-artifacts:
+    name: Build artifacts
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: |
+            demo/package-lock.json
+            editors/vscode/package-lock.json
+
+      - name: Set up Rust WASM target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown --toolchain stable
+
+      - name: Compute artifact version
+        id: artifact-version
+        run: |
+          set -euo pipefail
+
+          vscode_version="$(node -p "require('./editors/vscode/package.json').version")"
+          demo_version="$(node -p "require('./demo/package.json').version")"
+          wasm_pkg_id="$(cargo pkgid -p pdl-wasm)"
+          wasm_version="${wasm_pkg_id##*#}"
+
+          if [ "${vscode_version}" != "${wasm_version}" ]; then
+            echo "VS Code package version ${vscode_version} does not match pdl-wasm version ${wasm_version}" >&2
+            exit 1
+          fi
+
+          if [ "${demo_version}" != "${wasm_version}" ]; then
+            echo "Demo package version ${demo_version} does not match pdl-wasm version ${wasm_version}" >&2
+            exit 1
+          fi
+
+          echo "version=${wasm_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install VS Code extension dependencies
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: Package VS Code extension
+        working-directory: editors/vscode
+        run: npm run package
+
+      - name: Stage VSIX artifacts
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.artifact-version.outputs.version }}"
+          mkdir -p artifacts/vscode
+          cp "editors/vscode/pdl-vscode-${version}.vsix" "artifacts/vscode/pdl-vscode-${version}.vsix"
+          cp "editors/vscode/pdl-vscode-${version}.vsix" "artifacts/vscode/pdl-vscode-latest.vsix"
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdl-vscode-vsix
+          path: artifacts/vscode/
+          if-no-files-found: error
+
+      - name: Build WASM runtime
+        working-directory: demo
+        run: npm run build:wasm
+
+      - name: Stage WASM artifacts
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.artifact-version.outputs.version }}"
+          mkdir -p artifacts/wasm
+          cp "demo/public/wasm/pdl.wasm" "artifacts/wasm/pdl-wasm-${version}.wasm"
+          cp "demo/public/wasm/pdl.wasm" "artifacts/wasm/pdl-wasm-latest.wasm"
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdl-wasm
+          path: artifacts/wasm/
+          if-no-files-found: error

@@ -1,21 +1,21 @@
 # PDL Detailed Specification
 
-Status: Draft 0.20.0
+Status: Draft 0.21.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.20.0`.
+The current repository implementation is `0.21.0`.
 
 This release keeps the existing language, runtime, editor, LSP, WASM, native
 CLI introspection, formatter, browser demo, and window analytics slices stable
-after the v0.19 repository automation release. It improves the browser docs
-walkthroughs with input/output live examples and fixes parser recovery for a
-binding whose final stage is `sort` without an explicit direction before the
-main pipeline starts from that binding. It retains the recoverable syntax
-diagnostics for malformed filter, aggregate, sort, missing-pipe, and
-trailing-token cases. It implements the `pdl` CLI commands `run`, `check`,
+after the v0.20 browser documentation and parser recovery release. It adds CI
+build artifacts for the VS Code extension `.vsix` and standalone browser
+`pdl.wasm` runtime, with both versioned filenames and `latest` aliases. It
+retains the recoverable syntax diagnostics for malformed filter, aggregate,
+sort, missing-pipe, and trailing-token cases. It implements the `pdl` CLI
+commands `run`, `check`,
 `fmt`, `schema`, `plan`, `ast`, `ir`, `manifest`, `lsp`, and `version`; CSV,
 JSON Lines, Parquet, Arrow IPC file, and Arrow IPC stream file loading and
 saving in native execution; CSV and JSON Lines text stdout; binary Parquet,
@@ -55,13 +55,13 @@ input previews; editable host-supplied inputs; diagnostics, hover, completion,
 formatting, semantic tokens, symbols, definition/reference, and rename from the
 WASM editor-service ABI; CSV/JSON Lines stdout output from WASM execution; and
 GitHub Actions workflows for the Rust test suite and GitHub Pages demo
-deployment.
+deployment, plus CI upload artifacts for packaged editor and browser outputs.
 
-Version 0.20.0 does not yet implement configurable CSV dialect options, full
+Version 0.21.0 does not yet implement configurable CSV dialect options, full
 LSP code actions or cross-document navigation, Arrow IPC browser output,
 virtual browser output sinks, or full multi-output browser controls.
 Those features are tracked as deferred or planned work in successor release
-plans after `docs/V0_20_PLAN.md`.
+plans after `docs/V0_21_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -141,7 +141,7 @@ The keyword `table` means an ordered, typed, rectangular relation with named col
 The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
-over a partition and order of rows. Version 0.20.0 implements window
+over a partition and order of rows. Version 0.21.0 implements window
 expressions in `mutate` assignments.
 
 The keyword `column` means a named field with a static PDL type and nullability.
@@ -648,7 +648,7 @@ Assignments in one `mutate` stage are evaluated against the input schema in para
 
 Later stages see newly created columns.
 
-The version 0.20.0 implementation supports scalar row expressions and window
+The version 0.21.0 implementation supports scalar row expressions and window
 expressions in `mutate` assignments. New columns append in assignment order.
 Replacing an existing column preserves that column's position. Duplicate
 assignment targets in one stage MUST produce `E1207`.
@@ -843,7 +843,7 @@ Window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are reserved by the version 0.20.0 implementation.
+These words are reserved by the version 0.21.0 implementation.
 
 ### 6.6 Quoted Tokens
 
@@ -1151,7 +1151,7 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are implemented in version 0.20.0 for `mutate`
+Window expressions are implemented in version 0.21.0 for `mutate`
 assignments. Using a window expression outside `mutate`, nesting one window
 expression inside another, or using a window function without `over (...)` MUST
 produce `E1226`.
@@ -1359,7 +1359,7 @@ CSV loading MUST support:
 - comma delimiter by default
 
 Configurable CSV delimiters, quote characters, and null tokens remain deferred
-in version 0.20.0. A future release MAY promote them with source or CLI option
+in version 0.21.0. A future release MAY promote them with source or CLI option
 syntax, diagnostics, examples, and tests.
 
 CSV output MUST be deterministic.
@@ -1415,7 +1415,7 @@ Arrow streams begin with a continuation marker and schema message.
 
 The v0.15.0 native implementation supports `arrow-stream` for `--stdout-format`,
 `--stdin-format`, `load stdin`, `save stdout`, and explicit-format file
-loads/saves. The v0.20.0 WASM browser run ABI continues to reject binary stdout
+loads/saves. The v0.21.0 WASM browser run ABI continues to reject binary stdout
 formats because its current stdout field is UTF-8 text.
 
 The runtime SHOULD read and write record batches without unnecessary conversion.
@@ -1588,7 +1588,7 @@ New columns append in assignment order.
 
 Duplicate assignment targets in one `mutate` stage MUST produce `E1207`.
 
-The version 0.20.0 implementation supports scalar row expressions and window
+The version 0.21.0 implementation supports scalar row expressions and window
 expressions in `mutate`.
 
 ### 11.7 Group By
@@ -1769,7 +1769,7 @@ Aggregate expressions can reference aggregate functions and group keys.
 
 Window expressions are a row-expression form valid in `mutate` assignments.
 They do not introduce aggregate context, and they are not valid inside `agg`,
-`filter`, `sort`, or other non-`mutate` expression positions in version 0.20.0.
+`filter`, `sort`, or other non-`mutate` expression positions in version 0.21.0.
 
 Path context accepts string literals and future path functions.
 
@@ -1792,7 +1792,7 @@ Implementations SHOULD emit helpful diagnostics when a quoted token could plausi
 
 ### 12.3 Scalar Functions
 
-The version 0.20.0 implementation supports these scalar functions in row
+The version 0.21.0 implementation supports these scalar functions in row
 expressions:
 
 - `col(name)`: resolves a quoted value as a column reference.
@@ -1866,7 +1866,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions
 
-Window function syntax is implemented in version 0.20.0 for `mutate`
+Window function syntax is implemented in version 0.21.0 for `mutate`
 assignments.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
@@ -1933,7 +1933,7 @@ when `order_by` is present. Running calculations require an explicit frame:
 rows between unbounded_preceding and current_row
 ```
 
-Ranking, distribution, and offset functions ignore frames in version 0.20.0.
+Ranking, distribution, and offset functions ignore frames in version 0.21.0.
 
 For `rank` and `dense_rank`, peer rows are rows with equal `order_by` values.
 
@@ -1965,7 +1965,7 @@ Non-deterministic function not allowed MUST produce `E1405`.
 
 Divide by zero detected statically MUST produce `E1407`.
 
-Invalid window specifications MUST produce stable diagnostics; version 0.20.0
+Invalid window specifications MUST produce stable diagnostics; version 0.21.0
 uses `E1203`, `E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1401`, or
 `E1402` depending on the malformed clause.
 
@@ -2088,7 +2088,7 @@ It MUST exit non-zero on errors.
 
 `pdl schema file.pdl --json` prints deterministic JSON.
 
-The version 0.20.0 implementation emits column names, unknown logical types,
+The version 0.21.0 implementation emits column names, unknown logical types,
 nullability, stage traces, and diagnostics in JSON mode.
 
 `--binding name` MUST inspect the requested binding without changing normal
@@ -2104,7 +2104,7 @@ It SHOULD show source reads, transform stages, format decisions, and sinks.
 
 `pdl plan file.pdl --json` prints deterministic JSON.
 
-The version 0.20.0 implementation accepts `--stdin-format <format>` and
+The version 0.21.0 implementation accepts `--stdin-format <format>` and
 `--stdout-format <format>` so stream choices are reflected in the plan. It MUST
 NOT read stdin or execute transforms while planning.
 
@@ -2116,7 +2116,7 @@ NOT read stdin or execute transforms while planning.
 
 The formatter MUST preserve semantics.
 
-The version 0.20.0 implementation rewrites files in place in the stable
+The version 0.21.0 implementation rewrites files in place in the stable
 leading-pipe style when formatting is available. It keeps short item lists
 inline, expands long item-list stages, and expands top-level window assignments
 in `mutate`. It returns a non-zero exit code without writing when parse errors
@@ -2128,7 +2128,7 @@ are present or when comments make safe rewriting unavailable.
 
 It MUST NOT execute data pipelines or read table data.
 
-The version 0.20.0 implementation exits non-zero on parse errors. When parsing
+The version 0.21.0 implementation exits non-zero on parse errors. When parsing
 succeeds, its JSON payload includes the parsed program and parse diagnostics.
 
 ### 14.8 pdl ir
@@ -2137,7 +2137,7 @@ succeeds, its JSON payload includes the parsed program and parse diagnostics.
 
 It MUST NOT execute data pipelines or write output artifacts.
 
-The version 0.20.0 implementation exits non-zero when syntax, schema, or
+The version 0.21.0 implementation exits non-zero when syntax, schema, or
 semantic errors prevent IR construction.
 
 ### 14.9 pdl manifest
@@ -2146,7 +2146,7 @@ semantic errors prevent IR construction.
 
 It MUST NOT execute transforms or write output artifacts.
 
-The version 0.20.0 implementation accepts `--stdin-format <format>` and
+The version 0.21.0 implementation accepts `--stdin-format <format>` and
 `--stdout-format <format>`, includes source, driver, stream, execution-plan,
 final-schema, diagnostics, and Arrow-stdout stream hint fields, and exits
 non-zero when planning fails.
@@ -2242,7 +2242,7 @@ Strict mode MUST fail on row-level parse errors.
 
 The runtime SHOULD emit a run manifest when requested.
 
-The version 0.20.0 native CLI implements `pdl manifest file.pdl` as a
+The version 0.21.0 native CLI implements `pdl manifest file.pdl` as a
 deterministic dry-run manifest inspection command. It plans but does not execute
 the pipeline, and it does not write output artifacts.
 
@@ -2353,7 +2353,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.20.0` LSP implementation provides diagnostics,
+The current `0.21.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
@@ -2557,16 +2557,16 @@ The v0.15 WASM implementation MUST expose packed JSON calls for:
 
 The browser run request's host file map is format-neutral and MAY contain
 multiple files: keys are logical file paths and values are host-supplied file
-contents. Version 0.20.0 requires CSV and JSON Lines host file contents to
+contents. Version 0.21.0 requires CSV and JSON Lines host file contents to
 execute successfully through this JSON ABI because host files are supplied as
 UTF-8 strings. Binary host-file contents remain deferred until the ABI accepts
 byte payloads. The ABI MUST NOT special-case CSV at the TypeScript editor layer.
 
-`pdl_run_json` in version 0.20.0 MUST support CSV and JSON Lines stdout for the
+`pdl_run_json` in version 0.21.0 MUST support CSV and JSON Lines stdout for the
 resulting table. Virtual path-backed output sinks, Arrow IPC byte output, and
 binary dataframe decoders remain deferred until a later plan promotes them.
 
-For hover requests, `pdl_editor_service_json` in version 0.20.0 MUST use the
+For hover requests, `pdl_editor_service_json` in version 0.21.0 MUST use the
 same host file map through in-memory driver I/O so Monaco/WASM hover previews
 match native LSP hover behavior for text-backed paths and columns.
 
@@ -2668,7 +2668,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.20.0"
+version = "0.21.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3001,6 +3001,13 @@ workspace test suite.
 When the browser demo is shipped, the reference repository SHOULD include a
 GitHub Pages workflow that builds the WASM-backed Vite demo with a host-aware
 base path and deploys the generated static site artifact.
+
+The CI workflow SHOULD publish distributable build artifacts for shipped editor
+and browser adapter outputs. When the VS Code client and WASM runtime are
+shipped, CI SHOULD package the VS Code extension `.vsix` and the standalone
+`pdl.wasm` runtime, verify that their package versions match the Rust workspace
+release version, and upload one VSIX artifact and one WASM artifact. Each
+uploaded artifact SHOULD contain both a versioned file and a `latest` alias.
 
 Repository automation MUST keep stdout data stream requirements intact. CI logs
 and deployment logs are host concerns and do not alter PDL runtime stdout
@@ -4225,7 +4232,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.20.0.
+PDL source does not require an explicit version declaration in draft 0.21.0.
 
 The implementation SHOULD report supported language version.
 
