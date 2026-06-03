@@ -5,9 +5,12 @@ pub mod frame;
 pub mod schema;
 pub mod value;
 
-pub use csv::{read_csv, read_csv_schema, write_csv, write_csv_to_vec};
+pub use csv::{
+    read_csv, read_csv_from_bytes, read_csv_schema, read_csv_schema_from_bytes, write_csv,
+    write_csv_to_vec,
+};
 pub use engine::native_engine_name;
-pub use format::{format_number, DataFormat};
+pub use format::{format_number, read_schema_from_bytes, read_table_from_bytes, DataFormat};
 pub use frame::{compare_values, NullsOrder, Row, SortDirection, SortSpec, Table};
 pub use schema::{ColumnSchema, LogicalType, TableSchema};
 pub use value::Value;

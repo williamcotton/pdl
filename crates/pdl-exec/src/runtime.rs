@@ -1,9 +1,9 @@
 use pdl_core::{codes, Diagnostic, Span};
 use pdl_data::{
-    compare_values, read_csv, NullsOrder as DataNullsOrder, Row,
+    compare_values, read_table_from_bytes, DataFormat, NullsOrder as DataNullsOrder, Row,
     SortDirection as DataSortDirection, SortSpec, Table, Value,
 };
-use pdl_driver::{PreparedProgram, SinkDescriptor, SourceDescriptor};
+use pdl_driver::{DriverIo, OsDriverIo, PreparedProgram, SinkDescriptor, SourceDescriptor};
 use pdl_semantics::{
     AggItemIr, BinaryOpIr, ExprIr, NullsOrderIr, PipelineIr, PipelineStartIr, SortDirectionIr,
     StageIr, UnaryOpIr,
@@ -27,6 +27,15 @@ pub struct RunResult {
 }
 
 pub fn run_prepared(prepared: &PreparedProgram, options: RunOptions) -> RunResult {
+    let io = OsDriverIo;
+    run_prepared_with_io(prepared, options, &io)
+}
+
+pub fn run_prepared_with_io(
+    prepared: &PreparedProgram,
+    options: RunOptions,
+    io: &dyn DriverIo,
+) -> RunResult {
     let plan = match plan_prepared(
         prepared,
         PlanningOptions {
@@ -49,6 +58,7 @@ pub fn run_prepared(prepared: &PreparedProgram, options: RunOptions) -> RunResul
         cache: BTreeMap::new(),
         dry_run: plan.dry_run,
         stdout: None,
+        io,
     };
 
     let Some(ir) = prepared.analysis.ir.as_ref() else {
@@ -109,6 +119,7 @@ struct Runtime<'a> {
     cache: BTreeMap<String, Table>,
     dry_run: bool,
     stdout: Option<Vec<u8>>,
+    io: &'a dyn DriverIo,
 }
 
 impl Runtime<'_> {
@@ -189,7 +200,7 @@ impl Runtime<'_> {
                 StageIr::Unsupported { name, span } => {
                     return Err(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{name}` is deferred in 0.6.0"),
+                        format!("stage `{name}` is deferred in 0.7.0"),
                         *span,
                     ));
                 }
@@ -230,7 +241,7 @@ impl Runtime<'_> {
             if format != "csv" {
                 return Err(Diagnostic::error(
                     codes::E1215,
-                    format!("format `{format}` is not supported in 0.6.0"),
+                    format!("format `{format}` is not supported in 0.7.0"),
                     stage_span,
                 ));
             }
@@ -242,11 +253,21 @@ impl Runtime<'_> {
                 stage_span,
             ));
         };
+        let format = DataFormat::from_name(&input.format.effective_name()).ok_or_else(|| {
+            Diagnostic::error(
+                codes::E1216,
+                "could not infer supported format for load",
+                input.span,
+            )
+        })?;
         match &input.source {
-            SourceDescriptor::Path { resolved_path, .. } => read_csv(resolved_path),
+            SourceDescriptor::Path { resolved_path, .. } => {
+                let bytes = self.io.read_path_bytes(resolved_path)?;
+                read_table_from_bytes(resolved_path, format, &bytes)
+            }
             SourceDescriptor::Stdin => Err(Diagnostic::error(
                 codes::E1211,
-                "stdin loading is deferred in 0.6.0",
+                "stdin loading is deferred in 0.7.0",
                 input.span,
             )),
         }
@@ -265,7 +286,7 @@ impl Runtime<'_> {
             if format != "csv" {
                 return Err(Diagnostic::error(
                     codes::E1705,
-                    format!("output format `{format}` is not supported in 0.6.0"),
+                    format!("output format `{format}` is not supported in 0.7.0"),
                     stage_span,
                 ));
             }

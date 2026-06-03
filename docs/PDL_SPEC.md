@@ -1,16 +1,15 @@
 # PDL Detailed Specification
 
-Status: Draft 0.6.0
+Status: Draft 0.7.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.6.0`.
+The current repository implementation is `0.7.0`.
 
 This release keeps the existing CSV-backed language and runtime slice stable
-while hardening durable implementation boundaries and restoring schema-aware
-editor, LSP, and WASM diagnostics. It implements the `pdl`
+while adding the first browser demo surface over the WASM boundary. It implements the `pdl`
 CLI commands `run`, `check`, `lsp`, and `version`; CSV file loading with header
 rows; CSV file and stdout output; deterministic in-memory execution for `load`,
 `filter`, `select`, `drop`, `rename`, `group_by`, `agg`, `sort`, `limit`, and
@@ -27,14 +26,19 @@ execution output emission separated from planning, crate-boundary drift tests,
 semantic tokens, document symbols, and same-document binding
 definition/reference/rename; and it ships a thin VS Code client under
 `editors/vscode/` plus browser-safe WASM ABI helpers that use in-memory driver
-boundaries, including host-schema-backed checks for embedded editors.
+boundaries, including host-schema-backed checks for embedded editors and a
+bounded host-file run facade for browser execution. It also ships a minimal
+React/Vite/Monaco demo under `demo/` with one PDL editor, one editable
+host-supplied CSV input, diagnostics from the WASM editor-service ABI, and CSV
+stdout output from WASM execution.
 
-Version 0.6.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
+Version 0.7.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
 loading, stream sniffing, configurable CSV dialect options, `mutate`, `join`,
 `union`, `distinct`, window expressions, schema/plan subcommands, CLI
-formatting, full LSP code actions or cross-document navigation, or browser demo
-support. Those features are tracked as deferred or planned work in successor
-release plans after `docs/V0_6_PLAN.md`.
+formatting, full LSP code actions or cross-document navigation, Arrow IPC
+browser output, virtual browser output sinks, or multi-dataset browser controls.
+Those features are tracked as deferred or planned work in successor release
+plans after `docs/V0_7_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -120,7 +124,7 @@ The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
 over a partition and order of rows. Window expressions are planned but not
-implemented in version 0.6.0.
+implemented in version 0.7.0.
 
 The keyword `column` means a named field with a static PDL type and nullability.
 
@@ -826,7 +830,7 @@ Planned window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are not reserved by the version 0.6.0 implementation until window
+These words are not reserved by the version 0.7.0 implementation until window
 syntax is implemented.
 
 ### 6.6 Quoted Tokens
@@ -1101,7 +1105,7 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are planned syntax and are not implemented in version 0.6.0.
+Window expressions are planned syntax and are not implemented in version 0.7.0.
 
 Until implemented, parsers MAY recover with `E1211` or ordinary parse diagnostics
 when they encounter `over`.
@@ -1737,7 +1741,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions (Planned)
 
-Window function syntax is planned and not implemented in version 0.6.0.
+Window function syntax is planned and not implemented in version 0.7.0.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
 
@@ -2146,7 +2150,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.6.0` LSP implementation provides diagnostics,
+The current `0.7.0` LSP implementation provides diagnostics,
 completion, hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
@@ -2300,6 +2304,24 @@ Schema-aware WASM check calls MUST use host-supplied in-memory schemas or files
 through the shared driver/editor-service path. They MUST NOT read arbitrary host
 files or reimplement semantic validation in JavaScript or TypeScript.
 
+The v0.7 WASM implementation MUST expose packed JSON calls for:
+
+- `pdl_run_json`, which accepts PDL source, a host-supplied file map, a synthetic
+  program path, and a requested stdout format, then prepares and executes through
+  shared driver and exec code using in-memory driver IO
+- `pdl_editor_service_json`, which accepts PDL source, the same host file map, a
+  synthetic program path, and an editor-service request, then returns editor
+  diagnostics plus the requested editor-service result
+
+The browser run request's host file map is format-neutral: keys are logical file
+paths and values are host-supplied file contents. Version 0.7.0 only requires
+CSV file contents to execute successfully because CSV is the only implemented
+data decoder. The ABI MUST NOT special-case CSV at the TypeScript editor layer.
+
+`pdl_run_json` in version 0.7.0 MUST support CSV stdout for the resulting table.
+Virtual path-backed output sinks, Arrow IPC byte output, and non-CSV dataframe
+decoders remain deferred until a later plan promotes them.
+
 Editor-service requests SHOULD use LSP-shaped positions and results.
 
 The ABI boundary uses UTF-16 positions.
@@ -2315,6 +2337,11 @@ The demo host SHOULD use Monaco.
 The demo host MUST call the WASM editor-service ABI for language features.
 
 The demo host MUST NOT implement a separate PDL parser or analyzer.
+
+The v0.7 demo host MUST be a single-page React/Vite workbench with one PDL
+Monaco editor, one host-supplied dataframe input display, one dataframe output
+display, and diagnostics. It MAY use CSV text controls as the initial dataframe
+display because CSV is the only implemented v0.7 data decoder.
 
 The demo MAY show generated Arrow, CSV, schema, manifest, and Algraf handoff examples.
 
@@ -2406,7 +2433,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3390,7 +3417,7 @@ support:
 
 Descriptors record explicit format names, inferred path formats, and unresolved
 sniffing decisions. Real Arrow IPC parsing/writing, Parquet loading, JSON Lines
-loading, and stdin sniffing remain deferred past v0.6.0 unless a future plan
+loading, and stdin sniffing remain deferred past v0.7.0 unless a future plan
 promotes them with spec, examples, and tests.
 
 #### 19.7.8 Schema Cache And Preview Boundary
@@ -3946,7 +3973,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.6.0.
+PDL source does not require an explicit version declaration in draft 0.7.0.
 
 The implementation SHOULD report supported language version.
 

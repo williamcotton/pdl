@@ -6,4 +6,4 @@ pub mod runtime;
 
 pub use output::{emit_csv_stdout, write_csv_output};
 pub use planning::{plan_prepared, ExecutionPlan, ExecutionPlanStep};
-pub use runtime::{run_prepared, RunOptions, RunResult};
+pub use runtime::{run_prepared, run_prepared_with_io, RunOptions, RunResult};

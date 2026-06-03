@@ -1,5 +1,5 @@
 use pdl_core::{codes, Diagnostic, Span};
-use pdl_data::read_csv_schema;
+use pdl_data::{read_csv_schema, read_schema_from_bytes, DataFormat};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
@@ -122,13 +122,17 @@ impl DriverIo for InMemoryDriverIo {
     }
 
     fn read_csv_schema(&self, path: &Path) -> Result<Vec<String>, Diagnostic> {
-        self.schemas.get(path).cloned().ok_or_else(|| {
-            Diagnostic::error(
-                codes::E1818,
-                format!("in-memory schema for `{}` was not provided", path.display()),
-                Span::zero(),
-            )
-        })
+        if let Some(schema) = self.schemas.get(path) {
+            return Ok(schema.clone());
+        }
+        if let Some(bytes) = self.files.get(path) {
+            return read_schema_from_bytes(path, DataFormat::Csv, bytes);
+        }
+        Err(Diagnostic::error(
+            codes::E1818,
+            format!("in-memory schema for `{}` was not provided", path.display()),
+            Span::zero(),
+        ))
     }
 
     fn read_path_bytes(&self, path: &Path) -> Result<Vec<u8>, Diagnostic> {

@@ -1,4 +1,8 @@
+use pdl_core::{codes, Diagnostic, Span};
 use std::path::Path;
+
+use crate::csv::{read_csv_from_bytes, read_csv_schema_from_bytes};
+use crate::frame::Table;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DataFormat {
@@ -44,6 +48,39 @@ impl DataFormat {
             _ => None,
         }
     }
+}
+
+pub fn read_schema_from_bytes(
+    path: &Path,
+    format: DataFormat,
+    bytes: &[u8],
+) -> Result<Vec<String>, Diagnostic> {
+    match format {
+        DataFormat::Csv => read_csv_schema_from_bytes(path, bytes),
+        _ => Err(unsupported_input_format(format)),
+    }
+}
+
+pub fn read_table_from_bytes(
+    path: &Path,
+    format: DataFormat,
+    bytes: &[u8],
+) -> Result<Table, Diagnostic> {
+    match format {
+        DataFormat::Csv => read_csv_from_bytes(path, bytes),
+        _ => Err(unsupported_input_format(format)),
+    }
+}
+
+fn unsupported_input_format(format: DataFormat) -> Diagnostic {
+    Diagnostic::error(
+        codes::E1215,
+        format!(
+            "format `{}` is not supported by the current data engine",
+            format.canonical_name()
+        ),
+        Span::zero(),
+    )
 }
 
 pub fn format_number(value: f64) -> String {

@@ -3,3 +3,6 @@
 /editors/vscode/node_modules/
 /editors/vscode/dist/
 /editors/vscode/*.vsix
+/demo/node_modules/
+/demo/dist/
+/demo/public/wasm/

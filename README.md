@@ -2,10 +2,11 @@
 
 PDL is a Unix-pipeline-style tabular data transformation DSL.
 
-The current `0.6.0` implementation supports a CSV-backed first slice with
+The current `0.7.0` implementation supports a CSV-backed first slice with
 registered lettered diagnostics, load-free driver data plans, phase-tagged
 preparation reports, semantic-IR execution planning, schema-aware editor/LSP/WASM
-diagnostics, and the v0.6 maintenance boundary checks:
+diagnostics, a minimal React/Vite/Monaco browser demo, and WASM in-memory CSV
+execution:
 
 ```bash
 cargo run -p pdl-cli -- run examples/top_regions.pdl
@@ -28,4 +29,11 @@ cargo run -p pdl-cli -- lsp
 cd editors/vscode
 npm install
 npm run package
+```
+
+Try the browser demo from `demo/`:
+
+```bash
+npm install
+npm run dev
 ```

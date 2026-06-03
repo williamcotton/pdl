@@ -1,6 +1,6 @@
 use pdl_core::{codes, Diagnostic, Span};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::Path;
 
 use crate::{Row, Table, Value};
@@ -16,9 +16,17 @@ pub fn read_csv_schema(path: &Path) -> Result<Vec<String>, Diagnostic> {
             Span::zero(),
         )
     })?;
+    read_csv_schema_from_reader(path, BufReader::new(file))
+}
+
+pub fn read_csv_schema_from_bytes(path: &Path, bytes: &[u8]) -> Result<Vec<String>, Diagnostic> {
+    read_csv_schema_from_reader(path, Cursor::new(bytes))
+}
+
+fn read_csv_schema_from_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<String>, Diagnostic> {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
-        .from_reader(BufReader::new(file));
+        .from_reader(reader);
     let headers = reader.headers().map_err(|error| {
         Diagnostic::error(
             codes::E1804,
@@ -40,9 +48,17 @@ pub fn read_csv(path: &Path) -> Result<Table, Diagnostic> {
             Span::zero(),
         )
     })?;
+    read_csv_from_reader(path, BufReader::new(file))
+}
+
+pub fn read_csv_from_bytes(path: &Path, bytes: &[u8]) -> Result<Table, Diagnostic> {
+    read_csv_from_reader(path, Cursor::new(bytes))
+}
+
+fn read_csv_from_reader<R: Read>(path: &Path, reader: R) -> Result<Table, Diagnostic> {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
-        .from_reader(BufReader::new(file));
+        .from_reader(reader);
     let headers = reader.headers().map_err(|error| {
         Diagnostic::error(
             codes::E1804,
