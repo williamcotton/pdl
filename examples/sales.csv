@@ -1,8 +1,8 @@
-region,status,amount,customer_age
-North,completed,120,34
-South,pending,75,41
-North,completed,80,29
-West,completed,200,37
-South,completed,50,45
-West,completed,150,31
-East,completed,90,28
+region,status,amount,customer_age,customer_id
+North,completed,120,34,C001
+South,pending,75,41,C002
+North,completed,80,29,C001
+West,completed,200,37,C003
+South,completed,50,45,C004
+West,completed,150,31,C003
+East,completed,90,28,C005

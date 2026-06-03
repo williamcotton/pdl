@@ -148,6 +148,8 @@ impl CstBuilder<'_> {
                     }
                 }
                 Stage::Drop { .. }
+                | Stage::Join { .. }
+                | Stage::Union { .. }
                 | Stage::Distinct { .. }
                 | Stage::GroupBy { .. }
                 | Stage::Limit { .. }

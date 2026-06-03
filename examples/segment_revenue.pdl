@@ -1,0 +1,10 @@
+let customers =
+  load "customers.csv"
+  | select "customer_id", "segment"
+
+load "sales.csv"
+  | filter "status" == "completed"
+  | join customers on "customer_id" kind left
+  | group_by "segment"
+  | agg sum("amount") as "revenue", count() as "orders"
+  | sort "revenue" desc

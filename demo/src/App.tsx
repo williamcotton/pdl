@@ -4,22 +4,35 @@ import { AlertCircle, CheckCircle2, Code2, Database, LoaderCircle, Play, Table2 
 import { PdlEditor } from "./PdlEditor";
 import { loadPdlRuntime, type PdlEditorDiagnostic, type PdlRunResult, type PdlRuntime } from "./pdlWasm";
 
-const DEFAULT_SOURCE = `load "sales.csv"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age", count() as "orders"
-  | sort "total_revenue" desc
-  | limit 3`;
+const DEFAULT_SOURCE = `let customers =
+  load "customers.csv"
+  | select "customer_id", "segment"
 
-const DEFAULT_CSV = `region,status,amount,customer_age
-North,completed,120,34
-South,pending,75,41
-North,completed,80,29
-West,completed,200,37
-South,completed,50,45
-West,completed,150,31
-East,completed,90,28
-`;
+load "sales.csv"
+  | filter "status" == "completed"
+  | join customers on "customer_id" kind left
+  | group_by "segment"
+  | agg sum("amount") as "revenue", count() as "orders"
+  | sort "revenue" desc`;
+
+const DEFAULT_FILES: Record<string, string> = {
+  "sales.csv": `sale_id,customer_id,status,amount
+S1,C001,completed,120
+S2,C002,pending,75
+S3,C001,completed,80
+S4,C003,completed,200
+S5,C004,completed,50
+S6,C003,completed,150
+S7,C005,completed,90
+`,
+  "customers.csv": `customer_id,segment
+C001,Enterprise
+C002,SMB
+C003,Enterprise
+C004,Consumer
+C005,SMB
+`,
+};
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -28,14 +41,15 @@ export function App(): React.ReactElement {
   const [runtimeState, setRuntimeState] = React.useState<LoadState>("loading");
   const [runtimeError, setRuntimeError] = React.useState<string | null>(null);
   const [source, setSource] = React.useState(DEFAULT_SOURCE);
-  const [csvInput, setCsvInput] = React.useState(DEFAULT_CSV);
+  const [files, setFiles] = React.useState<Record<string, string>>(DEFAULT_FILES);
+  const [activeFile, setActiveFile] = React.useState("sales.csv");
   const [diagnostics, setDiagnostics] = React.useState<PdlEditorDiagnostic[]>([]);
   const [runResult, setRunResult] = React.useState<PdlRunResult | null>(null);
   const [running, setRunning] = React.useState(false);
 
-  const files = React.useMemo(() => ({ "sales.csv": csvInput }), [csvInput]);
-  const inputStats = React.useMemo(() => csvStats(csvInput), [csvInput]);
+  const inputStats = React.useMemo(() => csvStats(files[activeFile] ?? ""), [activeFile, files]);
   const outputStats = React.useMemo(() => csvStats(runResult?.stdout ?? ""), [runResult?.stdout]);
+  const fileNames = React.useMemo(() => Object.keys(files), [files]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -89,6 +103,7 @@ export function App(): React.ReactElement {
   const runtimeDiagnostics = runResult?.diagnostics ?? [];
   const hasDiagnostics = diagnostics.length > 0 || runtimeDiagnostics.length > 0 || Boolean(combinedError);
   const output = runResult?.stdout ?? "";
+  const activeFileText = files[activeFile] ?? "";
 
   return (
     <div className="app-shell">
@@ -126,15 +141,34 @@ export function App(): React.ReactElement {
         <section className="pane data-pane">
           <PaneHeader
             icon={<Database size={17} aria-hidden="true" />}
-            title="sales.csv"
+            title={activeFile}
             detail={inputStats}
           />
+          <div className="file-tabs" role="tablist" aria-label="Host CSV files">
+            {fileNames.map((name) => (
+              <button
+                aria-selected={name === activeFile}
+                className={`file-tab ${name === activeFile ? "file-tab-active" : ""}`}
+                key={name}
+                onClick={() => setActiveFile(name)}
+                role="tab"
+                type="button"
+              >
+                {name}
+              </button>
+            ))}
+          </div>
           <textarea
             aria-label="CSV input"
             className="csv-textarea"
             spellCheck={false}
-            value={csvInput}
-            onChange={(event) => setCsvInput(event.target.value)}
+            value={activeFileText}
+            onChange={(event) =>
+              setFiles((current) => ({
+                ...current,
+                [activeFile]: event.target.value,
+              }))
+            }
           />
         </section>
 

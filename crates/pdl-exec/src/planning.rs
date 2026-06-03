@@ -1,6 +1,7 @@
 use pdl_core::{codes, has_errors, Diagnostic, Span};
 use pdl_driver::{PreparedProgram, SinkDescriptor, SourceDescriptor};
-use pdl_semantics::{PipelineStartIr, StageIr};
+use pdl_semantics::{PipelineIr, PipelineStartIr, ProgramIr, StageIr};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlanningOptions {
@@ -37,7 +38,7 @@ pub fn plan_prepared(
         if format != "csv" {
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
-                format!("stdout format `{format}` is not supported in 0.11.0"),
+                format!("stdout format `{format}` is not supported in 0.12.0"),
                 Span::zero(),
             ));
             return Err(diagnostics);
@@ -63,52 +64,12 @@ pub fn plan_prepared(
     };
 
     let mut steps = Vec::new();
-    match &main.start {
-        PipelineStartIr::Load { span, .. } => {
-            let Some(input) = prepared.driver_plan.input_for_stage_span(*span) else {
-                diagnostics.push(Diagnostic::error(
-                    codes::E1505,
-                    "driver source facts are unavailable for planning",
-                    *span,
-                ));
-                return Err(diagnostics);
-            };
-            steps.push(ExecutionPlanStep::Load {
-                source: match &input.source {
-                    SourceDescriptor::Path { logical_path, .. } => logical_path.clone(),
-                    SourceDescriptor::Stdin => "stdin".to_string(),
-                },
-                format: input.format.effective_name(),
-            });
-        }
-        PipelineStartIr::Binding { name, .. } => {
-            steps.push(ExecutionPlanStep::Binding { name: name.clone() })
-        }
-    }
-
-    for stage in &main.stages {
-        match stage {
-            StageIr::Save { span, .. } => {
-                let Some(sink) = prepared.driver_plan.sink_for_stage_span(*span) else {
-                    diagnostics.push(Diagnostic::error(
-                        codes::E1505,
-                        "driver sink facts are unavailable for planning",
-                        *span,
-                    ));
-                    return Err(diagnostics);
-                };
-                steps.push(ExecutionPlanStep::Save {
-                    sink: match &sink.sink {
-                        SinkDescriptor::Path { logical_path, .. } => logical_path.clone(),
-                        SinkDescriptor::Stdout => "stdout".to_string(),
-                    },
-                    format: sink.format.effective_name(),
-                });
-            }
-            _ => steps.push(ExecutionPlanStep::Transform {
-                stage: stage_name(stage).to_string(),
-            }),
-        }
+    let mut planned_bindings = BTreeSet::new();
+    if let Err(diagnostic) =
+        append_pipeline_steps(prepared, ir, main, &mut planned_bindings, &mut steps)
+    {
+        diagnostics.push(diagnostic);
+        return Err(diagnostics);
     }
 
     if let Some(format) = &options.stdout_format {
@@ -124,6 +85,111 @@ pub fn plan_prepared(
     })
 }
 
+fn append_pipeline_steps(
+    prepared: &PreparedProgram,
+    ir: &ProgramIr,
+    pipeline: &PipelineIr,
+    planned_bindings: &mut BTreeSet<String>,
+    steps: &mut Vec<ExecutionPlanStep>,
+) -> Result<(), Diagnostic> {
+    match &pipeline.start {
+        PipelineStartIr::Load { span, .. } => steps.push(load_step(prepared, *span)?),
+        PipelineStartIr::Binding { name, span } => {
+            append_binding_steps(prepared, ir, name, *span, planned_bindings, steps)?;
+        }
+    }
+
+    for stage in &pipeline.stages {
+        match stage {
+            StageIr::Join {
+                source,
+                source_span,
+                ..
+            }
+            | StageIr::Union {
+                source,
+                source_span,
+                ..
+            } => {
+                append_binding_steps(prepared, ir, source, *source_span, planned_bindings, steps)?;
+                steps.push(ExecutionPlanStep::Transform {
+                    stage: stage_name(stage).to_string(),
+                });
+            }
+            StageIr::Save { span, .. } => steps.push(save_step(prepared, *span)?),
+            _ => steps.push(ExecutionPlanStep::Transform {
+                stage: stage_name(stage).to_string(),
+            }),
+        }
+    }
+    Ok(())
+}
+
+fn append_binding_steps(
+    prepared: &PreparedProgram,
+    ir: &ProgramIr,
+    name: &str,
+    span: Span,
+    planned_bindings: &mut BTreeSet<String>,
+    steps: &mut Vec<ExecutionPlanStep>,
+) -> Result<(), Diagnostic> {
+    if !planned_bindings.insert(name.to_string()) {
+        return Ok(());
+    }
+    let binding = ir
+        .bindings
+        .iter()
+        .find(|binding| binding.name == name)
+        .ok_or_else(|| {
+            Diagnostic::error(codes::E1007, format!("unknown binding `{name}`"), span)
+        })?;
+    append_pipeline_steps(prepared, ir, &binding.pipeline, planned_bindings, steps)?;
+    steps.push(ExecutionPlanStep::Binding {
+        name: name.to_string(),
+    });
+    Ok(())
+}
+
+fn load_step(prepared: &PreparedProgram, span: Span) -> Result<ExecutionPlanStep, Diagnostic> {
+    let input = prepared
+        .driver_plan
+        .input_for_stage_span(span)
+        .ok_or_else(|| {
+            Diagnostic::error(
+                codes::E1505,
+                "driver source facts are unavailable for planning",
+                span,
+            )
+        })?;
+    Ok(ExecutionPlanStep::Load {
+        source: match &input.source {
+            SourceDescriptor::Path { logical_path, .. } => logical_path.clone(),
+            SourceDescriptor::Stdin => "stdin".to_string(),
+        },
+        format: input.format.effective_name(),
+    })
+}
+
+fn save_step(prepared: &PreparedProgram, span: Span) -> Result<ExecutionPlanStep, Diagnostic> {
+    let sink = prepared
+        .driver_plan
+        .sink_for_stage_span(span)
+        .ok_or_else(|| {
+            Diagnostic::error(
+                codes::E1505,
+                "driver sink facts are unavailable for planning",
+                span,
+            )
+        })?;
+    Ok(ExecutionPlanStep::Save {
+        sink: match &sink.sink {
+            SinkDescriptor::Path { logical_path, .. } => logical_path.clone(),
+            SinkDescriptor::Stdout => "stdout".to_string(),
+        },
+        format: sink.format.effective_name(),
+    })
+}
+
 fn stage_name(stage: &StageIr) -> &'static str {
     match stage {
         StageIr::Filter { .. } => "filter",
@@ -135,6 +201,8 @@ fn stage_name(stage: &StageIr) -> &'static str {
         StageIr::Agg { .. } => "agg",
         StageIr::Sort { .. } => "sort",
         StageIr::Limit { .. } => "limit",
+        StageIr::Join { .. } => "join",
+        StageIr::Union { .. } => "union",
         StageIr::Distinct { .. } => "distinct",
         StageIr::Save { .. } => "save",
         StageIr::Unsupported { name, .. } => match name.as_str() {
@@ -180,6 +248,58 @@ mod tests {
                 },
                 ExecutionPlanStep::Transform {
                     stage: "select".to_string(),
+                },
+                ExecutionPlanStep::Stdout {
+                    format: "csv".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn planning_records_binding_dependencies_once_before_multi_input_stage() {
+        let io = InMemoryDriverIo::default()
+            .with_schema("memory/sales.csv", ["customer_id", "amount"])
+            .with_schema("memory/customers.csv", ["customer_id", "segment"]);
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"let customers =
+  load "customers.csv"
+
+load "sales.csv"
+  | join customers on "customer_id"
+  | join customers on "customer_id""#,
+            &io,
+        );
+
+        let plan = plan_prepared(
+            &prepared,
+            PlanningOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+            },
+        )
+        .expect("execution plan");
+
+        assert_eq!(
+            plan.steps,
+            vec![
+                ExecutionPlanStep::Load {
+                    source: "sales.csv".to_string(),
+                    format: "csv".to_string(),
+                },
+                ExecutionPlanStep::Load {
+                    source: "customers.csv".to_string(),
+                    format: "csv".to_string(),
+                },
+                ExecutionPlanStep::Binding {
+                    name: "customers".to_string(),
+                },
+                ExecutionPlanStep::Transform {
+                    stage: "join".to_string(),
+                },
+                ExecutionPlanStep::Transform {
+                    stage: "join".to_string(),
                 },
                 ExecutionPlanStep::Stdout {
                     format: "csv".to_string(),

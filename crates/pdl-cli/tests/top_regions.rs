@@ -25,6 +25,22 @@ fn order_region_summary_example_runs_to_csv_stdout() {
     );
 }
 
+#[test]
+fn segment_revenue_example_runs_to_csv_stdout() {
+    assert_example_stdout(
+        "examples/segment_revenue.pdl",
+        "segment,revenue,orders\nEnterprise,550,4\nSMB,90,1\nConsumer,50,1\n",
+    );
+}
+
+#[test]
+fn daily_orders_union_example_runs_to_csv_stdout() {
+    assert_example_stdout(
+        "examples/daily_orders_union.pdl",
+        "order_id,region,amount\nA1,North,10\nA2,South,20\nA3,West,30\n",
+    );
+}
+
 fn assert_example_stdout(example: &str, expected_stdout: &str) {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new(env!("CARGO_BIN_EXE_pdl"))

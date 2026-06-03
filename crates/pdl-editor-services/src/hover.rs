@@ -48,13 +48,7 @@ fn hover_with_facts(
 
     for binding in parse.program.bindings.iter() {
         if contains(binding.name.span, offset) {
-            let schema = facts.bindings.get(&binding.name.value).and_then(|binding| {
-                binding
-                    .schema
-                    .as_ref()
-                    .map(|schema| schema.columns.join(", "))
-            });
-            let schema = schema.unwrap_or_else(|| "unknown".to_string());
+            let schema = binding_schema_text(&binding.name.value, &facts, &previews);
             return Some(EditorHover {
                 range: range_for_span(source, binding.name.span),
                 markdown: format!("**binding `{}`**\n\nSchema: `{schema}`", binding.name.value),
@@ -93,15 +87,13 @@ fn hover_for_pipeline(
 ) -> Option<EditorHover> {
     if let PipelineStart::Binding(name) = &pipeline.start {
         if contains(name.span, offset) {
-            return facts.bindings.get(&name.value).map(|binding| {
-                let schema = binding
-                    .schema
-                    .as_ref()
-                    .map_or_else(|| "unknown".to_string(), |schema| schema.columns.join(", "));
-                EditorHover {
-                    range: range_for_span(source, name.span),
-                    markdown: format!("**binding `{}`**\n\nSchema: `{schema}`", name.value),
-                }
+            return Some(EditorHover {
+                range: range_for_span(source, name.span),
+                markdown: format!(
+                    "**binding `{}`**\n\nSchema: `{}`",
+                    name.value,
+                    binding_schema_text(&name.value, facts, previews)
+                ),
             });
         }
     }
@@ -163,6 +155,17 @@ fn hover_stage_detail(
         .pipeline_schema_before_offset(pipeline, stage.span().start)
         .unwrap_or_default();
     let preview = previews.pipeline_preview_before_offset(pipeline, stage.span().start);
+    if let Some((name, span)) = stage_binding_ref(stage) {
+        if contains(span, offset) {
+            return Some(EditorHover {
+                range: range_for_span(source, span),
+                markdown: format!(
+                    "**binding `{name}`**\n\nSchema: `{}`",
+                    binding_schema_text(name, facts, previews)
+                ),
+            });
+        }
+    }
     for span in column_spans(stage) {
         if contains(span, offset) {
             let text = unquoted_text_at_span(source, span).unwrap_or_default();
@@ -235,6 +238,25 @@ fn info_hover(source: &str, span: Span, name: &str, documentation: &str) -> Edit
         range: range_for_span(source, span),
         markdown: format!("**{name}**\n\n{documentation}"),
     }
+}
+
+fn binding_schema_text(name: &str, facts: &DocumentFacts, previews: &PreviewFacts) -> String {
+    facts
+        .bindings
+        .get(name)
+        .and_then(|binding| binding.schema.as_ref())
+        .map(|schema| schema.columns.join(", "))
+        .or_else(|| {
+            previews.binding_previews.get(name).map(|preview| {
+                preview
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+        })
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn source_hover_markdown(path: &str, preview: Option<&TablePreview>) -> String {
@@ -633,6 +655,9 @@ fn apply_stage_to_preview(preview: &mut TablePreview, stage: &Stage) {
             preview.columns = output;
             preview.sample_rows.clear();
         }
+        Stage::Join { .. } | Stage::Union { .. } => {
+            preview.sample_rows.clear();
+        }
         Stage::Unsupported { .. } => {}
     }
 }
@@ -681,6 +706,8 @@ fn column_spans(stage: &Stage) -> Vec<Span> {
             })
             .collect(),
         Stage::Sort { items, .. } => items.iter().map(|item| item.column.span).collect(),
+        Stage::Join { on, .. } => vec![on.left().span, on.right().span],
+        Stage::Union { .. } => Vec::new(),
         Stage::Distinct { columns, .. } => columns.iter().map(|column| column.span).collect(),
         Stage::Limit { .. } | Stage::Save(_) | Stage::Unsupported { .. } => Vec::new(),
     }
@@ -703,9 +730,20 @@ fn scalar_function_spans(stage: &Stage) -> Vec<(String, Span)> {
         | Stage::GroupBy { .. }
         | Stage::Sort { .. }
         | Stage::Limit { .. }
+        | Stage::Join { .. }
+        | Stage::Union { .. }
         | Stage::Distinct { .. }
         | Stage::Save(_)
         | Stage::Unsupported { .. } => Vec::new(),
+    }
+}
+
+fn stage_binding_ref(stage: &Stage) -> Option<(&str, Span)> {
+    match stage {
+        Stage::Join { source, .. } | Stage::Union { source, .. } => {
+            Some((&source.value, source.span))
+        }
+        _ => None,
     }
 }
 

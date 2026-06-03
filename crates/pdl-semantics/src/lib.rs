@@ -6,7 +6,7 @@ pub mod types;
 
 pub use analyzer::{analyze_program, Analysis, LoadRequest};
 pub use ir::{
-    AggItemIr, BinaryOpIr, BindingIr, ExprIr, MutateItemIr, NullsOrderIr, PipelineIr,
+    AggItemIr, BinaryOpIr, BindingIr, ExprIr, JoinKindIr, MutateItemIr, NullsOrderIr, PipelineIr,
     PipelineStartIr, ProgramIr, RenameItemIr, SelectItemIr, SinkIr, SortDirectionIr, SortItemIr,
     SourceIr, StageIr, UnaryOpIr,
 };

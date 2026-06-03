@@ -79,7 +79,7 @@
       "patterns": [
         {
           "name": "keyword.control.pdl",
-          "match": "\\b(?:let|load|filter|select|drop|rename|mutate|group_by|agg|sort|limit|join|union|distinct|save|as|on|kind|format|stdin|stdout|and|or|not|asc|desc|nulls_first|nulls_last)\\b"
+          "match": "\\b(?:let|load|filter|select|drop|rename|mutate|group_by|agg|sort|limit|join|union|distinct|save|as|on|kind|by_name|format|stdin|stdout|and|or|not|asc|desc|inner|left|right|full|semi|anti|nulls_first|nulls_last)\\b"
         },
         {
           "name": "constant.language.pdl",

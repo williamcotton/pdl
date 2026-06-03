@@ -1,7 +1,7 @@
 use pdl_core::Span;
 use pdl_syntax::{
     AggItem, BinaryOp, Expr, Pipeline, PipelineStart, Program, SinkRef, SortItem, SourceRef, Stage,
-    UnaryOp,
+    UnaryOp, UnionOptionKind,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -87,6 +87,21 @@ pub enum StageIr {
         n: usize,
         span: Span,
     },
+    Join {
+        source: String,
+        source_span: Span,
+        left_key: String,
+        right_key: String,
+        kind: JoinKindIr,
+        span: Span,
+    },
+    Union {
+        source: String,
+        source_span: Span,
+        by_name: bool,
+        distinct: bool,
+        span: Span,
+    },
     Distinct {
         columns: Vec<String>,
         span: Span,
@@ -149,6 +164,16 @@ pub enum SortDirectionIr {
 pub enum NullsOrderIr {
     First,
     Last,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JoinKindIr {
+    Inner,
+    Left,
+    Right,
+    Full,
+    Semi,
+    Anti,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -327,6 +352,44 @@ fn lower_stage(stage: &Stage) -> StageIr {
             span: *span,
         },
         Stage::Limit { n, span } => StageIr::Limit { n: *n, span: *span },
+        Stage::Join {
+            source,
+            on,
+            kind,
+            span,
+            ..
+        } => StageIr::Join {
+            source: source.value.clone(),
+            source_span: source.span,
+            left_key: on.left().value.clone(),
+            right_key: on.right().value.clone(),
+            kind: match kind {
+                pdl_syntax::JoinKind::Inner => JoinKindIr::Inner,
+                pdl_syntax::JoinKind::Left => JoinKindIr::Left,
+                pdl_syntax::JoinKind::Right => JoinKindIr::Right,
+                pdl_syntax::JoinKind::Full => JoinKindIr::Full,
+                pdl_syntax::JoinKind::Semi => JoinKindIr::Semi,
+                pdl_syntax::JoinKind::Anti => JoinKindIr::Anti,
+            },
+            span: *span,
+        },
+        Stage::Union {
+            source,
+            options,
+            span,
+        } => StageIr::Union {
+            source: source.value.clone(),
+            source_span: source.span,
+            by_name: options
+                .iter()
+                .find(|option| option.kind == UnionOptionKind::ByName)
+                .is_some_and(|option| option.value.value),
+            distinct: options
+                .iter()
+                .find(|option| option.kind == UnionOptionKind::Distinct)
+                .is_some_and(|option| option.value.value),
+            span: *span,
+        },
         Stage::Distinct { columns, span } => StageIr::Distinct {
             columns: columns.iter().map(|column| column.value.clone()).collect(),
             span: *span,

@@ -1,25 +1,26 @@
 # PDL Detailed Specification
 
-Status: Draft 0.11.0
+Status: Draft 0.12.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.11.0`.
+The current repository implementation is `0.12.0`.
 
 This release keeps the existing CSV-backed language, runtime, editor, LSP, WASM,
-and browser demo slice stable while adding row-preserving data manipulation:
-`mutate`, `distinct`, scalar cleanup functions, and runnable cleaning examples.
+and browser demo slice stable while adding deterministic multi-input table
+combination through `join` and `union`.
 It retains the recoverable syntax diagnostics for malformed filter, aggregate,
 sort, missing-pipe, and trailing-token cases. It implements the `pdl` CLI commands
 `run`, `check`, `lsp`, and `version`; CSV file loading with header rows; CSV
 file and stdout output; deterministic in-memory execution for `load`, `filter`,
 `select`, `drop`, `rename`, `mutate`, `group_by`, `agg`, `sort`, `limit`,
-`distinct`, and `save`; the scalar functions `col`, `lit`, `is_null`,
-`not_null`, `coalesce`, `concat`, `lower`, `upper`, `trim`, `to_number`, `abs`,
-`round`, and `if_else`; and the aggregate functions `count`, `sum`, `mean`,
-`min`, and `max`. It also
+`join`, `union`, `distinct`, and `save`; named binding evaluation with lazy
+dependency resolution and cycle diagnostics; the scalar functions `col`, `lit`,
+`is_null`, `not_null`, `coalesce`, `concat`, `lower`, `upper`, `trim`,
+`to_number`, `abs`, `round`, and `if_else`; and the aggregate functions
+`count`, `sum`, `mean`, `min`, and `max`. It also
 implements registered lettered diagnostic codes in `pdl-core`, a `codes::*`
 registry, `related` spans and `help` diagnostic payload fields, diagnostic
 catalog drift tests, a lossless lexer with trivia and EOF, a rowan CST with
@@ -30,21 +31,22 @@ execution planning from semantic IR plus driver facts, execution output emission
 separated from planning, crate-boundary drift tests, `pdl lsp` with
 full-document sync, diagnostics, completion, driver-backed hover, formatting,
 semantic tokens, document symbols, and same-document binding
-definition/reference/rename; and it ships a thin VS Code client under
+definition/reference/rename including join/union binding references; and it
+ships a thin VS Code client under
 `editors/vscode/` plus browser-safe WASM ABI helpers that use in-memory driver
 boundaries, including host-schema-backed checks, host-file-backed hover previews
 for embedded editors, and a bounded host-file run facade for browser execution.
 It also ships a minimal React/Vite/Monaco demo under `demo/` with one PDL
-editor, one editable host-supplied CSV input, diagnostics and hover from the
-WASM editor-service ABI, and CSV stdout output from WASM execution.
+editor, multiple editable host-supplied CSV inputs, diagnostics and hover from
+the WASM editor-service ABI, and CSV stdout output from WASM execution.
 
-Version 0.11.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
-loading, stream sniffing, configurable CSV dialect options, `join`, `union`,
-window expressions, schema/plan subcommands, CLI formatting, full LSP code
-actions or cross-document navigation, Arrow IPC browser output, virtual browser
-output sinks, or multi-dataset browser controls.
+Version 0.12.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
+loading, stream sniffing, configurable CSV dialect options, window expressions,
+schema/plan subcommands, CLI formatting, full LSP code actions or
+cross-document navigation, Arrow IPC browser output, virtual browser output
+sinks, or full multi-output browser controls.
 Those features are tracked as deferred or planned work in successor release
-plans after `docs/V0_11_PLAN.md`.
+plans after `docs/V0_12_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -130,7 +132,7 @@ The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
 over a partition and order of rows. Window expressions are planned but not
-implemented in version 0.11.0.
+implemented in version 0.12.0.
 
 The keyword `column` means a named field with a static PDL type and nullability.
 
@@ -637,7 +639,7 @@ Assignments in one `mutate` stage are evaluated against the input schema in para
 
 Later stages see newly created columns.
 
-The version 0.11.0 implementation supports row expressions in `mutate`
+The version 0.12.0 implementation supports row expressions in `mutate`
 assignments. New columns append in assignment order. Replacing an existing
 column preserves that column's position. Duplicate assignment targets in one
 stage MUST produce `E1207`.
@@ -812,6 +814,7 @@ Reserved stage and declaration words in version 0.1 are:
 - `as`
 - `on`
 - `kind`
+- `by_name`
 - `format`
 - `stdin`
 - `stdout`
@@ -841,7 +844,7 @@ Planned window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are not reserved by the version 0.11.0 implementation until window
+These words are not reserved by the version 0.12.0 implementation until window
 syntax is implemented.
 
 ### 6.6 Quoted Tokens
@@ -1097,6 +1100,12 @@ ColumnRefList ::= ColumnRef ("," ColumnRef)* ;
 
 `union` combines rows from the current table and a named binding.
 
+Without options, `union` aligns columns by position.
+
+`by_name true` aligns right rows by column name.
+
+`distinct true` removes duplicate full rows after concatenation.
+
 `distinct` removes duplicate rows.
 
 Without a column list, `distinct` uses all columns as the duplicate key. With a
@@ -1139,7 +1148,7 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are planned syntax and are not implemented in version 0.11.0.
+Window expressions are planned syntax and are not implemented in version 0.12.0.
 
 Until implemented, parsers MAY recover with `E1211` or ordinary parse diagnostics
 when they encounter `over`.
@@ -1553,7 +1562,7 @@ New columns append in assignment order.
 
 Duplicate assignment targets in one `mutate` stage MUST produce `E1207`.
 
-The version 0.11.0 implementation supports scalar row expressions in `mutate`
+The version 0.12.0 implementation supports scalar row expressions in `mutate`
 and does not yet support window expressions.
 
 ### 11.7 Group By
@@ -1614,6 +1623,8 @@ Using `limit` after a stage with unstable order SHOULD produce `W2004`.
 
 `join binding on "key"` joins the current table with a named binding.
 
+`join binding on ("left_key", "right_key")` joins differently named keys.
+
 Supported kinds:
 
 - `inner`
@@ -1625,7 +1636,16 @@ Supported kinds:
 
 Default kind is `inner`.
 
-Join key types must be compatible.
+Join key types MUST be compatible. The CSV-backed reference implementation
+checks observed non-null key value classes at execution time and produces
+`E1208` when the left and right key classes are incompatible.
+
+For `inner`, `left`, `right`, and `full`, output columns are the left input
+columns followed by right input non-key columns. The right join key is not
+duplicated in output. For unmatched right rows in `right` and `full` joins, the
+left key output column is populated from the right key value.
+
+For `semi` and `anti`, output columns are the left input columns.
 
 Duplicate non-key output column names MUST be resolved or diagnosed.
 
@@ -1634,17 +1654,29 @@ The default collision policy SHOULD suffix right-side columns with `_right`.
 If a suffix creates another collision, the analyzer MUST produce `E1207` unless
 an explicit suffix option is introduced.
 
+Row ordering for `inner` and `left` preserves left input order and emits matching
+right rows in right input order. `right` preserves right input order and emits
+matching left rows in left input order. `full` emits matched and unmatched left
+rows in left input order, then unmatched right rows sorted by join key. `semi`
+and `anti` preserve left input order.
+
 ### 11.12 Union
 
 `union binding` combines rows from the current table and a named binding.
 
-Default behavior SHOULD align columns by name.
+Default behavior aligns columns by position. `by_name true` aligns right rows to
+the left schema by column name.
 
-Schemas must be compatible.
+Schemas MUST be compatible or produce `E1209`. Position-aligned union requires
+the same number of columns. Name-aligned union requires the same column-name set.
+The CSV-backed reference implementation also checks observed non-null value
+classes at execution time.
 
 `distinct true` removes duplicate rows.
 
-Union output ordering preserves left rows followed by right rows unless distinct handling requires deterministic de-duplication.
+Union output ordering preserves left rows followed by right rows. With
+`distinct true`, duplicate full rows are removed after concatenation and the
+first row in left-then-right order is retained.
 
 ### 11.13 Distinct
 
@@ -1728,7 +1760,7 @@ Implementations SHOULD emit helpful diagnostics when a quoted token could plausi
 
 ### 12.3 Scalar Functions
 
-The version 0.11.0 implementation supports these scalar functions in row
+The version 0.12.0 implementation supports these scalar functions in row
 expressions:
 
 - `col(name)`: resolves a quoted value as a column reference.
@@ -1802,7 +1834,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions (Planned)
 
-Window function syntax is planned and not implemented in version 0.11.0.
+Window function syntax is planned and not implemented in version 0.12.0.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
 
@@ -2230,7 +2262,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.11.0` LSP implementation provides diagnostics,
+The current `0.12.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
@@ -2398,7 +2430,7 @@ Schema-aware WASM check calls MUST use host-supplied in-memory schemas or files
 through the shared driver/editor-service path. They MUST NOT read arbitrary host
 files or reimplement semantic validation in JavaScript or TypeScript.
 
-The v0.7 WASM implementation MUST expose packed JSON calls for:
+The v0.12 WASM implementation MUST expose packed JSON calls for:
 
 - `pdl_run_json`, which accepts PDL source, a host-supplied file map, a synthetic
   program path, and a requested stdout format, then prepares and executes through
@@ -2407,16 +2439,17 @@ The v0.7 WASM implementation MUST expose packed JSON calls for:
   synthetic program path, and an editor-service request, then returns editor
   diagnostics plus the requested editor-service result
 
-The browser run request's host file map is format-neutral: keys are logical file
-paths and values are host-supplied file contents. Version 0.11.0 only requires
-CSV file contents to execute successfully because CSV is the only implemented
-data decoder. The ABI MUST NOT special-case CSV at the TypeScript editor layer.
+The browser run request's host file map is format-neutral and MAY contain
+multiple files: keys are logical file paths and values are host-supplied file
+contents. Version 0.12.0 only requires CSV file contents to execute successfully
+because CSV is the only implemented data decoder. The ABI MUST NOT special-case
+CSV at the TypeScript editor layer.
 
-`pdl_run_json` in version 0.11.0 MUST support CSV stdout for the resulting table.
+`pdl_run_json` in version 0.12.0 MUST support CSV stdout for the resulting table.
 Virtual path-backed output sinks, Arrow IPC byte output, and non-CSV dataframe
 decoders remain deferred until a later plan promotes them.
 
-For hover requests, `pdl_editor_service_json` in version 0.11.0 MUST use the
+For hover requests, `pdl_editor_service_json` in version 0.12.0 MUST use the
 same host file map through in-memory driver I/O so Monaco/WASM hover previews
 match native LSP hover behavior for CSV paths and columns.
 
@@ -2531,7 +2564,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3221,8 +3254,10 @@ pub struct StageOutput {
 `agg` MUST consume grouping state and produce a new schema ordered by group keys
 followed by aggregate outputs.
 
-`join` MUST validate key compatibility and produce deterministic column
-collision diagnostics before planning execution.
+`join` MUST validate key presence and deterministic column collision behavior
+before planning execution. Implementations with static key type facts MUST also
+validate key type compatibility before planning; the CSV-backed reference
+implementation validates observed key value classes during execution.
 
 `save` MUST preserve the input schema for analysis while adding a sink artifact
 to the plan.
@@ -3517,7 +3552,7 @@ support:
 
 Descriptors record explicit format names, inferred path formats, and unresolved
 sniffing decisions. Real Arrow IPC parsing/writing, Parquet loading, JSON Lines
-loading, and stdin sniffing remain deferred past v0.11.0 unless a future plan
+loading, and stdin sniffing remain deferred past v0.12.0 unless a future plan
 promotes them with spec, examples, and tests.
 
 #### 19.7.8 Schema Cache And Preview Boundary
@@ -4073,7 +4108,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.11.0.
+PDL source does not require an explicit version declaration in draft 0.12.0.
 
 The implementation SHOULD report supported language version.
 
@@ -4232,14 +4267,15 @@ pdl run sales_for_chart.pdl --stdout-format arrow-stream | algraf render chart.a
 
 ```pdl
 let customers =
-  load "customers.parquet"
+  load "customers.csv"
   | select "customer_id", "segment"
 
-load "orders.parquet"
+load "sales.csv"
+  | filter "status" == "completed"
   | join customers on "customer_id" kind left
   | group_by "segment"
   | agg sum("amount") as "revenue", count() as "orders"
-  | save "segment_summary.csv"
+  | sort "revenue" desc
 ```
 
 ## 27. Appendix C: Implementation Checklist

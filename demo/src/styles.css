@@ -218,6 +218,43 @@ pre {
   font-size: 13px;
 }
 
+.file-tabs {
+  flex: 0 0 auto;
+  min-height: 36px;
+  border-bottom: 1px solid #e1e6e6;
+  padding: 5px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow-x: auto;
+}
+
+.file-tab {
+  height: 26px;
+  max-width: 160px;
+  border: 1px solid #cbd4d4;
+  background: #f8faf9;
+  color: #3b474c;
+  padding: 0 9px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-tab:hover {
+  border-color: #8fb8ad;
+  color: #1d5d54;
+}
+
+.file-tab-active {
+  border-color: #1d6f62;
+  background: #edf7f3;
+  color: #14554c;
+}
+
 .csv-textarea,
 .csv-output {
   flex: 1;

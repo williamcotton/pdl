@@ -1,7 +1,7 @@
 use pdl_core::{Diagnostic, Severity, Span};
 use pdl_semantics::registry::{AGGREGATE_FUNCTIONS, FORMATS, KEYWORDS, SCALAR_FUNCTIONS, STAGES};
 use pdl_semantics::{analyze_program, FormatInfo, FunctionInfo, LoadRequest, StageInfo};
-use pdl_syntax::{Expr, ParseResult, Pipeline, PipelineStart, Program, Stage};
+use pdl_syntax::{Expr, JoinKind, ParseResult, Pipeline, PipelineStart, Program, Stage};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -101,6 +101,8 @@ pub struct EditorLocation {
     pub range: TextRange,
 }
 
+const JOIN_KINDS: &[&str] = &["inner", "left", "right", "full", "semi", "anti"];
+
 pub fn analyze_document(source: &str, path: Option<&Path>) -> EditorDocument {
     if let Some(path) = path {
         return analyze_document_with_driver_io(source, path, &pdl_driver::OsDriverIo);
@@ -177,6 +179,13 @@ pub fn completions(
                 .filter(|info| info.load_supported || info.save_supported || info.stream_supported)
                 .map(format_completion),
         );
+    } else if context.in_join_or_union_source_context {
+        completions.extend(
+            facts
+                .bindings
+                .iter()
+                .map(|(name, binding)| binding_completion(name, binding)),
+        );
     } else if context.after_pipe {
         completions.extend(
             STAGES
@@ -195,6 +204,14 @@ pub fn completions(
                 .iter()
                 .map(|(name, binding)| binding_completion(name, binding)),
         );
+    } else if context.in_join_kind_name_context {
+        completions.extend(
+            JOIN_KINDS
+                .iter()
+                .map(|kind| keyword_completion(kind, "Join kind")),
+        );
+    } else if context.in_join_kind_keyword_context {
+        completions.push(keyword_completion("kind", "Select a join kind"));
     } else if context.in_agg_function_context {
         completions.extend(AGGREGATE_FUNCTIONS.iter().map(function_completion));
     } else if context.in_scalar_function_context {
@@ -413,6 +430,9 @@ struct CompletionContext {
     after_pipe: bool,
     in_pipeline_start: bool,
     in_format_context: bool,
+    in_join_or_union_source_context: bool,
+    in_join_kind_keyword_context: bool,
+    in_join_kind_name_context: bool,
     in_agg_function_context: bool,
     in_scalar_function_context: bool,
     in_sort_direction_context: bool,
@@ -444,6 +464,24 @@ impl CompletionContext {
                 .rsplit_once(stage)
                 .map(|(_, suffix)| suffix.trim())
         });
+        let in_join_or_union_source_context = matches!(stage.as_deref(), Some("join" | "union"))
+            && !inside_string
+            && after_keyword.is_some_and(|suffix| {
+                !suffix.contains(" on ")
+                    && !suffix.contains(" by_name")
+                    && !suffix.contains(" distinct")
+                    && suffix.chars().all(is_ident_char)
+            });
+        let in_join_kind_name_context = stage.as_deref() == Some("join")
+            && !inside_string
+            && lower_prefix
+                .rsplit_once("kind")
+                .is_some_and(|(_, suffix)| suffix.trim().chars().all(is_ident_char));
+        let in_join_kind_keyword_context = stage.as_deref() == Some("join")
+            && !inside_string
+            && !in_join_kind_name_context
+            && after_keyword
+                .is_some_and(|suffix| suffix.contains(" on ") && !suffix.contains(" kind"));
         let in_agg_function_context = stage.as_deref() == Some("agg")
             && !inside_string
             && after_keyword.is_some_and(|suffix| !suffix.contains('(') || suffix.ends_with(','));
@@ -465,6 +503,7 @@ impl CompletionContext {
                     | "group_by"
                     | "agg"
                     | "sort"
+                    | "join"
                     | "distinct"
             )
         );
@@ -473,6 +512,9 @@ impl CompletionContext {
             after_pipe,
             in_pipeline_start,
             in_format_context,
+            in_join_or_union_source_context,
+            in_join_kind_keyword_context,
+            in_join_kind_name_context,
             in_agg_function_context,
             in_scalar_function_context,
             in_sort_direction_context,
@@ -540,6 +582,11 @@ fn collect_pipeline_columns(pipeline: &Pipeline, columns: &mut BTreeSet<String>)
                     columns.insert(item.column.value.clone());
                 }
             }
+            Stage::Join { on, .. } => {
+                columns.insert(on.left().value.clone());
+                columns.insert(on.right().value.clone());
+            }
+            Stage::Union { .. } => {}
             Stage::Distinct { columns: keys, .. } => {
                 for column in keys {
                     columns.insert(column.value.clone());
@@ -628,7 +675,7 @@ impl DocumentFacts {
             if offset <= stage.span().end {
                 return Some(schema.columns);
             }
-            apply_stage_to_schema(&mut schema, stage);
+            apply_stage_to_schema(self, &mut schema, stage);
         }
         Some(schema.columns)
     }
@@ -636,7 +683,7 @@ impl DocumentFacts {
     fn pipeline_schema(&self, pipeline: &Pipeline) -> Option<SchemaState> {
         let mut schema = self.pipeline_start_schema(pipeline)?;
         for stage in &pipeline.stages {
-            apply_stage_to_schema(&mut schema, stage);
+            apply_stage_to_schema(self, &mut schema, stage);
         }
         Some(schema)
     }
@@ -652,7 +699,7 @@ impl DocumentFacts {
     }
 }
 
-fn apply_stage_to_schema(schema: &mut SchemaState, stage: &Stage) {
+fn apply_stage_to_schema(facts: &DocumentFacts, schema: &mut SchemaState, stage: &Stage) {
     match stage {
         Stage::Filter { .. }
         | Stage::Sort { .. }
@@ -700,8 +747,53 @@ fn apply_stage_to_schema(schema: &mut SchemaState, stage: &Stage) {
             output.extend(items.iter().map(|item| item.alias.value.clone()));
             schema.columns = output;
         }
+        Stage::Join {
+            source, on, kind, ..
+        } => {
+            if let Some(right_schema) = facts
+                .bindings
+                .get(&source.value)
+                .and_then(|binding| binding.schema.as_ref())
+            {
+                schema.columns = join_schema_for_editor(
+                    &schema.columns,
+                    &right_schema.columns,
+                    &on.right().value,
+                    *kind,
+                );
+            }
+            schema.grouping = None;
+        }
+        Stage::Union { .. } => {
+            schema.grouping = None;
+        }
         Stage::Unsupported { .. } => {}
     }
+}
+
+fn join_schema_for_editor(
+    left_schema: &[String],
+    right_schema: &[String],
+    right_key: &str,
+    kind: JoinKind,
+) -> Vec<String> {
+    if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+        return left_schema.to_vec();
+    }
+    let mut output = left_schema.to_vec();
+    for column in right_schema {
+        if column == right_key {
+            continue;
+        }
+        let mut output_name = column.clone();
+        if output.iter().any(|existing| existing == &output_name) {
+            output_name.push_str("_right");
+        }
+        if !output.iter().any(|existing| existing == &output_name) {
+            output.push(output_name);
+        }
+    }
+    output
 }
 
 fn quote(value: &str) -> String {
@@ -764,7 +856,14 @@ fn binding_name_at_offset(program: &Program, offset: usize) -> Option<String> {
 fn pipeline_start_binding_at_offset(pipeline: &Pipeline, offset: usize) -> Option<String> {
     match &pipeline.start {
         PipelineStart::Binding(name) if contains(name.span, offset) => Some(name.value.clone()),
-        _ => None,
+        _ => pipeline.stages.iter().find_map(|stage| match stage {
+            Stage::Join { source, .. } | Stage::Union { source, .. }
+                if contains(source.span, offset) =>
+            {
+                Some(source.value.clone())
+            }
+            _ => None,
+        }),
     }
 }
 
@@ -779,6 +878,20 @@ fn binding_spans(program: &Program, name: &str) -> Vec<Span> {
                 spans.push(start.span);
             }
         }
+        spans.extend(
+            binding
+                .pipeline
+                .stages
+                .iter()
+                .filter_map(|stage| match stage {
+                    Stage::Join { source, .. } | Stage::Union { source, .. }
+                        if source.value == name =>
+                    {
+                        Some(source.span)
+                    }
+                    _ => None,
+                }),
+        );
     }
     if let Some(main) = &program.main {
         if let PipelineStart::Binding(start) = &main.start {
@@ -786,6 +899,12 @@ fn binding_spans(program: &Program, name: &str) -> Vec<Span> {
                 spans.push(start.span);
             }
         }
+        spans.extend(main.stages.iter().filter_map(|stage| match stage {
+            Stage::Join { source, .. } | Stage::Union { source, .. } if source.value == name => {
+                Some(source.span)
+            }
+            _ => None,
+        }));
     }
     spans
 }
@@ -1008,6 +1127,8 @@ pub(crate) fn stage_name(stage: &Stage) -> &'static str {
         Stage::Agg { .. } => "agg",
         Stage::Sort { .. } => "sort",
         Stage::Limit { .. } => "limit",
+        Stage::Join { .. } => "join",
+        Stage::Union { .. } => "union",
         Stage::Distinct { .. } => "distinct",
         Stage::Save(_) => "save",
         Stage::Unsupported { name, .. } => match name.value.as_str() {
@@ -1239,6 +1360,35 @@ mod tests {
         );
 
         assert!(items.iter().any(|item| item.label == "filter"));
+    }
+
+    #[test]
+    fn provides_binding_completion_at_join_source() {
+        let source = r#"let customers =
+  load "customers.csv"
+
+load "sales.csv"
+  | join "#;
+
+        let items = completions(source, None, position_for_byte_offset(source, source.len()));
+
+        assert!(items
+            .iter()
+            .any(|item| { item.label == "customers" && item.kind == CompletionKind::Binding }));
+    }
+
+    #[test]
+    fn provides_join_kind_completions_after_kind() {
+        let source = r#"let customers =
+  load "customers.csv"
+
+load "sales.csv"
+  | join customers on "customer_id" kind "#;
+
+        let items = completions(source, None, position_for_byte_offset(source, source.len()));
+
+        assert!(items.iter().any(|item| item.label == "left"));
+        assert!(items.iter().any(|item| item.label == "anti"));
     }
 
     #[test]

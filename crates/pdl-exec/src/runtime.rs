@@ -5,11 +5,11 @@ use pdl_data::{
 };
 use pdl_driver::{DriverIo, OsDriverIo, PreparedProgram, SinkDescriptor, SourceDescriptor};
 use pdl_semantics::{
-    AggItemIr, BinaryOpIr, ExprIr, MutateItemIr, NullsOrderIr, PipelineIr, PipelineStartIr,
-    SortDirectionIr, StageIr, UnaryOpIr,
+    AggItemIr, BinaryOpIr, ExprIr, JoinKindIr, MutateItemIr, NullsOrderIr, PipelineIr,
+    PipelineStartIr, SortDirectionIr, StageIr, UnaryOpIr,
 };
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::output::{emit_csv_stdout, write_csv_output};
 use crate::planning::{plan_prepared, PlanningOptions};
@@ -56,6 +56,7 @@ pub fn run_prepared_with_io(
         prepared,
         diagnostics: prepared.diagnostics(),
         cache: BTreeMap::new(),
+        active_bindings: Vec::new(),
         dry_run: plan.dry_run,
         stdout: None,
         io,
@@ -117,6 +118,7 @@ struct Runtime<'a> {
     prepared: &'a PreparedProgram,
     diagnostics: Vec<Diagnostic>,
     cache: BTreeMap<String, Table>,
+    active_bindings: Vec<String>,
     dry_run: bool,
     stdout: Option<Vec<u8>>,
     io: &'a dyn DriverIo,
@@ -128,7 +130,7 @@ impl Runtime<'_> {
             PipelineStartIr::Load { format, span, .. } => {
                 self.execute_load(*span, format.as_deref())?
             }
-            PipelineStartIr::Binding { name, .. } => self.execute_binding(name)?,
+            PipelineStartIr::Binding { name, span } => self.execute_binding(name, *span)?,
         };
         let mut grouping: Option<Vec<String>> = None;
 
@@ -198,6 +200,29 @@ impl Runtime<'_> {
                 StageIr::Limit { n, .. } => {
                     table = table.limit(*n);
                 }
+                StageIr::Join {
+                    source,
+                    source_span,
+                    left_key,
+                    right_key,
+                    kind,
+                    span,
+                } => {
+                    let right = self.execute_binding(source, *source_span)?;
+                    table = self.join(table, right, left_key, right_key, *kind, *span)?;
+                    grouping = None;
+                }
+                StageIr::Union {
+                    source,
+                    source_span,
+                    by_name,
+                    distinct,
+                    span,
+                } => {
+                    let right = self.execute_binding(source, *source_span)?;
+                    table = self.union(table, right, *by_name, *distinct, *span)?;
+                    grouping = None;
+                }
                 StageIr::Distinct { columns, .. } => {
                     table = table.distinct(columns);
                     grouping = None;
@@ -208,7 +233,7 @@ impl Runtime<'_> {
                 StageIr::Unsupported { name, span } => {
                     return Err(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{name}` is deferred in 0.11.0"),
+                        format!("stage `{name}` is deferred in 0.12.0"),
                         *span,
                     ));
                 }
@@ -218,9 +243,22 @@ impl Runtime<'_> {
         Ok(table)
     }
 
-    fn execute_binding(&mut self, name: &str) -> Result<Table, Diagnostic> {
+    fn execute_binding(&mut self, name: &str, reference_span: Span) -> Result<Table, Diagnostic> {
         if let Some(table) = self.cache.get(name) {
             return Ok(table.clone());
+        }
+        if let Some(index) = self
+            .active_bindings
+            .iter()
+            .position(|active| active == name)
+        {
+            let mut path = self.active_bindings[index..].to_vec();
+            path.push(name.to_string());
+            return Err(Diagnostic::error(
+                codes::E1501,
+                format!("binding dependency cycle: {}", path.join(" -> ")),
+                reference_span,
+            ));
         }
         let binding = self
             .prepared
@@ -232,10 +270,12 @@ impl Runtime<'_> {
                 Diagnostic::error(
                     codes::E1007,
                     format!("unknown binding `{name}`"),
-                    Span::zero(),
+                    reference_span,
                 )
             })?;
+        self.active_bindings.push(name.to_string());
         let table = self.execute_pipeline(&binding.pipeline)?;
+        self.active_bindings.pop();
         self.cache.insert(name.to_string(), table.clone());
         Ok(table)
     }
@@ -249,7 +289,7 @@ impl Runtime<'_> {
             if format != "csv" {
                 return Err(Diagnostic::error(
                     codes::E1215,
-                    format!("format `{format}` is not supported in 0.11.0"),
+                    format!("format `{format}` is not supported in 0.12.0"),
                     stage_span,
                 ));
             }
@@ -275,7 +315,7 @@ impl Runtime<'_> {
             }
             SourceDescriptor::Stdin => Err(Diagnostic::error(
                 codes::E1211,
-                "stdin loading is deferred in 0.11.0",
+                "stdin loading is deferred in 0.12.0",
                 input.span,
             )),
         }
@@ -294,7 +334,7 @@ impl Runtime<'_> {
             if format != "csv" {
                 return Err(Diagnostic::error(
                     codes::E1705,
-                    format!("output format `{format}` is not supported in 0.11.0"),
+                    format!("output format `{format}` is not supported in 0.12.0"),
                     stage_span,
                 ));
             }
@@ -404,6 +444,387 @@ impl Runtime<'_> {
 
         Ok(Table { columns, rows })
     }
+
+    fn join(
+        &self,
+        left: Table,
+        right: Table,
+        left_key: &str,
+        right_key: &str,
+        kind: JoinKindIr,
+        span: Span,
+    ) -> Result<Table, Diagnostic> {
+        ensure_key_types_compatible(&left, left_key, &right, right_key, span)?;
+        let output_columns = join_columns(&left.columns, &right.columns, right_key, kind, span)?;
+        if matches!(kind, JoinKindIr::Semi | JoinKindIr::Anti) {
+            return Ok(join_semi_anti(left, &right, left_key, right_key, kind));
+        }
+
+        let left_key_index = left.column_index(left_key).ok_or_else(|| {
+            Diagnostic::error(codes::E1005, format!("unknown column `{left_key}`"), span)
+        })?;
+        let right_key_index = right.column_index(right_key).ok_or_else(|| {
+            Diagnostic::error(codes::E1005, format!("unknown column `{right_key}`"), span)
+        })?;
+        let left_matches = join_index(&left, left_key);
+        let right_matches = join_index(&right, right_key);
+        let right_value_indices = right_non_key_indices(&right.columns, right_key);
+        let mut rows = Vec::new();
+
+        match kind {
+            JoinKindIr::Inner | JoinKindIr::Left | JoinKindIr::Full => {
+                let mut matched_right = vec![false; right.rows.len()];
+                for left_row in &left.rows {
+                    let key = row_key(left_row, left_key_index);
+                    let matches = key.as_ref().and_then(|key| right_matches.get(key));
+                    if let Some(matches) = matches {
+                        for right_index in matches {
+                            matched_right[*right_index] = true;
+                            rows.push(combine_rows(
+                                left_row,
+                                Some(&right.rows[*right_index]),
+                                &right_value_indices,
+                                left.columns.len(),
+                            ));
+                        }
+                    } else if matches!(kind, JoinKindIr::Left | JoinKindIr::Full) {
+                        rows.push(combine_rows(
+                            left_row,
+                            None,
+                            &right_value_indices,
+                            left.columns.len(),
+                        ));
+                    }
+                }
+                if matches!(kind, JoinKindIr::Full) {
+                    let mut unmatched_right = right
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| !matched_right[*index])
+                        .collect::<Vec<_>>();
+                    unmatched_right.sort_by(|(_, left_row), (_, right_row)| {
+                        row_key(left_row, right_key_index).cmp(&row_key(right_row, right_key_index))
+                    });
+                    for (_, right_row) in unmatched_right {
+                        rows.push(right_only_row(
+                            right_row,
+                            right_key_index,
+                            left_key_index,
+                            left.columns.len(),
+                            &right_value_indices,
+                        ));
+                    }
+                }
+            }
+            JoinKindIr::Right => {
+                for right_row in &right.rows {
+                    let key = row_key(right_row, right_key_index);
+                    let matches = key.as_ref().and_then(|key| left_matches.get(key));
+                    if let Some(matches) = matches {
+                        for left_index in matches {
+                            rows.push(combine_rows(
+                                &left.rows[*left_index],
+                                Some(right_row),
+                                &right_value_indices,
+                                left.columns.len(),
+                            ));
+                        }
+                    } else {
+                        rows.push(right_only_row(
+                            right_row,
+                            right_key_index,
+                            left_key_index,
+                            left.columns.len(),
+                            &right_value_indices,
+                        ));
+                    }
+                }
+            }
+            JoinKindIr::Semi | JoinKindIr::Anti => unreachable!("handled earlier"),
+        }
+
+        Ok(Table {
+            columns: output_columns,
+            rows,
+        })
+    }
+
+    fn union(
+        &self,
+        left: Table,
+        right: Table,
+        by_name: bool,
+        distinct: bool,
+        span: Span,
+    ) -> Result<Table, Diagnostic> {
+        ensure_union_compatible(&left, &right, by_name, span)?;
+        let columns = left.columns.clone();
+        let mut rows = left.rows.clone();
+        if by_name {
+            let right_indices = columns
+                .iter()
+                .map(|column| right.column_index(column))
+                .collect::<Vec<_>>();
+            rows.extend(right.rows.iter().map(|row| {
+                Row {
+                    values: right_indices
+                        .iter()
+                        .map(|index| {
+                            index
+                                .and_then(|index| row.values.get(index))
+                                .cloned()
+                                .unwrap_or(Value::Null)
+                        })
+                        .collect(),
+                }
+            }));
+        } else {
+            rows.extend(right.rows.iter().map(|row| {
+                Row {
+                    values: (0..columns.len())
+                        .map(|index| row.values.get(index).cloned().unwrap_or(Value::Null))
+                        .collect(),
+                }
+            }));
+        }
+        let table = Table { columns, rows };
+        Ok(if distinct { table.distinct(&[]) } else { table })
+    }
+}
+
+fn join_columns(
+    left_columns: &[String],
+    right_columns: &[String],
+    right_key: &str,
+    kind: JoinKindIr,
+    span: Span,
+) -> Result<Vec<String>, Diagnostic> {
+    if matches!(kind, JoinKindIr::Semi | JoinKindIr::Anti) {
+        return Ok(left_columns.to_vec());
+    }
+
+    let mut columns = left_columns.to_vec();
+    for column in right_columns {
+        if column == right_key {
+            continue;
+        }
+        let mut output = column.clone();
+        if columns.iter().any(|existing| existing == &output) {
+            output.push_str("_right");
+            if columns.iter().any(|existing| existing == &output) {
+                return Err(Diagnostic::error(
+                    codes::E1207,
+                    format!("output column collision `{output}`"),
+                    span,
+                ));
+            }
+        }
+        columns.push(output);
+    }
+    Ok(columns)
+}
+
+fn right_non_key_indices(columns: &[String], right_key: &str) -> Vec<usize> {
+    columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| (column != right_key).then_some(index))
+        .collect()
+}
+
+fn join_index(table: &Table, key: &str) -> BTreeMap<String, Vec<usize>> {
+    let Some(index) = table.column_index(key) else {
+        return BTreeMap::new();
+    };
+    let mut matches = BTreeMap::new();
+    for (row_index, row) in table.rows.iter().enumerate() {
+        if let Some(key) = row_key(row, index) {
+            matches.entry(key).or_insert_with(Vec::new).push(row_index);
+        }
+    }
+    matches
+}
+
+fn row_key(row: &Row, index: usize) -> Option<String> {
+    match row.values.get(index).unwrap_or(&Value::Null) {
+        Value::Null => None,
+        value => Some(value.to_csv_cell()),
+    }
+}
+
+fn combine_rows(
+    left_row: &Row,
+    right_row: Option<&Row>,
+    right_value_indices: &[usize],
+    left_width: usize,
+) -> Row {
+    let mut values = (0..left_width)
+        .map(|index| left_row.values.get(index).cloned().unwrap_or(Value::Null))
+        .collect::<Vec<_>>();
+    match right_row {
+        Some(right_row) => {
+            values.extend(
+                right_value_indices
+                    .iter()
+                    .map(|index| right_row.values.get(*index).cloned().unwrap_or(Value::Null)),
+            );
+        }
+        None => values.extend((0..right_value_indices.len()).map(|_| Value::Null)),
+    }
+    Row { values }
+}
+
+fn right_only_row(
+    right_row: &Row,
+    right_key_index: usize,
+    left_key_index: usize,
+    left_width: usize,
+    right_value_indices: &[usize],
+) -> Row {
+    let mut values = vec![Value::Null; left_width];
+    if let Some(value) = right_row.values.get(right_key_index) {
+        if let Some(left_key) = values.get_mut(left_key_index) {
+            *left_key = value.clone();
+        }
+    }
+    values.extend(
+        right_value_indices
+            .iter()
+            .map(|index| right_row.values.get(*index).cloned().unwrap_or(Value::Null)),
+    );
+    Row { values }
+}
+
+fn join_semi_anti(
+    left: Table,
+    right: &Table,
+    left_key: &str,
+    right_key: &str,
+    kind: JoinKindIr,
+) -> Table {
+    let Some(left_index) = left.column_index(left_key) else {
+        return left;
+    };
+    let right_matches = join_index(right, right_key);
+    let rows = left
+        .rows
+        .iter()
+        .filter(|row| {
+            let matched = row_key(row, left_index)
+                .as_ref()
+                .is_some_and(|key| right_matches.contains_key(key));
+            match kind {
+                JoinKindIr::Semi => matched,
+                JoinKindIr::Anti => !matched,
+                _ => unreachable!("semi/anti helper called for non-semi join"),
+            }
+        })
+        .cloned()
+        .collect();
+    Table {
+        columns: left.columns,
+        rows,
+    }
+}
+
+fn ensure_key_types_compatible(
+    left: &Table,
+    left_key: &str,
+    right: &Table,
+    right_key: &str,
+    span: Span,
+) -> Result<(), Diagnostic> {
+    let left_classes = column_value_classes(left, left_key);
+    let right_classes = column_value_classes(right, right_key);
+    if left_classes.is_empty() || right_classes.is_empty() || left_classes == right_classes {
+        return Ok(());
+    }
+
+    Err(Diagnostic::error(
+        codes::E1208,
+        format!("join keys `{left_key}` and `{right_key}` have incompatible observed types"),
+        span,
+    ))
+}
+
+fn ensure_union_compatible(
+    left: &Table,
+    right: &Table,
+    by_name: bool,
+    span: Span,
+) -> Result<(), Diagnostic> {
+    if by_name {
+        let left_names: BTreeSet<&String> = left.columns.iter().collect();
+        let right_names: BTreeSet<&String> = right.columns.iter().collect();
+        if left_names != right_names {
+            return Err(Diagnostic::error(
+                codes::E1209,
+                "union schemas have different column names",
+                span,
+            ));
+        }
+        for column in &left.columns {
+            ensure_union_column_compatible(left, column, right, column, span)?;
+        }
+    } else {
+        if left.columns.len() != right.columns.len() {
+            return Err(Diagnostic::error(
+                codes::E1209,
+                "union schemas have different column counts",
+                span,
+            ));
+        }
+        for (left_column, right_column) in left.columns.iter().zip(&right.columns) {
+            ensure_union_column_compatible(left, left_column, right, right_column, span)?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_union_column_compatible(
+    left: &Table,
+    left_column: &str,
+    right: &Table,
+    right_column: &str,
+    span: Span,
+) -> Result<(), Diagnostic> {
+    let left_classes = column_value_classes(left, left_column);
+    let right_classes = column_value_classes(right, right_column);
+    if left_classes.is_empty() || right_classes.is_empty() || left_classes == right_classes {
+        return Ok(());
+    }
+
+    Err(Diagnostic::error(
+        codes::E1209,
+        format!(
+            "union columns `{left_column}` and `{right_column}` have incompatible observed types"
+        ),
+        span,
+    ))
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ValueClass {
+    Bool,
+    Number,
+    String,
+}
+
+fn column_value_classes(table: &Table, column: &str) -> BTreeSet<ValueClass> {
+    let Some(index) = table.column_index(column) else {
+        return BTreeSet::new();
+    };
+    table
+        .rows
+        .iter()
+        .filter_map(|row| match row.values.get(index).unwrap_or(&Value::Null) {
+            Value::Null => None,
+            Value::Bool(_) => Some(ValueClass::Bool),
+            Value::Number(_) => Some(ValueClass::Number),
+            Value::String(_) => Some(ValueClass::String),
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -876,5 +1297,147 @@ mod tests {
             String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
             "order_id,region_channel,net_amount,priority\nA1,NORTH:web,100,standard\nA3,WEST:web,150,high\n"
         );
+    }
+
+    #[test]
+    fn executes_left_join_with_binding_and_suffixes() {
+        let io = InMemoryDriverIo::default()
+            .with_file_bytes(
+                "memory/sales.csv",
+                "sale_id,customer_id,amount,segment\nS1,C001,120,Direct\nS2,C999,50,Unknown\nS3,C003,200,Direct\n",
+            )
+            .with_file_bytes(
+                "memory/customers.csv",
+                "customer_id,segment\nC001,Enterprise\nC003,Consumer\n",
+            );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"let customers =
+  load "customers.csv"
+
+load "sales.csv"
+  | join customers on "customer_id" kind left
+  | select "sale_id", "customer_id", "segment", "segment_right"
+  | sort "sale_id""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "sale_id,customer_id,segment,segment_right\nS1,C001,Direct,Enterprise\nS2,C999,Unknown,\nS3,C003,Direct,Consumer\n"
+        );
+    }
+
+    #[test]
+    fn executes_full_join_with_unmatched_right_rows_sorted_by_key() {
+        let io = InMemoryDriverIo::default()
+            .with_file_bytes("memory/left.csv", "id,left_value\nB,left-b\n")
+            .with_file_bytes(
+                "memory/right.csv",
+                "id,right_value\nC,right-c\nA,right-a\nB,right-b\n",
+            );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"let right_side =
+  load "right.csv"
+
+load "left.csv"
+  | join right_side on "id" kind full"#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "id,left_value,right_value\nB,left-b,right-b\nA,,right-a\nC,,right-c\n"
+        );
+    }
+
+    #[test]
+    fn executes_union_by_name_and_distinct() {
+        let io = InMemoryDriverIo::default()
+            .with_file_bytes(
+                "memory/day1.csv",
+                "order_id,region,amount\nA1,North,10\nA2,South,20\n",
+            )
+            .with_file_bytes(
+                "memory/day2.csv",
+                "amount,region,order_id\n20,South,A2\n30,West,A3\n",
+            );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"let day2 =
+  load "day2.csv"
+
+load "day1.csv"
+  | union day2 by_name true distinct true
+  | sort "order_id""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "order_id,region,amount\nA1,North,10\nA2,South,20\nA3,West,30\n"
+        );
+    }
+
+    #[test]
+    fn incompatible_join_key_types_report_e1208() {
+        let io = InMemoryDriverIo::default()
+            .with_file_bytes("memory/left.csv", "id,value\n1,left\n")
+            .with_file_bytes("memory/right.csv", "id,label\nA,right\n");
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"let right_side =
+  load "right.csv"
+
+load "left.csv"
+  | join right_side on "id""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+            },
+            &io,
+        );
+
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E1208"));
+        assert!(result.stdout.is_none());
     }
 }

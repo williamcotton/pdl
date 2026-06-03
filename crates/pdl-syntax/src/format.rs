@@ -1,8 +1,8 @@
 use pdl_core::Severity;
 
 use crate::{
-    parse, AggItem, BinaryOp, Expr, MutateItem, NullsOrder, Pipeline, PipelineStart, SinkRef,
-    SortDirection, SourceRef, Spanned, Stage, UnaryOp,
+    parse, AggItem, BinaryOp, Expr, JoinOn, MutateItem, NullsOrder, Pipeline, PipelineStart,
+    SinkRef, SortDirection, SourceRef, Spanned, Stage, UnaryOp, UnionOptionKind,
 };
 
 pub type FormatResult = Option<String>;
@@ -129,6 +129,28 @@ fn format_stage(stage: &Stage) -> String {
                 .join(", ")
         ),
         Stage::Limit { n, .. } => format!("limit {n}"),
+        Stage::Join {
+            source, on, kind, ..
+        } => {
+            let mut text = format!("join {} on {}", source.value, format_join_on(on));
+            if *kind != crate::JoinKind::Inner {
+                text.push_str(&format!(" kind {}", kind.as_str()));
+            }
+            text
+        }
+        Stage::Union {
+            source, options, ..
+        } => {
+            let mut text = format!("union {}", source.value);
+            for option in options {
+                let name = match option.kind {
+                    UnionOptionKind::ByName => "by_name",
+                    UnionOptionKind::Distinct => "distinct",
+                };
+                text.push_str(&format!(" {name} {}", option.value.value));
+            }
+            text
+        }
         Stage::Distinct { columns, .. } if columns.is_empty() => "distinct".to_string(),
         Stage::Distinct { columns, .. } => format!("distinct {}", format_columns(columns)),
         Stage::Save(save) => {
@@ -142,6 +164,15 @@ fn format_stage(stage: &Stage) -> String {
             text
         }
         Stage::Unsupported { name, .. } => name.value.clone(),
+    }
+}
+
+fn format_join_on(on: &JoinOn) -> String {
+    match on {
+        JoinOn::Same(column) => quote(&column.value),
+        JoinOn::Pair { left, right, .. } => {
+            format!("({}, {})", quote(&left.value), quote(&right.value))
+        }
     }
 }
 

@@ -206,6 +206,18 @@ pub enum Stage {
         n: usize,
         span: Span,
     },
+    Join {
+        source: Spanned<String>,
+        on: JoinOn,
+        kind: JoinKind,
+        kind_span: Option<Span>,
+        span: Span,
+    },
+    Union {
+        source: Spanned<String>,
+        options: Vec<UnionOption>,
+        span: Span,
+    },
     Distinct {
         columns: Vec<Spanned<String>>,
         span: Span,
@@ -229,6 +241,8 @@ impl Stage {
             | Stage::Agg { span, .. }
             | Stage::Sort { span, .. }
             | Stage::Limit { span, .. }
+            | Stage::Join { span, .. }
+            | Stage::Union { span, .. }
             | Stage::Distinct { span, .. }
             | Stage::Unsupported { span, .. } => *span,
             Stage::Save(save) => save.span,
@@ -275,6 +289,75 @@ pub struct SortItem {
     pub column: Spanned<String>,
     pub direction: SortDirection,
     pub nulls: Option<NullsOrder>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum JoinOn {
+    Same(Spanned<String>),
+    Pair {
+        left: Spanned<String>,
+        right: Spanned<String>,
+        span: Span,
+    },
+}
+
+impl JoinOn {
+    pub fn span(&self) -> Span {
+        match self {
+            JoinOn::Same(column) => column.span,
+            JoinOn::Pair { span, .. } => *span,
+        }
+    }
+
+    pub fn left(&self) -> &Spanned<String> {
+        match self {
+            JoinOn::Same(column) => column,
+            JoinOn::Pair { left, .. } => left,
+        }
+    }
+
+    pub fn right(&self) -> &Spanned<String> {
+        match self {
+            JoinOn::Same(column) => column,
+            JoinOn::Pair { right, .. } => right,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JoinKind {
+    Inner,
+    Left,
+    Right,
+    Full,
+    Semi,
+    Anti,
+}
+
+impl JoinKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JoinKind::Inner => "inner",
+            JoinKind::Left => "left",
+            JoinKind::Right => "right",
+            JoinKind::Full => "full",
+            JoinKind::Semi => "semi",
+            JoinKind::Anti => "anti",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnionOption {
+    pub kind: UnionOptionKind,
+    pub value: Spanned<bool>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnionOptionKind {
+    ByName,
+    Distinct,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -524,12 +607,10 @@ impl<'a> Parser<'a> {
             "agg" => self.parse_agg(name.span),
             "sort" => self.parse_sort(name.span),
             "limit" => self.parse_limit(name.span),
+            "join" => self.parse_join(name.span),
+            "union" => self.parse_union(name.span),
             "distinct" => self.parse_distinct(name.span),
             "save" => self.parse_save(name.span).map(Stage::Save),
-            "join" | "union" => {
-                let span = self.consume_until_stage_boundary(name.span);
-                Some(Stage::Unsupported { name, span })
-            }
             _ => {
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1201,
@@ -540,6 +621,150 @@ impl<'a> Parser<'a> {
                 Some(Stage::Unsupported { name, span })
             }
         }
+    }
+
+    fn parse_join(&mut self, name_span: Span) -> Option<Stage> {
+        let source = self.expect_identifier("join source")?;
+        if !self.consume_ident("on") {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1203,
+                "join requires `on`",
+                self.current().span,
+            ));
+        }
+        let on = self.parse_join_on()?;
+        let mut end = on.span().end;
+        let mut kind = JoinKind::Inner;
+        let mut kind_span = None;
+        if self.consume_ident("kind") {
+            let (parsed, span) = self.parse_join_kind();
+            kind = parsed;
+            kind_span = Some(span);
+            end = span.end;
+        }
+        if !self.at_stage_boundary() {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1204,
+                "unknown join option",
+                self.current().span,
+            ));
+            end = self.consume_until_stage_boundary(name_span).end;
+        }
+        Some(Stage::Join {
+            source,
+            on,
+            kind,
+            kind_span,
+            span: Span::new(name_span.start, end),
+        })
+    }
+
+    fn parse_join_on(&mut self) -> Option<JoinOn> {
+        if self.consume_lparen() {
+            let start = self.previous_span().start;
+            let left = self.expect_column_name()?;
+            if !self.consume_comma() {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E0001,
+                    "expected `,`",
+                    self.current().span,
+                ));
+            }
+            let right = self.expect_column_name()?;
+            let close = self.expect_rparen();
+            let end = close.map_or(right.span.end, |token| token.span.end);
+            return Some(JoinOn::Pair {
+                left,
+                right,
+                span: Span::new(start, end),
+            });
+        }
+
+        self.expect_column_name().map(JoinOn::Same)
+    }
+
+    fn parse_join_kind(&mut self) -> (JoinKind, Span) {
+        let token = self.advance().clone();
+        match token.kind {
+            TokenKind::Ident(value) => {
+                let kind = match value.as_str() {
+                    "inner" => Some(JoinKind::Inner),
+                    "left" => Some(JoinKind::Left),
+                    "right" => Some(JoinKind::Right),
+                    "full" => Some(JoinKind::Full),
+                    "semi" => Some(JoinKind::Semi),
+                    "anti" => Some(JoinKind::Anti),
+                    _ => None,
+                };
+                match kind {
+                    Some(kind) => (kind, token.span),
+                    None => {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1223,
+                            format!("invalid join kind `{value}`"),
+                            token.span,
+                        ));
+                        (JoinKind::Inner, token.span)
+                    }
+                }
+            }
+            _ => {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1223,
+                    "invalid join kind",
+                    token.span,
+                ));
+                (JoinKind::Inner, token.span)
+            }
+        }
+    }
+
+    fn parse_union(&mut self, name_span: Span) -> Option<Stage> {
+        let source = self.expect_identifier("union source")?;
+        let mut options = Vec::new();
+        while !self.at_stage_boundary() {
+            let option = self.expect_identifier("union option")?;
+            let kind = match option.value.as_str() {
+                "by_name" => UnionOptionKind::ByName,
+                "distinct" => UnionOptionKind::Distinct,
+                _ => {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E1204,
+                        format!("unknown union option `{}`", option.value),
+                        option.span,
+                    ));
+                    if !self.at_stage_boundary() {
+                        let _ = self.advance();
+                    }
+                    continue;
+                }
+            };
+            if options
+                .iter()
+                .any(|existing: &UnionOption| existing.kind == kind)
+            {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1205,
+                    format!("duplicate union option `{}`", option.value),
+                    option.span,
+                ));
+            }
+            let value = self.parse_bool_literal(&option.value)?;
+            options.push(UnionOption {
+                kind,
+                span: option.span.join(value.span),
+                value,
+            });
+        }
+
+        let end = options
+            .last()
+            .map_or(source.span.end, |option| option.span.end);
+        Some(Stage::Union {
+            source,
+            options,
+            span: Span::new(name_span.start, end),
+        })
     }
 
     fn parse_filter(&mut self, name_span: Span) -> Option<Stage> {
@@ -875,6 +1100,22 @@ impl<'a> Parser<'a> {
             }
         }
         Some(columns)
+    }
+
+    fn parse_bool_literal(&mut self, option: &str) -> Option<Spanned<bool>> {
+        let token = self.advance().clone();
+        match token.kind {
+            TokenKind::Ident(value) if value == "true" => Some(Spanned::new(true, token.span)),
+            TokenKind::Ident(value) if value == "false" => Some(Spanned::new(false, token.span)),
+            _ => {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1206,
+                    format!("union option `{option}` requires `true` or `false`"),
+                    token.span,
+                ));
+                Some(Spanned::new(false, token.span))
+            }
+        }
     }
 
     fn parse_source_ref(&mut self) -> Option<SourceRef> {
@@ -1346,6 +1587,7 @@ fn is_reserved_keyword(value: &str) -> bool {
             | "as"
             | "on"
             | "kind"
+            | "by_name"
             | "format"
             | "stdin"
             | "stdout"
@@ -1484,6 +1726,51 @@ mod tests {
             panic!("distinct stage");
         };
         assert_eq!(columns[0].value, "order_id");
+    }
+
+    #[test]
+    fn parses_join_and_union_stages() {
+        let result = parse(
+            r#"let customers =
+  load "customers.csv"
+
+load "sales.csv"
+  | join customers on ("customer_id", "id") kind left
+  | union customers by_name true distinct false"#,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let main = result.program.main.expect("main pipeline");
+        let Stage::Join {
+            source, on, kind, ..
+        } = &main.stages[0]
+        else {
+            panic!("join stage");
+        };
+        assert_eq!(source.value, "customers");
+        assert_eq!(on.left().value, "customer_id");
+        assert_eq!(on.right().value, "id");
+        assert_eq!(*kind, JoinKind::Left);
+        let Stage::Union {
+            source, options, ..
+        } = &main.stages[1]
+        else {
+            panic!("union stage");
+        };
+        assert_eq!(source.value, "customers");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].kind, UnionOptionKind::ByName);
+        assert!(options[0].value.value);
+        assert_eq!(options[1].kind, UnionOptionKind::Distinct);
+        assert!(!options[1].value.value);
+    }
+
+    #[test]
+    fn invalid_join_kind_uses_join_kind_diagnostic() {
+        let result = parse(r#"load "sales.csv" | join customers on "id" kind outer"#);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "E1223");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use pdl_core::{codes, Diagnostic, Span};
 use pdl_syntax::{
-    AggItem, Binding, Expr, LoadStage, Pipeline, PipelineStart, Program, SaveStage, SourceRef,
-    Stage,
+    AggItem, Binding, Expr, JoinKind, LoadStage, Pipeline, PipelineStart, Program, SaveStage,
+    SourceRef, Stage, UnionOption, UnionOptionKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -30,6 +30,7 @@ where
     let mut analyzer = Analyzer {
         diagnostics: Vec::new(),
         load_schema: &mut load_schema,
+        binding_decls: BTreeMap::new(),
         binding_schemas: BTreeMap::new(),
         traces: Vec::new(),
         next_stage_id: 0,
@@ -52,6 +53,7 @@ where
 {
     diagnostics: Vec<Diagnostic>,
     load_schema: &'a mut F,
+    binding_decls: BTreeMap<String, Binding>,
     binding_schemas: BTreeMap<String, Vec<String>>,
     traces: Vec<StageTrace>,
     next_stage_id: usize,
@@ -64,13 +66,12 @@ where
     fn analyze(&mut self, program: &Program) {
         self.check_duplicate_bindings(&program.bindings);
         for binding in &program.bindings {
-            if let Some(schema) = self.analyze_pipeline(&binding.pipeline) {
-                self.binding_schemas
-                    .insert(binding.name.value.clone(), schema);
-            }
+            self.binding_decls
+                .entry(binding.name.value.clone())
+                .or_insert_with(|| binding.clone());
         }
         if let Some(main) = &program.main {
-            self.analyze_pipeline(main);
+            self.analyze_pipeline(main, &mut Vec::new());
         }
     }
 
@@ -87,7 +88,52 @@ where
         }
     }
 
-    fn analyze_pipeline(&mut self, pipeline: &Pipeline) -> Option<Vec<String>> {
+    fn analyze_binding(
+        &mut self,
+        name: &str,
+        reference_span: Span,
+        stack: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        if let Some(schema) = self.binding_schemas.get(name) {
+            return Some(schema.clone());
+        }
+
+        if let Some(index) = stack.iter().position(|active| active == name) {
+            let mut path = stack[index..].to_vec();
+            path.push(name.to_string());
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1501,
+                format!("binding dependency cycle: {}", path.join(" -> ")),
+                reference_span,
+            ));
+            return None;
+        }
+
+        let Some(binding) = self.binding_decls.get(name).cloned() else {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1007,
+                format!("unknown binding `{name}`"),
+                reference_span,
+            ));
+            return None;
+        };
+
+        stack.push(name.to_string());
+        let schema = self.analyze_pipeline(&binding.pipeline, stack);
+        stack.pop();
+
+        if let Some(schema) = &schema {
+            self.binding_schemas
+                .insert(binding.name.value.clone(), schema.clone());
+        }
+        schema
+    }
+
+    fn analyze_pipeline(
+        &mut self,
+        pipeline: &Pipeline,
+        stack: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
         let mut schema = match &pipeline.start {
             PipelineStart::Load(load) => match (self.load_schema)(LoadRequest { load, path: None })
             {
@@ -97,17 +143,7 @@ where
                     return None;
                 }
             },
-            PipelineStart::Binding(name) => match self.binding_schemas.get(&name.value) {
-                Some(schema) => schema.clone(),
-                None => {
-                    self.diagnostics.push(Diagnostic::error(
-                        codes::E1007,
-                        format!("unknown binding `{}`", name.value),
-                        name.span,
-                    ));
-                    return None;
-                }
-            },
+            PipelineStart::Binding(name) => self.analyze_binding(&name.value, name.span, stack)?,
         };
 
         let mut grouping: Option<Vec<String>> = None;
@@ -214,6 +250,41 @@ where
                     }
                 }
                 Stage::Limit { .. } => {}
+                Stage::Join {
+                    source, on, kind, ..
+                } => {
+                    let right_schema = self.analyze_binding(&source.value, source.span, stack)?;
+                    self.require_column(&schema, &on.left().value, on.left().span);
+                    self.require_column(&right_schema, &on.right().value, on.right().span);
+                    match joined_schema(&schema, &right_schema, &on.right().value, *kind) {
+                        Ok(output) => schema = output,
+                        Err(collision) => {
+                            self.diagnostics.push(Diagnostic::error(
+                                codes::E1207,
+                                format!("output column collision `{collision}`"),
+                                source.span,
+                            ));
+                        }
+                    }
+                    grouping = None;
+                }
+                Stage::Union {
+                    source, options, ..
+                } => {
+                    let right_schema = self.analyze_binding(&source.value, source.span, stack)?;
+                    let by_name = union_option_value(options, UnionOptionKind::ByName);
+                    if !union_schema_compatible(&schema, &right_schema, by_name) {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1209,
+                            format!(
+                                "binding `{}` has an incompatible union schema",
+                                source.value
+                            ),
+                            source.span,
+                        ));
+                    }
+                    grouping = None;
+                }
                 Stage::Distinct { columns, .. } => {
                     for column in columns {
                         self.require_column(&schema, &column.value, column.span);
@@ -224,7 +295,7 @@ where
                 Stage::Unsupported { name, .. } => {
                     self.diagnostics.push(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{}` is deferred in 0.11.0", name.value),
+                        format!("stage `{}` is deferred in 0.12.0", name.value),
                         name.span,
                     ));
                 }
@@ -250,7 +321,7 @@ where
             if !format_info(&format.value).is_some_and(|info| info.save_supported) {
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1215,
-                    format!("format `{}` is not supported in 0.11.0", format.value),
+                    format!("format `{}` is not supported in 0.12.0", format.value),
                     format.span,
                 ));
             }
@@ -357,6 +428,50 @@ where
     }
 }
 
+fn joined_schema(
+    left_schema: &[String],
+    right_schema: &[String],
+    right_key: &str,
+    kind: JoinKind,
+) -> Result<Vec<String>, String> {
+    if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+        return Ok(left_schema.to_vec());
+    }
+
+    let mut output = left_schema.to_vec();
+    for column in right_schema {
+        if column == right_key {
+            continue;
+        }
+        let mut output_name = column.clone();
+        if output.iter().any(|existing| existing == &output_name) {
+            output_name.push_str("_right");
+            if output.iter().any(|existing| existing == &output_name) {
+                return Err(output_name);
+            }
+        }
+        output.push(output_name);
+    }
+    Ok(output)
+}
+
+fn union_option_value(options: &[UnionOption], kind: UnionOptionKind) -> bool {
+    options
+        .iter()
+        .find(|option| option.kind == kind)
+        .is_some_and(|option| option.value.value)
+}
+
+fn union_schema_compatible(left_schema: &[String], right_schema: &[String], by_name: bool) -> bool {
+    if by_name {
+        let left: BTreeSet<&String> = left_schema.iter().collect();
+        let right: BTreeSet<&String> = right_schema.iter().collect();
+        left == right
+    } else {
+        left_schema.len() == right_schema.len()
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ExprRole {
     PredicateRoot,
@@ -458,6 +573,8 @@ fn stage_name(stage: &Stage) -> &'static str {
         Stage::Agg { .. } => "agg",
         Stage::Sort { .. } => "sort",
         Stage::Limit { .. } => "limit",
+        Stage::Join { .. } => "join",
+        Stage::Union { .. } => "union",
         Stage::Distinct { .. } => "distinct",
         Stage::Save(_) => "save",
         Stage::Unsupported { name, .. } => match name.value.as_str() {
@@ -564,6 +681,118 @@ mod tests {
 
         assert!(analysis.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "E1005" && diagnostic.message == "unknown column `net_amount`"
+        }));
+        assert!(analysis.ir.is_none());
+    }
+
+    #[test]
+    fn join_adds_right_non_key_columns_with_suffixes() {
+        let parse = pdl_syntax::parse(
+            r#"let customers =
+  load "customers.csv"
+
+load "sales.csv"
+  | join customers on "customer_id" kind left"#,
+        );
+
+        let analysis = analyze_program(&parse.program, |request| match &request.load.source {
+            SourceRef::Path(path) if path.value == "sales.csv" => Ok(vec![
+                "customer_id".to_string(),
+                "amount".to_string(),
+                "segment".to_string(),
+            ]),
+            SourceRef::Path(path) if path.value == "customers.csv" => {
+                Ok(vec!["customer_id".to_string(), "segment".to_string()])
+            }
+            _ => panic!("unexpected load request"),
+        });
+
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
+        let join_trace = analysis
+            .traces
+            .iter()
+            .find(|trace| trace.stage_name == "join")
+            .expect("join trace");
+        assert_eq!(
+            join_trace.output_schema,
+            Some(vec![
+                "customer_id".to_string(),
+                "amount".to_string(),
+                "segment".to_string(),
+                "segment_right".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn union_rejects_incompatible_schema() {
+        let parse = pdl_syntax::parse(
+            r#"let extra =
+  load "extra.csv"
+
+load "sales.csv"
+  | union extra"#,
+        );
+
+        let analysis = analyze_program(&parse.program, |request| match &request.load.source {
+            SourceRef::Path(path) if path.value == "sales.csv" => {
+                Ok(vec!["order_id".to_string(), "amount".to_string()])
+            }
+            SourceRef::Path(path) if path.value == "extra.csv" => Ok(vec!["order_id".to_string()]),
+            _ => panic!("unexpected load request"),
+        });
+
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E1209"
+                && diagnostic.message == "binding `extra` has an incompatible union schema"
+        }));
+        assert!(analysis.ir.is_none());
+    }
+
+    #[test]
+    fn unused_binding_is_not_loaded() {
+        let parse = pdl_syntax::parse(
+            r#"let unused =
+  load "missing.csv"
+
+load "sales.csv"
+  | select "amount""#,
+        );
+
+        let analysis = analyze_program(&parse.program, |request| match &request.load.source {
+            SourceRef::Path(path) if path.value == "sales.csv" => Ok(vec!["amount".to_string()]),
+            SourceRef::Path(path) => panic!("unused binding loaded `{}`", path.value),
+            SourceRef::Stdin(_) => panic!("unexpected stdin"),
+        });
+
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
+        assert!(analysis.ir.is_some());
+    }
+
+    #[test]
+    fn binding_cycle_reports_cycle_path() {
+        let parse = pdl_syntax::parse(
+            r#"let a =
+  b
+
+let b =
+  a
+
+a"#,
+        );
+
+        let analysis = analyze_program(&parse.program, |_| panic!("no load expected"));
+
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E1501" && diagnostic.message.contains("a -> b -> a")
         }));
         assert!(analysis.ir.is_none());
     }
