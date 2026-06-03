@@ -17,5 +17,4 @@ pdl-data = { workspace = true, features = ["native-formats"] }
 pdl-driver = { workspace = true, features = ["native-formats"] }
 pdl-exec = { workspace = true, features = ["native-formats"] }
 pdl-lsp = { workspace = true }
-serde_json = { workspace = true }
 tokio = { workspace = true }

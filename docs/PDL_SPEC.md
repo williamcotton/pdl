@@ -1,32 +1,35 @@
 # PDL Detailed Specification
 
-Status: Draft 0.3.0
+Status: Draft 0.4.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.3.0`.
+The current repository implementation is `0.4.0`.
 
-This release keeps the existing CSV-backed language and runtime slice stable and
-promotes diagnostics into a first-class compatibility surface. It implements the
-`pdl` CLI commands `run`, `check`, and `version`; CSV file loading with header
+This release keeps the existing CSV-backed language and runtime slice stable
+while establishing durable implementation boundaries. It implements the `pdl`
+CLI commands `run`, `check`, `lsp`, and `version`; CSV file loading with header
 rows; CSV file and stdout output; deterministic in-memory execution for `load`,
 `filter`, `select`, `drop`, `rename`, `group_by`, `agg`, `sort`, `limit`, and
 `save`; and the aggregate functions `count`, `sum`, `mean`, `min`, and `max`.
 It also implements registered lettered diagnostic codes in `pdl-core`, a
 `codes::*` registry, `related` spans and `help` diagnostic payload fields,
-diagnostic catalog drift tests, `pdl lsp` with full-document sync, diagnostics,
-completion, hover, formatting, semantic tokens, document symbols, and
-same-document binding definition/reference/rename; and it ships a thin VS Code
-client under `editors/vscode/`.
+diagnostic catalog drift tests, a lossless lexer with trivia and EOF, a rowan
+CST with typed AST views, a syntax-owned formatter boundary, driver I/O and
+phase-tagged preparation reports, semantic registries and IR, execution
+planning separated from output emission, `pdl lsp` with full-document sync,
+diagnostics, completion, hover, formatting, semantic tokens, document symbols,
+and same-document binding definition/reference/rename; and it ships a thin VS
+Code client under `editors/vscode/` plus browser-safe WASM ABI helpers.
 
-Version 0.3.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
+Version 0.4.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
 loading, stream sniffing, configurable CSV dialect options, `mutate`, `join`,
-`union`, `distinct`, window expressions, manifests, schema/plan subcommands,
-CLI formatting, full LSP code actions or cross-document navigation, WASM entry
-points, or browser demo support. Those features are tracked as deferred or
-planned work in successor release plans such as `docs/V0_4_PLAN.md`.
+`union`, `distinct`, window expressions, schema/plan subcommands, CLI
+formatting, full LSP code actions or cross-document navigation, or browser demo
+support. Those features are tracked as deferred or planned work in successor
+release plans such as `docs/V0_5_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -112,7 +115,7 @@ The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
 over a partition and order of rows. Window expressions are planned but not
-implemented in version 0.3.0.
+implemented in version 0.4.0.
 
 The keyword `column` means a named field with a static PDL type and nullability.
 
@@ -818,7 +821,7 @@ Planned window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are not reserved by the version 0.3.0 implementation until window
+These words are not reserved by the version 0.4.0 implementation until window
 syntax is implemented.
 
 ### 6.6 Quoted Tokens
@@ -1093,7 +1096,7 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are planned syntax and are not implemented in version 0.3.0.
+Window expressions are planned syntax and are not implemented in version 0.4.0.
 
 Until implemented, parsers MAY recover with `E1211` or ordinary parse diagnostics
 when they encounter `over`.
@@ -1729,7 +1732,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions (Planned)
 
-Window function syntax is planned and not implemented in version 0.3.0.
+Window function syntax is planned and not implemented in version 0.4.0.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
 
@@ -2138,14 +2141,15 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.3.0` LSP implementation provides diagnostics,
+The current `0.4.0` LSP implementation provides diagnostics,
 completion, hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
 
 The current formatter withholds edits for documents containing comments because
-the current parser does not preserve comment trivia. This avoids changing source
-text in ways the syntax tree cannot faithfully represent yet.
+comment attachment is not yet source-preserving. The lexer and CST preserve
+comment trivia, but the formatter does not yet have stable placement rules for
+rewriting commented documents.
 
 ### 17.2 Completion
 
@@ -2392,7 +2396,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3777,7 +3781,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.3.0.
+PDL source does not require an explicit version declaration in draft 0.4.0.
 
 The implementation SHOULD report supported language version.
 
