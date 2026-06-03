@@ -13,6 +13,28 @@ fn read_workspace_file(path: &str) -> String {
 }
 
 #[test]
+fn core_has_no_internal_pdl_dependencies() {
+    let core = read_workspace_file("crates/pdl-core/Cargo.toml");
+
+    for forbidden in [
+        "pdl-syntax",
+        "pdl-data",
+        "pdl-semantics",
+        "pdl-driver",
+        "pdl-exec",
+        "pdl-editor-services",
+        "pdl-lsp",
+        "pdl-cli",
+        "pdl-wasm",
+    ] {
+        assert!(
+            !core.contains(forbidden),
+            "pdl-core must not depend on {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn syntax_and_semantics_keep_allowed_dependency_direction() {
     let syntax = read_workspace_file("crates/pdl-syntax/Cargo.toml");
     assert!(syntax.contains("pdl-core"));

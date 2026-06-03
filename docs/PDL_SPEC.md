@@ -1,16 +1,16 @@
 # PDL Detailed Specification
 
-Status: Draft 0.8.0
+Status: Draft 0.9.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.8.0`.
+The current repository implementation is `0.9.0`.
 
 This release keeps the existing CSV-backed language, runtime, editor, LSP, WASM,
 and browser demo slice stable while improving recoverable syntax diagnostics for
-malformed filter, aggregate, sort, and trailing-token cases. It implements the
+malformed filter, aggregate, sort, missing-pipe, and trailing-token cases. It implements the
 `pdl` CLI commands `run`, `check`, `lsp`, and `version`; CSV file loading with
 header rows; CSV file and stdout output; deterministic in-memory execution for
 `load`, `filter`, `select`, `drop`, `rename`, `group_by`, `agg`, `sort`,
@@ -33,13 +33,13 @@ React/Vite/Monaco demo under `demo/` with one PDL editor, one editable
 host-supplied CSV input, diagnostics from the WASM editor-service ABI, and CSV
 stdout output from WASM execution.
 
-Version 0.8.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
+Version 0.9.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
 loading, stream sniffing, configurable CSV dialect options, `mutate`, `join`,
 `union`, `distinct`, window expressions, schema/plan subcommands, CLI
 formatting, full LSP code actions or cross-document navigation, Arrow IPC
 browser output, virtual browser output sinks, or multi-dataset browser controls.
 Those features are tracked as deferred or planned work in successor release
-plans after `docs/V0_8_PLAN.md`.
+plans after `docs/V0_9_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -125,7 +125,7 @@ The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
 over a partition and order of rows. Window expressions are planned but not
-implemented in version 0.8.0.
+implemented in version 0.9.0.
 
 The keyword `column` means a named field with a static PDL type and nullability.
 
@@ -831,7 +831,7 @@ Planned window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are not reserved by the version 0.8.0 implementation until window
+These words are not reserved by the version 0.9.0 implementation until window
 syntax is implemented.
 
 ### 6.6 Quoted Tokens
@@ -927,6 +927,10 @@ Stage         ::= TransformStage | SaveStage ;
 A file contains zero or more `let` bindings followed by one main pipeline expression.
 
 The main pipeline expression is the default run target.
+
+If a valid stage starts where a pipeline tail is expected but the `|` token is
+missing, parsers MUST report `E0001` on the stage name and SHOULD recover as if
+the pipe were present.
 
 ### 7.2 Load Stage
 
@@ -1118,7 +1122,7 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are planned syntax and are not implemented in version 0.8.0.
+Window expressions are planned syntax and are not implemented in version 0.9.0.
 
 Until implemented, parsers MAY recover with `E1211` or ordinary parse diagnostics
 when they encounter `over`.
@@ -1758,7 +1762,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions (Planned)
 
-Window function syntax is planned and not implemented in version 0.8.0.
+Window function syntax is planned and not implemented in version 0.9.0.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
 
@@ -1935,6 +1939,14 @@ Operational logs MUST go to stderr so stdout remains a clean data stream.
 It MUST report syntax and semantic diagnostics.
 
 It SHOULD infer schemas from file metadata where cheap.
+
+Human-readable CLI diagnostics SHOULD use compact source rendering: a
+`file:line:column: severity[code]: message` header, the source line, and a caret
+underline for the primary span.
+
+Human-readable diagnostic rendering belongs to `pdl-cli`. `pdl-core` owns
+diagnostic values and source-position helpers, but MUST NOT expose
+terminal-specific diagnostic formatting.
 
 It SHOULD avoid reading full data files by default.
 
@@ -2167,7 +2179,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.8.0` LSP implementation provides diagnostics,
+The current `0.9.0` LSP implementation provides diagnostics,
 completion, hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
@@ -2331,11 +2343,11 @@ The v0.7 WASM implementation MUST expose packed JSON calls for:
   diagnostics plus the requested editor-service result
 
 The browser run request's host file map is format-neutral: keys are logical file
-paths and values are host-supplied file contents. Version 0.8.0 only requires
+paths and values are host-supplied file contents. Version 0.9.0 only requires
 CSV file contents to execute successfully because CSV is the only implemented
 data decoder. The ABI MUST NOT special-case CSV at the TypeScript editor layer.
 
-`pdl_run_json` in version 0.8.0 MUST support CSV stdout for the resulting table.
+`pdl_run_json` in version 0.9.0 MUST support CSV stdout for the resulting table.
 Virtual path-backed output sinks, Arrow IPC byte output, and non-CSV dataframe
 decoders remain deferred until a later plan promotes them.
 
@@ -2450,7 +2462,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3329,6 +3341,8 @@ pdl-core
 
 Practical rules:
 
+- `pdl-core` owns shared primitives and MUST NOT depend on any other PDL
+  internal crate.
 - `pdl-syntax` depends only on syntax concerns plus `pdl-core`.
 - `pdl-semantics` may depend on `pdl-syntax`, `pdl-data`, and `pdl-core`, but
   only through stable logical schema/type facts, never concrete engine types.
@@ -3434,7 +3448,7 @@ support:
 
 Descriptors record explicit format names, inferred path formats, and unresolved
 sniffing decisions. Real Arrow IPC parsing/writing, Parquet loading, JSON Lines
-loading, and stdin sniffing remain deferred past v0.8.0 unless a future plan
+loading, and stdin sniffing remain deferred past v0.9.0 unless a future plan
 promotes them with spec, examples, and tests.
 
 #### 19.7.8 Schema Cache And Preview Boundary
@@ -3990,7 +4004,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.8.0.
+PDL source does not require an explicit version declaration in draft 0.9.0.
 
 The implementation SHOULD report supported language version.
 

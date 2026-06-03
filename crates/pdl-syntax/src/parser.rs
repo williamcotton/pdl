@@ -431,13 +431,23 @@ impl<'a> Parser<'a> {
         };
 
         let mut stages = Vec::new();
-        while self.consume_pipe() {
-            if self.at_eof() {
+        loop {
+            if self.consume_pipe() {
+                if self.at_eof() {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E0006,
+                        "missing stage after pipe",
+                        self.previous_span(),
+                    ));
+                    break;
+                }
+            } else if self.at_recoverable_stage_start() {
                 self.diagnostics.push(Diagnostic::error(
-                    codes::E0006,
-                    "missing stage after pipe",
-                    self.previous_span(),
+                    codes::E0001,
+                    "expected `|` before stage",
+                    self.current().span,
                 ));
+            } else {
                 break;
             }
             if let Some(stage) = self.parse_stage() {
@@ -1162,6 +1172,10 @@ impl<'a> Parser<'a> {
         )
     }
 
+    fn at_recoverable_stage_start(&self) -> bool {
+        matches!(&self.current().kind, TokenKind::Ident(value) if is_recoverable_stage_name(value))
+    }
+
     fn current(&self) -> &Token {
         &self.tokens[self.pos]
     }
@@ -1217,6 +1231,25 @@ fn sink_span(sink: &SinkRef) -> Span {
         SinkRef::Path(value) => value.span,
         SinkRef::Stdout(span) => *span,
     }
+}
+
+fn is_recoverable_stage_name(value: &str) -> bool {
+    matches!(
+        value,
+        "filter"
+            | "select"
+            | "drop"
+            | "rename"
+            | "mutate"
+            | "group_by"
+            | "agg"
+            | "sort"
+            | "limit"
+            | "save"
+            | "join"
+            | "union"
+            | "distinct"
+    )
 }
 
 fn is_reserved_keyword(value: &str) -> bool {
@@ -1337,6 +1370,25 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn reports_missing_pipe_before_stage_and_recovers() {
+        let source = r#"load "sales.csv"
+  filter "staus" == "completed"
+  | group_by "region"
+  | agg count() as "orders""#;
+        let result = parse(source);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "E0001");
+        assert_eq!(
+            result.diagnostics[0].span.start,
+            source.find("filter").expect("filter offset")
+        );
+        let main = result.program.main.expect("main pipeline");
+        assert_eq!(main.stages.len(), 3);
+        assert!(matches!(main.stages[0], Stage::Filter { .. }));
     }
 
     #[test]

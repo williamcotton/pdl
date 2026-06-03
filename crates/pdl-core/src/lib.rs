@@ -7,7 +7,7 @@ pub mod span;
 pub use diagnostic::{all_codes, codes, Diagnostic, DiagnosticCode, RelatedSpan};
 pub use error::PdlError;
 pub use severity::Severity;
-pub use source::{line_col, render_diagnostic};
+pub use source::line_col;
 pub use span::{ByteOffset, Span};
 
 pub fn has_errors(diagnostics: &[Diagnostic]) -> bool {

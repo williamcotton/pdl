@@ -111,6 +111,7 @@ fn is_recoverable_parse_error_for_semantic_followup(diagnostic: &Diagnostic) -> 
     matches!(
         (diagnostic.code, diagnostic.message.as_str()),
         ("E0001", "expected operator in filter expression")
+            | ("E0001", "expected `|` before stage")
             | ("E1213", "aggregate items require `as`")
     )
 }
@@ -131,7 +132,7 @@ fn load_schema_for_request(
                 if format.value != "csv" {
                     return Err(Diagnostic::error(
                         codes::E1215,
-                        format!("format `{}` is not supported in 0.8.0", format.value),
+                        format!("format `{}` is not supported in 0.9.0", format.value),
                         format.span,
                     ));
                 }
@@ -151,7 +152,7 @@ fn load_schema_for_request(
         }
         SourceRef::Stdin(span) => Err(Diagnostic::error(
             codes::E1211,
-            "stdin loading is deferred in 0.8.0",
+            "stdin loading is deferred in 0.9.0",
             *span,
         )),
     }
@@ -258,6 +259,36 @@ mod tests {
         assert!(!diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "E0009"));
+        assert!(prepared.analysis.ir.is_none());
+    }
+
+    #[test]
+    fn missing_pipe_before_stage_keeps_column_diagnostics() {
+        let io = InMemoryDriverIo::default().with_schema(
+            "memory/sales.csv",
+            ["region", "status", "amount", "customer_age"],
+        );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "sales.csv"
+  filter "staus" == "completed"
+  | group_by "region"
+  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age", count() as "orders"
+  | sort "total_revenue" desc
+  | limit 3"#,
+            &io,
+        );
+        let diagnostics = prepared.diagnostics();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E0001" && diagnostic.message == "expected `|` before stage"
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E1005" && diagnostic.message == "unknown column `staus`"
+        }));
+        assert!(!diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0021"));
         assert!(prepared.analysis.ir.is_none());
     }
 

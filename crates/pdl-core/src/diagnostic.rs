@@ -185,8 +185,6 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::render_diagnostic;
-
     #[test]
     fn registered_codes_are_unique_and_well_formed() {
         let mut seen = BTreeSet::new();
@@ -207,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_payload_and_rendering_are_stable() {
+    fn diagnostic_payload_is_stable() {
         let diagnostic = Diagnostic::error(codes::E1005, "unknown column", Span::new(4, 6))
             .with_related(Span::new(0, 2), "source schema")
             .with_help("check the column spelling");
@@ -218,10 +216,6 @@ mod tests {
         assert_eq!(
             diagnostic.help.as_deref(),
             Some("check the column spelling")
-        );
-        assert_eq!(
-            render_diagnostic("test.pdl", "ab\ncde", &diagnostic),
-            "error[E1005] test.pdl:2:2: unknown column"
         );
     }
 
