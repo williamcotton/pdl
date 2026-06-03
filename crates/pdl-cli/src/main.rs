@@ -1,6 +1,7 @@
 mod args;
 mod diagnostics;
 mod handlers;
+mod render;
 
 use std::process::ExitCode;
 

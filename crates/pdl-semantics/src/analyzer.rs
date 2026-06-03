@@ -8,13 +8,14 @@ use std::path::PathBuf;
 
 use crate::ir::{lower_program, ProgramIr};
 use crate::registry::{accepts_arity, aggregate_function, format_info, scalar_function};
-use crate::schema::{GroupingState, StageTrace};
+use crate::schema::{GroupingState, PipelineSchema, PipelineSchemaLabel, StageTrace};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Analysis {
     pub diagnostics: Vec<Diagnostic>,
     pub ir: Option<ProgramIr>,
     pub traces: Vec<StageTrace>,
+    pub outputs: Vec<PipelineSchema>,
 }
 
 #[derive(Clone, Debug)]
@@ -33,6 +34,7 @@ where
         binding_decls: BTreeMap::new(),
         binding_schemas: BTreeMap::new(),
         traces: Vec::new(),
+        outputs: Vec::new(),
         next_stage_id: 0,
     };
     analyzer.analyze(program);
@@ -44,6 +46,7 @@ where
         diagnostics: analyzer.diagnostics,
         ir: (!has_error).then(|| lower_program(program)),
         traces: analyzer.traces,
+        outputs: analyzer.outputs,
     }
 }
 
@@ -56,6 +59,7 @@ where
     binding_decls: BTreeMap<String, Binding>,
     binding_schemas: BTreeMap<String, Vec<String>>,
     traces: Vec<StageTrace>,
+    outputs: Vec<PipelineSchema>,
     next_stage_id: usize,
 }
 
@@ -71,7 +75,13 @@ where
                 .or_insert_with(|| binding.clone());
         }
         if let Some(main) = &program.main {
-            self.analyze_pipeline(main, &mut Vec::new());
+            if let Some(columns) = self.analyze_pipeline(main, &mut Vec::new()) {
+                self.outputs.push(PipelineSchema {
+                    label: PipelineSchemaLabel::Main,
+                    span: main.span,
+                    columns,
+                });
+            }
         }
     }
 
@@ -125,6 +135,11 @@ where
         if let Some(schema) = &schema {
             self.binding_schemas
                 .insert(binding.name.value.clone(), schema.clone());
+            self.outputs.push(PipelineSchema {
+                label: PipelineSchemaLabel::Binding(binding.name.value.clone()),
+                span: binding.pipeline.span,
+                columns: schema.clone(),
+            });
         }
         schema
     }
@@ -295,7 +310,7 @@ where
                 Stage::Unsupported { name, .. } => {
                     self.diagnostics.push(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{}` is deferred in 0.13.0", name.value),
+                        format!("stage `{}` is deferred in 0.14.0", name.value),
                         name.span,
                     ));
                 }
@@ -321,7 +336,7 @@ where
             if !format_info(&format.value).is_some_and(|info| info.save_supported) {
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1215,
-                    format!("format `{}` is not supported in 0.13.0", format.value),
+                    format!("format `{}` is not supported in 0.14.0", format.value),
                     format.span,
                 ));
             }

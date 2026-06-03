@@ -17,9 +17,9 @@ pub use plan::{
     StreamKind, StreamUse,
 };
 pub use prepare::{
-    prepare_file, prepare_file_for_run, prepare_source, prepare_source_for_run_with_io,
-    prepare_source_with_io, prepare_source_with_options_and_io, program, PrepareOptions,
-    PreparedProgram,
+    prepare_file, prepare_file_for_binding_schema, prepare_file_for_run, prepare_file_with_options,
+    prepare_source, prepare_source_for_run_with_io, prepare_source_with_io,
+    prepare_source_with_options_and_io, program, PrepareOptions, PreparedProgram,
 };
 pub use report::{PhaseDiagnostic, PreparationReport, ReportPhase};
 pub use source::{SourceInput, SourceOrigin};

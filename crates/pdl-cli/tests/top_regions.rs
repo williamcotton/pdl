@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use pdl_data::{DataFormat, Row, Table, Value};
 
@@ -195,6 +196,121 @@ fn stdin_format_conflict_reports_e1217_on_stderr_with_empty_stdout() {
     assert!(!stderr.contains("E1806"), "{stderr}");
 }
 
+#[test]
+fn fmt_check_rejects_unformatted_source_and_fmt_rewrites() {
+    let path = temp_pdl_path("fmt-unformatted");
+    std::fs::write(&path, r#"load "sales.csv"|select "region""#).expect("write temp pdl");
+
+    let output = command_output_owned(&["fmt", "--check", path.to_str().expect("utf-8 path")]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
+    assert!(stderr.contains("is not formatted"), "{stderr}");
+
+    let output = command_output_owned(&["fmt", path.to_str().expect("utf-8 path")]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read formatted pdl"),
+        "load \"sales.csv\"\n  | select \"region\"\n"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn schema_command_prints_main_schema() {
+    let output = command_output(&["schema", "examples/top_regions.pdl"]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    assert!(stdout.contains("total_revenue"), "{stdout}");
+    assert!(stdout.contains("avg_age"), "{stdout}");
+}
+
+#[test]
+fn schema_binding_json_inspects_lazy_binding() {
+    let output = command_output(&[
+        "schema",
+        "examples/segment_revenue.pdl",
+        "--binding",
+        "customers",
+        "--json",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    assert!(stdout.contains("\"binding\": \"customers\""), "{stdout}");
+    assert!(stdout.contains("\"name\": \"segment\""), "{stdout}");
+}
+
+#[test]
+fn plan_command_prints_dry_run_execution_plan() {
+    let output = command_output(&["plan", "examples/top_regions.pdl", "--stdout-format", "csv"]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    assert!(stdout.contains("execution:"), "{stdout}");
+    assert!(stdout.contains("stdout format csv"), "{stdout}");
+}
+
+#[test]
+fn ast_ir_and_manifest_commands_emit_json() {
+    let ast = command_output(&["ast", "examples/top_regions.pdl"]);
+    assert!(
+        ast.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&ast.stderr)
+    );
+    let ast_stdout = String::from_utf8(ast.stdout).expect("ast stdout is UTF-8");
+    assert!(ast_stdout.contains("\"program\""), "{ast_stdout}");
+    assert!(ast_stdout.contains("\"filter\""), "{ast_stdout}");
+
+    let ir = command_output(&["ir", "examples/top_regions.pdl"]);
+    assert!(
+        ir.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&ir.stderr)
+    );
+    let ir_stdout = String::from_utf8(ir.stdout).expect("ir stdout is UTF-8");
+    assert!(ir_stdout.contains("\"ir\""), "{ir_stdout}");
+    assert!(ir_stdout.contains("\"group_by\""), "{ir_stdout}");
+
+    let manifest = command_output(&[
+        "manifest",
+        "examples/stdout_arrow_stream.pdl",
+        "--stdout-format",
+        "arrow-stream",
+    ]);
+    assert!(
+        manifest.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&manifest.stderr)
+    );
+    let manifest_stdout = String::from_utf8(manifest.stdout).expect("manifest stdout is UTF-8");
+    assert!(manifest_stdout.contains("\"manifest_version\": \"0.14.0\""));
+    assert!(manifest_stdout.contains("\"algraf_interop\""));
+    assert!(manifest_stdout.contains("\"arrow-stream\""));
+}
+
 fn assert_example_stdout(example: &str, expected_stdout: &str) {
     let output = command_output(&["run", example, "--dry-run", "--stdout-format", "csv"]);
 
@@ -223,6 +339,10 @@ fn command_output(args: &[&str]) -> std::process::Output {
         .expect("run pdl example")
 }
 
+fn command_output_owned(args: &[&str]) -> std::process::Output {
+    command_output(args)
+}
+
 fn command_with_stdin(args: &[&str], stdin: &[u8]) -> std::process::Output {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut child = Command::new(env!("CARGO_BIN_EXE_pdl"))
@@ -240,4 +360,12 @@ fn command_with_stdin(args: &[&str], stdin: &[u8]) -> std::process::Output {
         .write_all(stdin)
         .expect("write stdin");
     child.wait_with_output().expect("wait for pdl example")
+}
+
+fn temp_pdl_path(name: &str) -> std::path::PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("pdl-{name}-{}-{nonce}.pdl", std::process::id()))
 }

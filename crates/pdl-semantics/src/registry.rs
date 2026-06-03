@@ -282,14 +282,14 @@ pub const FORMATS: &[FormatInfo] = &[
     },
     FormatInfo {
         name: "parquet",
-        documentation: "Parquet support is deferred past 0.13.",
+        documentation: "Parquet support is deferred past 0.14.",
         load_supported: false,
         save_supported: false,
         stream_supported: false,
     },
     FormatInfo {
         name: "arrow-file",
-        documentation: "Arrow IPC file support is deferred past 0.13.",
+        documentation: "Arrow IPC file support is deferred past 0.14.",
         load_supported: false,
         save_supported: false,
         stream_supported: false,
@@ -303,7 +303,7 @@ pub const FORMATS: &[FormatInfo] = &[
     },
     FormatInfo {
         name: "jsonl",
-        documentation: "JSON Lines support is deferred past 0.13.",
+        documentation: "JSON Lines support is deferred past 0.14.",
         load_supported: false,
         save_supported: false,
         stream_supported: false,

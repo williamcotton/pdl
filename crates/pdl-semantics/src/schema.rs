@@ -30,3 +30,16 @@ pub struct StageTrace {
     pub output_schema: Option<Vec<String>>,
     pub grouping: GroupingState,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PipelineSchema {
+    pub label: PipelineSchemaLabel,
+    pub span: Span,
+    pub columns: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PipelineSchemaLabel {
+    Main,
+    Binding(String),
+}

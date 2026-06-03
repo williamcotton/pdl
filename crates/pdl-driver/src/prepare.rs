@@ -2,7 +2,8 @@ use pdl_core::{codes, has_errors, Diagnostic, Span};
 use pdl_data::{sniff_format_from_bytes, DataFormat};
 use pdl_semantics::{analyze_program, Analysis, LoadRequest};
 use pdl_syntax::{
-    parse, BinaryOp, Binding, Expr, ParseResult, Pipeline, PipelineStart, Program, SourceRef, Stage,
+    parse, BinaryOp, Binding, Expr, ParseResult, Pipeline, PipelineStart, Program, SourceRef,
+    Spanned, Stage,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,18 @@ pub fn prepare_file(path: impl AsRef<Path>) -> Result<PreparedProgram, Diagnosti
     ))
 }
 
+pub fn prepare_file_with_options(
+    path: impl AsRef<Path>,
+    options: PrepareOptions,
+) -> Result<PreparedProgram, Diagnostic> {
+    let path = path.as_ref().to_path_buf();
+    let io = OsDriverIo;
+    let source = io.read_source(&path)?;
+    Ok(prepare_source_with_options_and_io(
+        path, source, options, &io,
+    ))
+}
+
 pub fn prepare_file_for_run(
     path: impl AsRef<Path>,
     stdin_format: Option<String>,
@@ -61,6 +74,26 @@ pub fn prepare_file_for_run(
         PrepareOptions {
             stdin_format,
             read_stdin: true,
+            analysis_binding: None,
+        },
+        &io,
+    ))
+}
+
+pub fn prepare_file_for_binding_schema(
+    path: impl AsRef<Path>,
+    binding: impl Into<String>,
+) -> Result<PreparedProgram, Diagnostic> {
+    let path = path.as_ref().to_path_buf();
+    let io = OsDriverIo;
+    let source = io.read_source(&path)?;
+    Ok(prepare_source_with_options_and_io(
+        path,
+        source,
+        PrepareOptions {
+            stdin_format: None,
+            read_stdin: false,
+            analysis_binding: Some(binding.into()),
         },
         &io,
     ))
@@ -91,6 +124,7 @@ pub fn prepare_source_for_run_with_io(
         PrepareOptions {
             stdin_format,
             read_stdin: true,
+            analysis_binding: None,
         },
         io,
     )
@@ -100,6 +134,7 @@ pub fn prepare_source_for_run_with_io(
 pub struct PrepareOptions {
     pub stdin_format: Option<String>,
     pub read_stdin: bool,
+    pub analysis_binding: Option<String>,
 }
 
 pub fn prepare_source_with_options_and_io(
@@ -146,7 +181,11 @@ pub fn prepare_source_with_options_and_io(
     {
         Analysis::default()
     } else {
-        let program = &parse.program;
+        let analysis_program = options.analysis_binding.as_deref().map_or_else(
+            || parse.program.clone(),
+            |binding| analysis_target_program(&parse.program, binding),
+        );
+        let program = &analysis_program;
         let stdin_schema_hints = stdin_static_schema_hints(program);
         let mut schema_diagnostics = Vec::new();
         let mut analysis = analyze_program(program, |request| {
@@ -278,7 +317,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.13.0"),
+                format!("format `{format}` is not supported in 0.14.0"),
                 format_span,
             )
         });
@@ -287,7 +326,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.13.0"),
+                format!("format `{format}` is not supported in 0.14.0"),
                 span,
             )
         });
@@ -308,7 +347,7 @@ fn stdin_pre_read_diagnostics(program: &Program, stdin_format: &Option<String>) 
             None => {
                 return vec![Diagnostic::error(
                     codes::E1215,
-                    format!("stdin format `{format}` is not supported in 0.13.0"),
+                    format!("stdin format `{format}` is not supported in 0.14.0"),
                     Span::zero(),
                 )];
             }
@@ -325,7 +364,7 @@ fn stdin_pre_read_diagnostics(program: &Program, stdin_format: &Option<String>) 
                 let Some(explicit_format) = DataFormat::from_name(&explicit.value) else {
                     diagnostics.push(Diagnostic::error(
                         codes::E1215,
-                        format!("format `{}` is not supported in 0.13.0", explicit.value),
+                        format!("format `{}` is not supported in 0.14.0", explicit.value),
                         explicit.span,
                     ));
                     continue;
@@ -494,6 +533,22 @@ fn program_pipelines(program: &Program) -> Vec<&Pipeline> {
         pipelines.push(main);
     }
     pipelines
+}
+
+fn analysis_target_program(program: &Program, binding: &str) -> Program {
+    let span = program
+        .bindings
+        .iter()
+        .find(|candidate| candidate.name.value == binding)
+        .map_or_else(Span::zero, |candidate| candidate.name.span);
+    Program {
+        bindings: program.bindings.clone(),
+        main: Some(Pipeline {
+            start: PipelineStart::Binding(Spanned::new(binding.to_string(), span)),
+            stages: Vec::new(),
+            span,
+        }),
+    }
 }
 
 #[cfg(test)]

@@ -1,22 +1,23 @@
 # PDL Detailed Specification
 
-Status: Draft 0.13.0
+Status: Draft 0.14.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.13.0`.
+The current repository implementation is `0.14.0`.
 
 This release keeps the existing CSV-backed language, runtime, editor, LSP, WASM,
-and browser demo slice stable while adding native stream interoperability:
-stdin loading, deterministic stdin sniffing, and Arrow IPC stream input/output
-for native CLI runs.
+and browser demo slice stable while adding native CLI introspection and
+formatting over the parser, driver, analyzer, planner, and manifest facts that
+already back `run`, `check`, LSP, WASM, and the browser demo.
 It retains the recoverable syntax diagnostics for malformed filter, aggregate,
 sort, missing-pipe, and trailing-token cases. It implements the `pdl` CLI commands
-`run`, `check`, `lsp`, and `version`; CSV file loading with header rows; CSV
-stdin loading; CSV file and stdout output; deterministic Arrow IPC stream
-stdin/stdout and explicit file output in native execution; deterministic
+`run`, `check`, `fmt`, `schema`, `plan`, `ast`, `ir`, `manifest`, `lsp`, and
+`version`; CSV file loading with header rows; CSV stdin loading; CSV file and
+stdout output; deterministic Arrow IPC stream stdin/stdout and explicit file
+output in native execution; deterministic
 in-memory execution for `load`, `filter`,
 `select`, `drop`, `rename`, `mutate`, `group_by`, `agg`, `sort`, `limit`,
 `join`, `union`, `distinct`, and `save`; named binding evaluation with lazy
@@ -31,7 +32,8 @@ typed AST views, a syntax-owned formatter boundary, driver I/O and phase-tagged
 preparation reports, load-free driver source/stream/format plans, logical schema
 surfaces, schema-cache and preview boundary types, semantic registries and IR,
 execution planning from semantic IR plus driver facts, execution output emission
-separated from planning, crate-boundary drift tests, `pdl lsp` with
+separated from planning, deterministic CLI JSON/text rendering for schema, plan,
+AST, IR, and manifest inspection, crate-boundary drift tests, `pdl lsp` with
 full-document sync, diagnostics, completion, driver-backed hover, formatting,
 semantic tokens, document symbols, and same-document binding
 definition/reference/rename including join/union binding references; and it
@@ -43,13 +45,12 @@ It also ships a minimal React/Vite/Monaco demo under `demo/` with one PDL
 editor, multiple editable host-supplied CSV inputs, diagnostics and hover from
 the WASM editor-service ABI, and CSV stdout output from WASM execution.
 
-Version 0.13.0 does not yet implement Parquet, Arrow IPC file parity, JSON
-Lines, configurable CSV dialect options, window expressions, schema/plan
-subcommands, CLI formatting, full LSP code actions or cross-document navigation,
-Arrow IPC browser output, virtual browser output sinks, or full multi-output
-browser controls.
+Version 0.14.0 does not yet implement Parquet, Arrow IPC file parity, JSON
+Lines, configurable CSV dialect options, window expressions, full LSP code
+actions or cross-document navigation, Arrow IPC browser output, virtual browser
+output sinks, or full multi-output browser controls.
 Those features are tracked as deferred or planned work in successor release
-plans after `docs/V0_13_PLAN.md`.
+plans starting with `docs/V0_15_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -135,7 +136,7 @@ The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
 over a partition and order of rows. Window expressions are planned but not
-implemented in version 0.13.0.
+implemented in version 0.14.0.
 
 The keyword `column` means a named field with a static PDL type and nullability.
 
@@ -642,7 +643,7 @@ Assignments in one `mutate` stage are evaluated against the input schema in para
 
 Later stages see newly created columns.
 
-The version 0.13.0 implementation supports row expressions in `mutate`
+The version 0.14.0 implementation supports row expressions in `mutate`
 assignments. New columns append in assignment order. Replacing an existing
 column preserves that column's position. Duplicate assignment targets in one
 stage MUST produce `E1207`.
@@ -847,7 +848,7 @@ Planned window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are not reserved by the version 0.13.0 implementation until window
+These words are not reserved by the version 0.14.0 implementation until window
 syntax is implemented.
 
 ### 6.6 Quoted Tokens
@@ -1151,7 +1152,7 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are planned syntax and are not implemented in version 0.13.0.
+Window expressions are planned syntax and are not implemented in version 0.14.0.
 
 Until implemented, parsers MAY recover with `E1211` or ordinary parse diagnostics
 when they encounter `over`.
@@ -1402,9 +1403,9 @@ Arrow IPC stream input SHOULD be supported for stdin.
 
 Arrow streams begin with a continuation marker and schema message.
 
-The v0.13.0 native implementation supports `arrow-stream` for `--stdout-format`,
+The v0.14.0 native implementation supports `arrow-stream` for `--stdout-format`,
 `--stdin-format`, `load stdin`, `save stdout`, and explicit-format file
-loads/saves. The v0.13.0 WASM browser run ABI continues to reject Arrow byte
+loads/saves. The v0.14.0 WASM browser run ABI continues to reject Arrow byte
 stdout because its current stdout field is UTF-8 text.
 
 The runtime SHOULD read and write record batches without unnecessary conversion.
@@ -1570,7 +1571,7 @@ New columns append in assignment order.
 
 Duplicate assignment targets in one `mutate` stage MUST produce `E1207`.
 
-The version 0.13.0 implementation supports scalar row expressions in `mutate`
+The version 0.14.0 implementation supports scalar row expressions in `mutate`
 and does not yet support window expressions.
 
 ### 11.7 Group By
@@ -1768,7 +1769,7 @@ Implementations SHOULD emit helpful diagnostics when a quoted token could plausi
 
 ### 12.3 Scalar Functions
 
-The version 0.13.0 implementation supports these scalar functions in row
+The version 0.14.0 implementation supports these scalar functions in row
 expressions:
 
 - `col(name)`: resolves a quoted value as a column reference.
@@ -1842,7 +1843,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions (Planned)
 
-Window function syntax is planned and not implemented in version 0.13.0.
+Window function syntax is planned and not implemented in version 0.14.0.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
 
@@ -2049,7 +2050,13 @@ It MUST exit non-zero on errors.
 
 `pdl schema file.pdl --binding name` prints schema for a binding.
 
-JSON output SHOULD be supported.
+`pdl schema file.pdl --json` prints deterministic JSON.
+
+The version 0.14.0 implementation emits column names, unknown logical types,
+nullability, stage traces, and diagnostics in JSON mode.
+
+`--binding name` MUST inspect the requested binding without changing normal
+`check` and `run` lazy-binding behavior.
 
 ### 14.5 pdl plan
 
@@ -2059,7 +2066,11 @@ It MUST not write output artifacts.
 
 It SHOULD show source reads, transform stages, format decisions, and sinks.
 
-JSON output SHOULD be supported.
+`pdl plan file.pdl --json` prints deterministic JSON.
+
+The version 0.14.0 implementation accepts `--stdin-format <format>` and
+`--stdout-format <format>` so stream choices are reflected in the plan. It MUST
+NOT read stdin or execute transforms while planning.
 
 ### 14.6 pdl fmt
 
@@ -2069,13 +2080,47 @@ JSON output SHOULD be supported.
 
 The formatter MUST preserve semantics.
 
-### 14.7 pdl lsp
+The version 0.14.0 implementation rewrites files in place in the stable
+leading-pipe style when formatting is available. It returns a non-zero exit code
+without writing when parse errors are present or when comments make safe
+rewriting unavailable.
+
+### 14.7 pdl ast
+
+`pdl ast file.pdl` prints deterministic JSON for the parsed program shape.
+
+It MUST NOT execute data pipelines or read table data.
+
+The version 0.14.0 implementation exits non-zero on parse errors. When parsing
+succeeds, its JSON payload includes the parsed program and parse diagnostics.
+
+### 14.8 pdl ir
+
+`pdl ir file.pdl` prints deterministic JSON for the semantic IR.
+
+It MUST NOT execute data pipelines or write output artifacts.
+
+The version 0.14.0 implementation exits non-zero when syntax, schema, or
+semantic errors prevent IR construction.
+
+### 14.9 pdl manifest
+
+`pdl manifest file.pdl` prints deterministic manifest JSON for a dry-run plan.
+
+It MUST NOT execute transforms or write output artifacts.
+
+The version 0.14.0 implementation accepts `--stdin-format <format>` and
+`--stdout-format <format>`, includes source, driver, stream, execution-plan,
+final-schema, diagnostics, and Algraf Arrow-stdout hint fields, and exits
+non-zero when planning fails.
+
+### 14.10 pdl lsp
 
 `pdl lsp` runs the language server over standard input and standard output.
 
 The LSP backend MUST share parser and analyzer code with CLI.
 
-### 14.8 Exit Codes
+### 14.11 Exit Codes
 
 Exit code `0` means success.
 
@@ -2085,13 +2130,17 @@ Exit code `2` means CLI usage error.
 
 Additional exit codes MAY be defined.
 
-### 14.9 Stdout Discipline
+### 14.12 Stdout Discipline
 
 When stdout is used for data, all human-readable logs MUST go to stderr.
 
 Diagnostics in human-readable form MUST go to stderr.
 
 JSON diagnostics MAY go to stdout only for commands whose output is diagnostics rather than data, such as `check --json`.
+
+Introspection commands such as `schema`, `plan`, `ast`, `ir`, and `manifest`
+own their stdout payloads. Human-readable diagnostics for those commands still
+MUST go to stderr.
 
 ## 15. Driver, Planning, And Execution
 
@@ -2155,6 +2204,10 @@ Strict mode MUST fail on row-level parse errors.
 ### 15.6 Manifests
 
 The runtime SHOULD emit a run manifest when requested.
+
+The version 0.14.0 native CLI implements `pdl manifest file.pdl` as a
+deterministic dry-run manifest inspection command. It plans but does not execute
+the pipeline, and it does not write output artifacts.
 
 Manifest fields SHOULD include:
 
@@ -2270,7 +2323,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.13.0` LSP implementation provides diagnostics,
+The current `0.14.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
@@ -2438,7 +2491,7 @@ Schema-aware WASM check calls MUST use host-supplied in-memory schemas or files
 through the shared driver/editor-service path. They MUST NOT read arbitrary host
 files or reimplement semantic validation in JavaScript or TypeScript.
 
-The v0.13 WASM implementation MUST expose packed JSON calls for:
+The v0.14 WASM implementation MUST expose packed JSON calls for:
 
 - `pdl_run_json`, which accepts PDL source, a host-supplied file map, a synthetic
   program path, and a requested stdout format, then prepares and executes through
@@ -2449,15 +2502,15 @@ The v0.13 WASM implementation MUST expose packed JSON calls for:
 
 The browser run request's host file map is format-neutral and MAY contain
 multiple files: keys are logical file paths and values are host-supplied file
-contents. Version 0.13.0 only requires CSV file contents to execute successfully
+contents. Version 0.14.0 only requires CSV file contents to execute successfully
 through this JSON ABI because host files are supplied as UTF-8 strings. The ABI
 MUST NOT special-case CSV at the TypeScript editor layer.
 
-`pdl_run_json` in version 0.13.0 MUST support CSV stdout for the resulting table.
+`pdl_run_json` in version 0.14.0 MUST support CSV stdout for the resulting table.
 Virtual path-backed output sinks, Arrow IPC byte output, and non-CSV dataframe
 decoders remain deferred until a later plan promotes them.
 
-For hover requests, `pdl_editor_service_json` in version 0.13.0 MUST use the
+For hover requests, `pdl_editor_service_json` in version 0.14.0 MUST use the
 same host file map through in-memory driver I/O so Monaco/WASM hover previews
 match native LSP hover behavior for CSV paths and columns.
 
@@ -2572,7 +2625,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3560,7 +3613,7 @@ support:
 
 Descriptors record explicit format names, inferred path formats, and unresolved
 sniffing decisions. Native Arrow IPC stream parsing/writing and stdin sniffing
-are implemented in v0.13.0. Parquet loading, Arrow IPC file parity, JSON Lines
+are implemented in v0.14.0. Parquet loading, Arrow IPC file parity, JSON Lines
 loading, and browser Arrow byte output remain deferred unless a future plan
 promotes them with spec, examples, and tests.
 
@@ -4117,7 +4170,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.13.0.
+PDL source does not require an explicit version declaration in draft 0.14.0.
 
 The implementation SHOULD report supported language version.
 
@@ -4310,13 +4363,13 @@ Data and driver:
 - Driver infers formats by extension.
 - Driver sniffs stdin when needed.
 - Data crate reads CSV and Arrow IPC stream.
-- Reference implementation reads Parquet.
+- Reference implementation still defers Parquet.
 
 Execution and output:
 
 - Exec crate emits deterministic CSV.
 - Exec crate emits Arrow IPC streams.
-- Exec crate emits manifests and schema JSON.
+- CLI emits deterministic dry-run manifest and schema JSON.
 - CLI keeps logs off stdout in data-output mode.
 
 Editor and browser:

@@ -14,4 +14,4 @@ pub use registry::{
     aggregate_function, format_info, scalar_function, stage_info, AggregateFunctionInfo,
     FormatInfo, FunctionInfo, FunctionKind, StageInfo,
 };
-pub use schema::{GroupingState, StageTrace};
+pub use schema::{GroupingState, PipelineSchema, PipelineSchemaLabel, StageTrace};

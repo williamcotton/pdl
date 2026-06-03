@@ -2,7 +2,7 @@
 
 PDL is a Unix-pipeline-style tabular data transformation DSL.
 
-The current `0.13.0` implementation supports a CSV-backed first slice with
+The current `0.14.0` implementation supports a CSV-backed first slice with
 registered lettered diagnostics, load-free driver data plans, phase-tagged
 preparation reports, semantic-IR execution planning, schema-aware editor/LSP/WASM
 diagnostics, recoverable syntax diagnostics for malformed filter/sort/aggregate
@@ -10,7 +10,8 @@ stages and missing stage pipes, a minimal React/Vite/Monaco browser demo, and
 WASM in-memory CSV execution. Native CLI execution also supports CSV stdin,
 stdin sniffing, and deterministic Arrow IPC stream stdin/stdout interop. It
 includes row-preserving data manipulation with `mutate`, `distinct`, scalar
-cleanup functions, and multi-input `join`/`union`:
+cleanup functions, multi-input `join`/`union`, and native CLI inspection through
+`fmt`, `schema`, `plan`, `ast`, `ir`, and `manifest`:
 
 ```bash
 cargo run -p pdl-cli -- run examples/top_regions.pdl --stdout-format csv
@@ -45,6 +46,15 @@ Use `check` while editing:
 
 ```bash
 cargo run -p pdl-cli -- check examples/top_regions.pdl
+```
+
+Inspect and format programs without executing output artifacts:
+
+```bash
+cargo run -p pdl-cli -- fmt --check examples/top_regions.pdl
+cargo run -p pdl-cli -- schema examples/top_regions.pdl
+cargo run -p pdl-cli -- plan examples/top_regions.pdl --stdout-format csv
+cargo run -p pdl-cli -- manifest examples/stdout_arrow_stream.pdl --stdout-format arrow-stream
 ```
 
 Editor support is available through the Rust language server and thin VS Code

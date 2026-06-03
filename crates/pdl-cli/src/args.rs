@@ -22,6 +22,40 @@ pub enum Command {
     Check {
         file: PathBuf,
     },
+    Fmt {
+        file: PathBuf,
+        #[arg(long)]
+        check: bool,
+    },
+    Schema {
+        file: PathBuf,
+        #[arg(long)]
+        binding: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Plan {
+        file: PathBuf,
+        #[arg(long)]
+        stdin_format: Option<String>,
+        #[arg(long)]
+        stdout_format: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Ast {
+        file: PathBuf,
+    },
+    Ir {
+        file: PathBuf,
+    },
+    Manifest {
+        file: PathBuf,
+        #[arg(long)]
+        stdin_format: Option<String>,
+        #[arg(long)]
+        stdout_format: Option<String>,
+    },
     Lsp,
     Version,
 }
