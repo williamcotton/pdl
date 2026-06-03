@@ -1,13 +1,12 @@
 use pdl_core::{Diagnostic, Severity, Span};
 use pdl_semantics::registry::{AGGREGATE_FUNCTIONS, FORMATS, KEYWORDS, STAGES};
-use pdl_semantics::{
-    aggregate_function, analyze_program, format_info, stage_info, FormatInfo, FunctionInfo,
-    LoadRequest, StageInfo,
-};
-use pdl_syntax::{Expr, ParseResult, Pipeline, PipelineStart, Program, SaveStage, Stage};
+use pdl_semantics::{analyze_program, FormatInfo, FunctionInfo, LoadRequest, StageInfo};
+use pdl_syntax::{Expr, ParseResult, Pipeline, PipelineStart, Program, Stage};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+use crate::diagnostics::diagnostics_for_editor;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TextPosition {
@@ -157,18 +156,6 @@ where
     }
 }
 
-pub fn diagnostics_for_editor(source: &str, diagnostics: &[Diagnostic]) -> Vec<EditorDiagnostic> {
-    diagnostics
-        .iter()
-        .map(|diagnostic| EditorDiagnostic {
-            range: range_for_span(source, diagnostic.span),
-            severity: diagnostic.severity,
-            code: diagnostic.code.to_string(),
-            message: diagnostic.message.clone(),
-        })
-        .collect()
-}
-
 pub fn completions(
     source: &str,
     _path: Option<&Path>,
@@ -226,30 +213,6 @@ pub fn completions(
     }
 
     dedupe_completions(completions)
-}
-
-pub fn hover(source: &str, _path: Option<&Path>, position: TextPosition) -> Option<EditorHover> {
-    let offset = byte_offset_for_position(source, position);
-    let parse = pdl_syntax::parse(source);
-    let facts = DocumentFacts::new(&parse.program);
-
-    for binding in parse.program.bindings.iter() {
-        if contains(binding.name.span, offset) {
-            let schema = facts.bindings.get(&binding.name.value).and_then(|binding| {
-                binding
-                    .schema
-                    .as_ref()
-                    .map(|schema| schema.columns.join(", "))
-            });
-            let schema = schema.unwrap_or_else(|| "unknown".to_string());
-            return Some(EditorHover {
-                range: range_for_span(source, binding.name.span),
-                markdown: format!("**binding `{}`**\n\nSchema: `{schema}`", binding.name.value),
-            });
-        }
-    }
-
-    hover_pipeline(source, &parse.program, &facts, offset)
 }
 
 pub fn formatting_edit(source: &str) -> Option<EditorTextEdit> {
@@ -580,23 +543,23 @@ fn collect_expr_columns(expr: &Expr, columns: &mut BTreeSet<String>) {
 }
 
 #[derive(Clone, Debug)]
-struct DocumentFacts {
-    bindings: BTreeMap<String, BindingFact>,
+pub(crate) struct DocumentFacts {
+    pub(crate) bindings: BTreeMap<String, BindingFact>,
 }
 
 #[derive(Clone, Debug)]
-struct BindingFact {
-    schema: Option<SchemaState>,
+pub(crate) struct BindingFact {
+    pub(crate) schema: Option<SchemaState>,
 }
 
 #[derive(Clone, Debug)]
-struct SchemaState {
-    columns: Vec<String>,
-    grouping: Option<Vec<String>>,
+pub(crate) struct SchemaState {
+    pub(crate) columns: Vec<String>,
+    pub(crate) grouping: Option<Vec<String>>,
 }
 
 impl DocumentFacts {
-    fn new(program: &Program) -> Self {
+    pub(crate) fn new(program: &Program) -> Self {
         let mut facts = Self {
             bindings: BTreeMap::new(),
         };
@@ -609,7 +572,11 @@ impl DocumentFacts {
         facts
     }
 
-    fn schema_before_offset(&self, program: &Program, offset: usize) -> Option<Vec<String>> {
+    pub(crate) fn schema_before_offset(
+        &self,
+        program: &Program,
+        offset: usize,
+    ) -> Option<Vec<String>> {
         for binding in &program.bindings {
             if contains(binding.pipeline.span, offset) {
                 return self.pipeline_schema_before_offset(&binding.pipeline, offset);
@@ -621,7 +588,7 @@ impl DocumentFacts {
         None
     }
 
-    fn pipeline_schema_before_offset(
+    pub(crate) fn pipeline_schema_before_offset(
         &self,
         pipeline: &Pipeline,
         offset: usize,
@@ -688,197 +655,6 @@ fn apply_stage_to_schema(schema: &mut SchemaState, stage: &Stage) {
             schema.columns = output;
         }
         Stage::Unsupported { .. } => {}
-    }
-}
-
-fn hover_pipeline(
-    source: &str,
-    program: &Program,
-    facts: &DocumentFacts,
-    offset: usize,
-) -> Option<EditorHover> {
-    for binding in &program.bindings {
-        if let Some(hover) = hover_for_pipeline(source, &binding.pipeline, facts, offset) {
-            return Some(hover);
-        }
-    }
-    program
-        .main
-        .as_ref()
-        .and_then(|pipeline| hover_for_pipeline(source, pipeline, facts, offset))
-}
-
-fn hover_for_pipeline(
-    source: &str,
-    pipeline: &Pipeline,
-    facts: &DocumentFacts,
-    offset: usize,
-) -> Option<EditorHover> {
-    if let PipelineStart::Binding(name) = &pipeline.start {
-        if contains(name.span, offset) {
-            return facts.bindings.get(&name.value).map(|binding| {
-                let schema = binding
-                    .schema
-                    .as_ref()
-                    .map_or_else(|| "unknown".to_string(), |schema| schema.columns.join(", "));
-                EditorHover {
-                    range: range_for_span(source, name.span),
-                    markdown: format!("**binding `{}`**\n\nSchema: `{schema}`", name.value),
-                }
-            });
-        }
-    }
-
-    if let PipelineStart::Load(load) = &pipeline.start {
-        let load_span = Span::new(load.span.start, load.span.start + "load".len());
-        if contains(load_span, offset) {
-            return Some(info_hover(
-                source,
-                load_span,
-                "load",
-                stage_info("load")?.documentation,
-            ));
-        }
-        if let Some(format) = &load.format {
-            if contains(format.span, offset) {
-                return Some(info_hover(
-                    source,
-                    format.span,
-                    &format.value,
-                    format_documentation(&format.value),
-                ));
-            }
-        }
-    }
-
-    for stage in &pipeline.stages {
-        let stage_name = stage_name(stage);
-        let keyword_span = Span::new(stage.span().start, stage.span().start + stage_name.len());
-        if contains(keyword_span, offset) {
-            return stage_info(stage_name)
-                .map(|info| info_hover(source, keyword_span, info.name, info.documentation));
-        }
-        if let Some(hover) = hover_stage_detail(source, facts, pipeline, stage, offset) {
-            return Some(hover);
-        }
-    }
-
-    None
-}
-
-fn hover_stage_detail(
-    source: &str,
-    facts: &DocumentFacts,
-    pipeline: &Pipeline,
-    stage: &Stage,
-    offset: usize,
-) -> Option<EditorHover> {
-    let schema = facts
-        .pipeline_schema_before_offset(pipeline, stage.span().start)
-        .unwrap_or_default();
-    for span in column_spans(stage) {
-        if contains(span, offset) {
-            let text = unquoted_text_at_span(source, span).unwrap_or_default();
-            let known = schema.iter().any(|column| column == &text);
-            let detail = if known {
-                "Schema column from the current table."
-            } else {
-                "Column reference. The schema is unknown or this column has a diagnostic."
-            };
-            return Some(EditorHover {
-                range: range_for_span(source, span),
-                markdown: format!("**column `{text}`**\n\n{detail}"),
-            });
-        }
-    }
-
-    if let Stage::Agg { items, .. } = stage {
-        for item in items {
-            if contains(item.function.span, offset) {
-                if let Some(info) = aggregate_function(&item.function.value) {
-                    return Some(info_hover(
-                        source,
-                        item.function.span,
-                        info.name,
-                        info.documentation,
-                    ));
-                }
-            }
-        }
-    }
-
-    if let Stage::Save(save) = stage {
-        if let Some(hover) = hover_save_format(source, save, offset) {
-            return Some(hover);
-        }
-    }
-
-    None
-}
-
-fn hover_save_format(source: &str, save: &SaveStage, offset: usize) -> Option<EditorHover> {
-    let format = save.format.as_ref()?;
-    contains(format.span, offset).then(|| {
-        info_hover(
-            source,
-            format.span,
-            &format.value,
-            format_documentation(&format.value),
-        )
-    })
-}
-
-fn info_hover(source: &str, span: Span, name: &str, documentation: &str) -> EditorHover {
-    EditorHover {
-        range: range_for_span(source, span),
-        markdown: format!("**{name}**\n\n{documentation}"),
-    }
-}
-
-fn column_spans(stage: &Stage) -> Vec<Span> {
-    match stage {
-        Stage::Filter { expr, .. } => expr_column_spans(expr),
-        Stage::Select { items, .. } => items
-            .iter()
-            .flat_map(|item| {
-                item.alias
-                    .iter()
-                    .map(|alias| alias.span)
-                    .chain([item.column.span])
-            })
-            .collect(),
-        Stage::Drop { columns, .. } | Stage::GroupBy { columns, .. } => {
-            columns.iter().map(|column| column.span).collect()
-        }
-        Stage::Rename { items, .. } => items
-            .iter()
-            .flat_map(|item| [item.old.span, item.new.span])
-            .collect(),
-        Stage::Agg { items, .. } => items
-            .iter()
-            .flat_map(|item| {
-                item.args
-                    .iter()
-                    .flat_map(expr_column_spans)
-                    .chain([item.alias.span])
-            })
-            .collect(),
-        Stage::Sort { items, .. } => items.iter().map(|item| item.column.span).collect(),
-        Stage::Limit { .. } | Stage::Save(_) | Stage::Unsupported { .. } => Vec::new(),
-    }
-}
-
-fn expr_column_spans(expr: &Expr) -> Vec<Span> {
-    match expr {
-        Expr::Quoted(value) => vec![value.span],
-        Expr::Call { args, .. } => args.iter().flat_map(expr_column_spans).collect(),
-        Expr::Unary { expr, .. } => expr_column_spans(expr),
-        Expr::Binary { left, right, .. } => {
-            let mut spans = expr_column_spans(left);
-            spans.extend(expr_column_spans(right));
-            spans
-        }
-        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => Vec::new(),
     }
 }
 
@@ -968,7 +744,7 @@ fn binding_spans(program: &Program, name: &str) -> Vec<Span> {
     spans
 }
 
-fn contains(span: Span, offset: usize) -> bool {
+pub(crate) fn contains(span: Span, offset: usize) -> bool {
     span.start <= offset && offset <= span.end
 }
 
@@ -1175,7 +951,7 @@ fn stage_name_from_line(line_prefix: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-fn stage_name(stage: &Stage) -> &'static str {
+pub(crate) fn stage_name(stage: &Stage) -> &'static str {
     match stage {
         Stage::Filter { .. } => "filter",
         Stage::Select { .. } => "select",
@@ -1269,7 +1045,7 @@ fn dedupe_completions(items: Vec<EditorCompletion>) -> Vec<EditorCompletion> {
         .collect()
 }
 
-fn unquoted_text_at_span(source: &str, span: Span) -> Option<String> {
+pub(crate) fn unquoted_text_at_span(source: &str, span: Span) -> Option<String> {
     let text = source.get(span.start..span.end)?;
     Some(text.trim_matches('"').to_string())
 }
@@ -1291,10 +1067,6 @@ fn is_valid_binding_name(name: &str) -> bool {
     chars.next().is_some_and(is_ident_start)
         && chars.all(is_ident_char)
         && !KEYWORDS.contains(&name)
-}
-
-fn format_documentation(name: &str) -> &'static str {
-    format_info(name).map_or("Format name.", |info| info.documentation)
 }
 
 #[cfg(test)]

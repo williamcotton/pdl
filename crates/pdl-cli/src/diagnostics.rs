@@ -1,21 +1,43 @@
-use pdl_core::{line_col, Diagnostic};
+use pdl_core::{line_col, Diagnostic, Severity};
+use std::{env, io::IsTerminal};
 
 pub fn print_diagnostics(source_name: &str, source: &str, diagnostics: &[Diagnostic]) {
-    let rendered = render_diagnostics(source_name, source, diagnostics);
+    let rendered =
+        render_diagnostics_with_style(source_name, source, diagnostics, DiagnosticStyle::stderr());
     if !rendered.is_empty() {
         eprintln!("{rendered}");
     }
 }
 
+#[cfg(test)]
 fn render_diagnostics(source_name: &str, source: &str, diagnostics: &[Diagnostic]) -> String {
+    render_diagnostics_with_style(source_name, source, diagnostics, DiagnosticStyle::Plain)
+}
+
+fn render_diagnostics_with_style(
+    source_name: &str,
+    source: &str,
+    diagnostics: &[Diagnostic],
+    style: DiagnosticStyle,
+) -> String {
     diagnostics
         .iter()
-        .map(|diagnostic| render_diagnostic(source_name, source, diagnostic))
+        .map(|diagnostic| render_diagnostic_with_style(source_name, source, diagnostic, style))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
+#[cfg(test)]
 fn render_diagnostic(source_name: &str, source: &str, diagnostic: &Diagnostic) -> String {
+    render_diagnostic_with_style(source_name, source, diagnostic, DiagnosticStyle::Plain)
+}
+
+fn render_diagnostic_with_style(
+    source_name: &str,
+    source: &str,
+    diagnostic: &Diagnostic,
+    style: DiagnosticStyle,
+) -> String {
     let (line, col) = line_col(source, diagnostic.span.start);
     let (line_start, line_end) = line_bounds(source, diagnostic.span.start);
     let source_line = &source[line_start..line_end];
@@ -26,23 +48,88 @@ fn render_diagnostic(source_name: &str, source: &str, diagnostic: &Diagnostic) -
         .chars()
         .count()
         .max(1);
+    let underline = style.underline(&"^".repeat(underline_width), diagnostic.severity);
     let gutter_width = line.to_string().len();
     let gutter_pad = " ".repeat(gutter_width);
+    let detail_pad = " ".repeat(gutter_width + 1);
+    let label = style.severity_label(diagnostic.severity, diagnostic.code);
 
-    format!(
-        "{}:{}:{}: {}[{}]: {}\n{} | {}\n{} | {}{}",
+    let mut rendered = format!(
+        "{}: {}\n{}--> {}:{}:{}\n{} |\n{} | {}\n{} | {}{}",
+        label,
+        diagnostic.message,
+        gutter_pad,
         source_name,
         line,
         col,
-        diagnostic.severity,
-        diagnostic.code,
-        diagnostic.message,
+        gutter_pad,
         line,
         source_line,
         gutter_pad,
         " ".repeat(underline_padding),
-        "^".repeat(underline_width),
-    )
+        underline,
+    );
+
+    if diagnostic.help.is_some() || !diagnostic.related.is_empty() {
+        rendered.push_str(&format!("\n{} |", gutter_pad));
+    }
+    if let Some(help) = &diagnostic.help {
+        rendered.push_str(&format!("\n{}= help: {help}", detail_pad));
+    }
+    for related in &diagnostic.related {
+        let (related_line, related_col) = line_col(source, related.span.start);
+        rendered.push_str(&format!(
+            "\n{}= note: {} at {}:{}:{}",
+            detail_pad, related.message, source_name, related_line, related_col
+        ));
+    }
+
+    rendered
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticStyle {
+    Plain,
+    Ansi,
+}
+
+impl DiagnosticStyle {
+    fn stderr() -> Self {
+        if env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal() {
+            Self::Ansi
+        } else {
+            Self::Plain
+        }
+    }
+
+    fn severity_label(self, severity: Severity, code: &str) -> String {
+        let label = format!("{severity}[{code}]");
+        match self {
+            Self::Plain => label,
+            Self::Ansi => paint(&label, severity_color(severity), true),
+        }
+    }
+
+    fn underline(self, underline: &str, severity: Severity) -> String {
+        match self {
+            Self::Plain => underline.to_string(),
+            Self::Ansi => paint(underline, severity_color(severity), true),
+        }
+    }
+}
+
+fn severity_color(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Error => "31",
+        Severity::Warning => "33",
+        Severity::Info => "36",
+        Severity::Hint => "2",
+    }
+}
+
+fn paint(text: &str, color: &str, bold: bool) -> String {
+    let weight = if bold { "1;" } else { "" };
+    format!("\x1b[{weight}{color}m{text}\x1b[0m")
 }
 
 fn line_bounds(source: &str, byte_offset: usize) -> (usize, usize) {
@@ -72,7 +159,8 @@ mod tests {
 
         let rendered = render_diagnostics("main.pdl", source, &diagnostics);
 
-        assert!(rendered.contains("\n\nmain.pdl:2:10: error[E1005]"));
+        assert!(rendered.contains("\n\nerror[E1005]: unknown column `staus`"));
+        assert!(rendered.contains(" --> main.pdl:2:10"));
     }
 
     #[test]
@@ -81,8 +169,31 @@ mod tests {
 
         assert_eq!(
             render_diagnostic("test.pdl", "ab\ncde", &diagnostic),
-            "test.pdl:2:2: error[E1005]: unknown column\n2 | cde\n  |  ^^"
+            "error[E1005]: unknown column\n --> test.pdl:2:2\n  |\n2 | cde\n  |  ^^"
         );
+    }
+
+    #[test]
+    fn diagnostic_rendering_uses_help_and_related_notes() {
+        let diagnostic = Diagnostic::error(codes::E1005, "unknown column", Span::new(4, 6))
+            .with_help("check the loaded CSV header")
+            .with_related(Span::new(0, 2), "loaded here");
+
+        assert_eq!(
+            render_diagnostic("test.pdl", "ab\ncde", &diagnostic),
+            "error[E1005]: unknown column\n --> test.pdl:2:2\n  |\n2 | cde\n  |  ^^\n  |\n  = help: check the loaded CSV header\n  = note: loaded here at test.pdl:1:1"
+        );
+    }
+
+    #[test]
+    fn diagnostic_rendering_can_color_severity_and_underline() {
+        let diagnostic = Diagnostic::error(codes::E1005, "unknown column", Span::new(4, 6));
+
+        let rendered =
+            render_diagnostic_with_style("test.pdl", "ab\ncde", &diagnostic, DiagnosticStyle::Ansi);
+
+        assert!(rendered.contains("\x1b[1;31merror[E1005]\x1b[0m"));
+        assert!(rendered.contains("\x1b[1;31m^^\x1b[0m"));
     }
 
     #[test]
@@ -97,7 +208,7 @@ mod tests {
 
         assert_eq!(
             render_diagnostic("main.pdl", source, &diagnostic),
-            "main.pdl:2:12: error[E1005]: unknown column `staus`\n2 |   | filter \"staus\" == \"completed\"\n  |            ^^^^^^^"
+            "error[E1005]: unknown column `staus`\n --> main.pdl:2:12\n  |\n2 |   | filter \"staus\" == \"completed\"\n  |            ^^^^^^^"
         );
     }
 }

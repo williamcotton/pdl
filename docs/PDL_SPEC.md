@@ -1,45 +1,47 @@
 # PDL Detailed Specification
 
-Status: Draft 0.9.0
+Status: Draft 0.10.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.9.0`.
+The current repository implementation is `0.10.0`.
 
 This release keeps the existing CSV-backed language, runtime, editor, LSP, WASM,
-and browser demo slice stable while improving recoverable syntax diagnostics for
-malformed filter, aggregate, sort, missing-pipe, and trailing-token cases. It implements the
-`pdl` CLI commands `run`, `check`, `lsp`, and `version`; CSV file loading with
-header rows; CSV file and stdout output; deterministic in-memory execution for
-`load`, `filter`, `select`, `drop`, `rename`, `group_by`, `agg`, `sort`,
-`limit`, and `save`; and the aggregate functions `count`, `sum`, `mean`, `min`,
-and `max`. It also implements registered lettered diagnostic codes in
-`pdl-core`, a `codes::*` registry, `related` spans and `help` diagnostic payload
-fields, diagnostic catalog drift tests, a lossless lexer with trivia and EOF, a
-rowan CST with typed AST views, a syntax-owned formatter boundary, driver I/O
-and phase-tagged preparation reports, load-free driver source/stream/format
-plans, logical schema surfaces, schema-cache and preview boundary types,
-semantic registries and IR, execution planning from semantic IR plus driver
-facts, execution output emission separated from planning, crate-boundary drift
-tests, `pdl lsp` with full-document sync, diagnostics, completion, hover,
-formatting, semantic tokens, document symbols, and same-document binding
+and browser demo slice stable while adding rustc-style terminal-aware CLI
+diagnostic rendering and driver-backed editor hover previews for CSV sources and
+columns. It retains the recoverable syntax diagnostics for malformed filter,
+aggregate, sort, missing-pipe, and trailing-token cases. It implements the `pdl` CLI commands
+`run`, `check`, `lsp`, and `version`; CSV file loading with header rows; CSV
+file and stdout output; deterministic in-memory execution for `load`, `filter`,
+`select`, `drop`, `rename`, `group_by`, `agg`, `sort`, `limit`, and `save`; and
+the aggregate functions `count`, `sum`, `mean`, `min`, and `max`. It also
+implements registered lettered diagnostic codes in `pdl-core`, a `codes::*`
+registry, `related` spans and `help` diagnostic payload fields, diagnostic
+catalog drift tests, a lossless lexer with trivia and EOF, a rowan CST with
+typed AST views, a syntax-owned formatter boundary, driver I/O and phase-tagged
+preparation reports, load-free driver source/stream/format plans, logical schema
+surfaces, schema-cache and preview boundary types, semantic registries and IR,
+execution planning from semantic IR plus driver facts, execution output emission
+separated from planning, crate-boundary drift tests, `pdl lsp` with
+full-document sync, diagnostics, completion, driver-backed hover, formatting,
+semantic tokens, document symbols, and same-document binding
 definition/reference/rename; and it ships a thin VS Code client under
 `editors/vscode/` plus browser-safe WASM ABI helpers that use in-memory driver
-boundaries, including host-schema-backed checks for embedded editors and a
-bounded host-file run facade for browser execution. It also ships a minimal
-React/Vite/Monaco demo under `demo/` with one PDL editor, one editable
-host-supplied CSV input, diagnostics from the WASM editor-service ABI, and CSV
-stdout output from WASM execution.
+boundaries, including host-schema-backed checks, host-file-backed hover previews
+for embedded editors, and a bounded host-file run facade for browser execution.
+It also ships a minimal React/Vite/Monaco demo under `demo/` with one PDL
+editor, one editable host-supplied CSV input, diagnostics and hover from the
+WASM editor-service ABI, and CSV stdout output from WASM execution.
 
-Version 0.9.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
+Version 0.10.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
 loading, stream sniffing, configurable CSV dialect options, `mutate`, `join`,
 `union`, `distinct`, window expressions, schema/plan subcommands, CLI
 formatting, full LSP code actions or cross-document navigation, Arrow IPC
 browser output, virtual browser output sinks, or multi-dataset browser controls.
 Those features are tracked as deferred or planned work in successor release
-plans after `docs/V0_9_PLAN.md`.
+plans after `docs/V0_10_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -125,7 +127,7 @@ The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
 over a partition and order of rows. Window expressions are planned but not
-implemented in version 0.9.0.
+implemented in version 0.10.0.
 
 The keyword `column` means a named field with a static PDL type and nullability.
 
@@ -831,7 +833,7 @@ Planned window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are not reserved by the version 0.9.0 implementation until window
+These words are not reserved by the version 0.10.0 implementation until window
 syntax is implemented.
 
 ### 6.6 Quoted Tokens
@@ -1122,7 +1124,7 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are planned syntax and are not implemented in version 0.9.0.
+Window expressions are planned syntax and are not implemented in version 0.10.0.
 
 Until implemented, parsers MAY recover with `E1211` or ordinary parse diagnostics
 when they encounter `over`.
@@ -1762,7 +1764,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions (Planned)
 
-Window function syntax is planned and not implemented in version 0.9.0.
+Window function syntax is planned and not implemented in version 0.10.0.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
 
@@ -1940,9 +1942,20 @@ It MUST report syntax and semantic diagnostics.
 
 It SHOULD infer schemas from file metadata where cheap.
 
-Human-readable CLI diagnostics SHOULD use compact source rendering: a
-`file:line:column: severity[code]: message` header, the source line, and a caret
-underline for the primary span.
+Human-readable CLI diagnostics SHOULD use rustc-style compact source rendering:
+a `severity[code]: message` header, a `--> file:line:column` location line, a
+guttered source line, and a caret underline for the primary span.
+
+When diagnostic help or related spans are present, human-readable CLI
+diagnostics SHOULD render them with rustc-style `= help:` and `= note:` lines.
+
+Human-readable CLI diagnostics SHOULD color the severity label and primary caret
+underline when stderr is a terminal.
+
+The CLI MUST suppress diagnostic color when stderr is not a terminal or when the
+`NO_COLOR` environment variable is set.
+
+Diagnostic color MUST NOT affect JSON diagnostic payloads or stdout data.
 
 Human-readable diagnostic rendering belongs to `pdl-cli`. `pdl-core` owns
 diagnostic values and source-position helpers, but MUST NOT expose
@@ -2179,8 +2192,8 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.9.0` LSP implementation provides diagnostics,
-completion, hover, formatting, semantic tokens, document symbols, and
+The current `0.10.0` LSP implementation provides diagnostics,
+completion, driver-backed hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
 
@@ -2214,6 +2227,20 @@ Hover SHOULD show:
 - aggregate function signatures
 - detected source format
 - diagnostic explanations
+
+For path-backed CSV loads, hover on the load path SHOULD show a bounded Markdown
+preview derived from shared driver/editor-service I/O. The preview SHOULD include
+the detected format, sampled row count, column names, derived logical types,
+nullability, sample values, and a small sample-row table.
+
+For schema-known CSV columns, hover SHOULD show the current column name, derived
+logical type, nullability, and a small set of sample values when host data is
+available.
+
+Native LSP hover and browser Monaco/WASM hover MUST use the shared Rust
+editor-service implementation. VS Code clients, Monaco hosts, and other editor
+adapters MUST NOT implement independent PDL parsing, semantic analysis, or CSV
+type inference.
 
 ### 17.4 Formatting
 
@@ -2343,13 +2370,17 @@ The v0.7 WASM implementation MUST expose packed JSON calls for:
   diagnostics plus the requested editor-service result
 
 The browser run request's host file map is format-neutral: keys are logical file
-paths and values are host-supplied file contents. Version 0.9.0 only requires
+paths and values are host-supplied file contents. Version 0.10.0 only requires
 CSV file contents to execute successfully because CSV is the only implemented
 data decoder. The ABI MUST NOT special-case CSV at the TypeScript editor layer.
 
-`pdl_run_json` in version 0.9.0 MUST support CSV stdout for the resulting table.
+`pdl_run_json` in version 0.10.0 MUST support CSV stdout for the resulting table.
 Virtual path-backed output sinks, Arrow IPC byte output, and non-CSV dataframe
 decoders remain deferred until a later plan promotes them.
+
+For hover requests, `pdl_editor_service_json` in version 0.10.0 MUST use the
+same host file map through in-memory driver I/O so Monaco/WASM hover previews
+match native LSP hover behavior for CSV paths and columns.
 
 Editor-service requests SHOULD use LSP-shaped positions and results.
 
@@ -2462,7 +2493,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3448,7 +3479,7 @@ support:
 
 Descriptors record explicit format names, inferred path formats, and unresolved
 sniffing decisions. Real Arrow IPC parsing/writing, Parquet loading, JSON Lines
-loading, and stdin sniffing remain deferred past v0.9.0 unless a future plan
+loading, and stdin sniffing remain deferred past v0.10.0 unless a future plan
 promotes them with spec, examples, and tests.
 
 #### 19.7.8 Schema Cache And Preview Boundary
@@ -4004,7 +4035,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.9.0.
+PDL source does not require an explicit version declaration in draft 0.10.0.
 
 The implementation SHOULD report supported language version.
 

@@ -177,10 +177,12 @@ fn editor_service_browser_json(input: &[u8]) -> String {
     );
     let result = match request_payload.request {
         BrowserEditorFeatureRequest::Diagnostics => serde_json::json!(document),
-        request => match editor_service_result(&request_payload.source, &program_path, request) {
-            Ok(result) => result,
-            Err(error) => return editor_service_error_json(error),
-        },
+        request => {
+            match editor_service_result(&request_payload.source, &program_path, &io, request) {
+                Ok(result) => result,
+                Err(error) => return editor_service_error_json(error),
+            }
+        }
     };
 
     serde_json::json!({
@@ -194,6 +196,7 @@ fn editor_service_browser_json(input: &[u8]) -> String {
 fn editor_service_result(
     source: &str,
     program_path: &Path,
+    io: &dyn pdl_driver::DriverIo,
     request: BrowserEditorFeatureRequest,
 ) -> Result<Value, String> {
     let result = match request {
@@ -204,7 +207,7 @@ fn editor_service_result(
             ))
         }
         BrowserEditorFeatureRequest::Hover { position } => serde_json::to_value(
-            pdl_editor_services::hover(source, Some(program_path), position),
+            pdl_editor_services::hover_with_driver_io(source, program_path, io, position),
         )
         .map_err(|error| error.to_string())?,
         BrowserEditorFeatureRequest::Completion { position } => serde_json::to_value(
@@ -445,5 +448,30 @@ mod tests {
             payload["diagnostics"][0]["message"],
             "unknown column `sttus`"
         );
+    }
+
+    #[test]
+    fn editor_service_json_uses_in_memory_csv_bytes_for_hover_preview() {
+        let request = serde_json::json!({
+            "source": "load \"sales.csv\"\n  | group_by \"region\"",
+            "files": {
+                "sales.csv": "region,status,amount\nNorth,completed,120\nSouth,pending,75\nWest,completed,200\n"
+            },
+            "request": {
+                "kind": "hover",
+                "position": { "line": 1, "character": 15 }
+            }
+        });
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&editor_service_json(&request.to_string())).expect("json");
+
+        assert!(payload["error"].is_null(), "{payload}");
+        let markdown = payload["result"]["markdown"]
+            .as_str()
+            .expect("hover markdown");
+        assert!(markdown.contains("**column `region`**"));
+        assert!(markdown.contains("Type: `string`"));
+        assert!(markdown.contains("Samples: North, South, West"));
     }
 }

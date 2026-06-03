@@ -200,7 +200,7 @@ impl Runtime<'_> {
                 StageIr::Unsupported { name, span } => {
                     return Err(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{name}` is deferred in 0.9.0"),
+                        format!("stage `{name}` is deferred in 0.10.0"),
                         *span,
                     ));
                 }
@@ -241,7 +241,7 @@ impl Runtime<'_> {
             if format != "csv" {
                 return Err(Diagnostic::error(
                     codes::E1215,
-                    format!("format `{format}` is not supported in 0.9.0"),
+                    format!("format `{format}` is not supported in 0.10.0"),
                     stage_span,
                 ));
             }
@@ -267,7 +267,7 @@ impl Runtime<'_> {
             }
             SourceDescriptor::Stdin => Err(Diagnostic::error(
                 codes::E1211,
-                "stdin loading is deferred in 0.9.0",
+                "stdin loading is deferred in 0.10.0",
                 input.span,
             )),
         }
@@ -286,7 +286,7 @@ impl Runtime<'_> {
             if format != "csv" {
                 return Err(Diagnostic::error(
                     codes::E1705,
-                    format!("output format `{format}` is not supported in 0.9.0"),
+                    format!("output format `{format}` is not supported in 0.10.0"),
                     stage_span,
                 ));
             }
