@@ -317,7 +317,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.17.0"),
+                format!("format `{format}` is not supported in 0.18.0"),
                 format_span,
             )
         });
@@ -326,7 +326,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.17.0"),
+                format!("format `{format}` is not supported in 0.18.0"),
                 span,
             )
         });
@@ -347,7 +347,7 @@ fn stdin_pre_read_diagnostics(program: &Program, stdin_format: &Option<String>) 
             None => {
                 return vec![Diagnostic::error(
                     codes::E1215,
-                    format!("stdin format `{format}` is not supported in 0.17.0"),
+                    format!("stdin format `{format}` is not supported in 0.18.0"),
                     Span::zero(),
                 )];
             }
@@ -364,7 +364,7 @@ fn stdin_pre_read_diagnostics(program: &Program, stdin_format: &Option<String>) 
                 let Some(explicit_format) = DataFormat::from_name(&explicit.value) else {
                     diagnostics.push(Diagnostic::error(
                         codes::E1215,
-                        format!("format `{}` is not supported in 0.17.0", explicit.value),
+                        format!("format `{}` is not supported in 0.18.0", explicit.value),
                         explicit.span,
                     ));
                     continue;

@@ -1,17 +1,16 @@
 # PDL Detailed Specification
 
-Status: Draft 0.17.0
-Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
+Status: Draft 0.18.0
+Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.17.0`.
+The current repository implementation is `0.18.0`.
 
-This release keeps the existing format, runtime, editor, LSP, WASM, browser
-demo, native CLI introspection, and window analytics slices stable while
-improving built-in formatter readability for long item lists and window-heavy
-`mutate` stages.
+This release keeps the existing language, runtime, editor, LSP, WASM, native
+CLI introspection, formatter, and window analytics slices stable while expanding
+the browser demo into a routed documentation and playground site.
 It retains the recoverable syntax diagnostics for malformed filter, aggregate,
 sort, missing-pipe, and trailing-token cases. It implements the `pdl` CLI commands
 `run`, `check`, `fmt`, `schema`, `plan`, `ast`, `ir`, `manifest`, `lsp`, and
@@ -48,29 +47,30 @@ ships a thin VS Code client under
 `editors/vscode/` plus browser-safe WASM ABI helpers that use in-memory driver
 boundaries, including host-schema-backed checks, host-file-backed hover previews
 for embedded editors, and a bounded host-file run facade for browser execution.
-It also ships a minimal React/Vite/Monaco demo under `demo/` with one PDL
-editor, multiple editable host-supplied CSV inputs, diagnostics and hover from
-the WASM editor-service ABI, and CSV stdout output from WASM execution.
+It also ships a React/Vite/Monaco demo under `demo/` with home, docs, and demos
+routes; bundled CSV and JSON Lines fixtures; live PDL examples; editable
+host-supplied inputs; diagnostics, hover, completion, formatting, semantic
+tokens, symbols, definition/reference, and rename from the WASM editor-service
+ABI; and CSV/JSON Lines stdout output from WASM execution.
 
-Version 0.17.0 does not yet implement configurable CSV dialect options, full
+Version 0.18.0 does not yet implement configurable CSV dialect options, full
 LSP code actions or cross-document navigation, Arrow IPC browser output,
 virtual browser output sinks, or full multi-output browser controls.
 Those features are tracked as deferred or planned work in successor release
-plans after `docs/V0_17_PLAN.md`.
+plans after `docs/V0_18_PLAN.md`.
 
 ## 0. Document Contract
 
 This document specifies PDL, a standalone Pipeline Data Language.
 
-PDL is not part of Algraf.
-
-PDL is designed to pair well with Algraf by producing deterministic tabular data that Algraf can consume from ordinary files or streams.
+PDL produces deterministic tabular data that downstream consumers can read from
+ordinary files or streams.
 
 The intended file extension is `.pdl`.
 
 The intended command-line executable is named `pdl`.
 
-The first reference implementation target is a Rust workspace organized like Algraf.
+The first reference implementation target is a layered Rust workspace.
 
 PDL is built around one core idea:
 
@@ -92,16 +92,12 @@ Each stage produces a table, a stream, or an explicit output artifact.
 
 PDL is intentionally close to Unix pipes.
 
-It is not block-scoped like Algraf.
-
-Algraf declares how data becomes marks in a visual space.
-
 PDL declares how data becomes another table.
 
-The two languages should compose through ordinary artifacts:
+PDL programs should compose with other tools through ordinary artifacts:
 
 ```bash
-pdl run prep.pdl --stdout-format arrow-stream | algraf render chart.ag --stdin-format arrow-stream --output chart.svg
+pdl run prep.pdl --stdout-format arrow-stream > prepared.arrow
 ```
 
 The PDL side of that contract is this:
@@ -141,7 +137,7 @@ The keyword `table` means an ordered, typed, rectangular relation with named col
 The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
-over a partition and order of rows. Version 0.17.0 implements window
+over a partition and order of rows. Version 0.18.0 implements window
 expressions in `mutate` assignments.
 
 The keyword `column` means a named field with a static PDL type and nullability.
@@ -198,13 +194,11 @@ Runtime facilities marked `SHOULD` define recommended behavior for the first ful
 
 Features marked `MAY` are extension points.
 
-Algraf references in this document define interoperability context only.
+References to downstream consumers define interoperability context only.
 
-They do not amend the Algraf specification.
+A downstream consumer does not need to read PDL source.
 
-An Algraf implementation does not need to read PDL.
-
-A PDL implementation does not need to render SVG.
+A PDL implementation does not need to implement consumer-specific behavior.
 
 ## 1. Executive Summary
 
@@ -277,9 +271,9 @@ When run with stdout enabled, the final table can be streamed:
 pdl run sales.pdl --stdout-format arrow-stream
 ```
 
-This makes PDL a natural producer for Algraf charts that read stdin.
+This makes PDL a natural producer for downstream consumers that read stdin.
 
-The preferred PDL to Algraf handoff is Arrow IPC streaming.
+The preferred typed handoff is Arrow IPC streaming.
 
 CSV remains the required lowest-common-denominator file format.
 
@@ -351,7 +345,7 @@ abstraction to drive dataframe transformations.
 Polars implementation details MUST NOT leak into source syntax, diagnostics,
 semantic IR, CLI JSON output, LSP payloads, or WASM host payloads.
 
-PDL MAY support an integrated PDL plus Algraf runner in a later project.
+PDL MAY support integrated host runners in later versions.
 
 PDL MAY support package management in later versions.
 
@@ -363,7 +357,7 @@ PDL is not a general-purpose programming language.
 
 PDL is not a charting language.
 
-PDL is not an Algraf extension language.
+PDL is not an extension language for any downstream consumer.
 
 PDL is not a scheduler.
 
@@ -393,7 +387,8 @@ PDL does not initially guarantee zero-copy transfer across separate processes.
 
 Arrow IPC streaming is near zero-copy and is the preferred cross-process handoff.
 
-True in-process zero-copy between PDL and Algraf is a future integrated-runner concern, not the PDL v0.1 language contract.
+True in-process zero-copy between PDL and another runtime is a future
+integrated-runner concern, not the PDL v0.1 language contract.
 
 ## 4. Core Concepts
 
@@ -649,7 +644,7 @@ Assignments in one `mutate` stage are evaluated against the input schema in para
 
 Later stages see newly created columns.
 
-The version 0.17.0 implementation supports scalar row expressions and window
+The version 0.18.0 implementation supports scalar row expressions and window
 expressions in `mutate` assignments. New columns append in assignment order.
 Replacing an existing column preserves that column's position. Duplicate
 assignment targets in one stage MUST produce `E1207`.
@@ -695,7 +690,7 @@ If `--stdout-format` is omitted and stdout is piped, the CLI SHOULD default to `
 
 If stdout is a terminal, the CLI MAY default to a human-readable preview unless `--stdout-format` is supplied.
 
-### 5.7 Algraf Handoff
+### 5.7 Stream Handoff
 
 PDL source:
 
@@ -706,27 +701,17 @@ load "sales.parquet"
   | agg sum("amount") as "revenue"
 ```
 
-Algraf source:
-
-```ag
-Chart(data: stdin) {
-    Space(region * revenue) {
-        Bar(fill: region)
-    }
-}
-```
-
 Command:
 
 ```bash
-pdl run prep.pdl --stdout-format arrow-stream | algraf render chart.ag --stdin-format arrow-stream --output chart.svg
+pdl run prep.pdl --stdout-format arrow-stream > revenue.arrow
 ```
 
 The `.pdl` file owns data preparation.
 
-The `.ag` file owns visual mapping.
+Downstream consumers own any later processing.
 
-PDL MUST NOT mutate the `.ag` file.
+PDL MUST NOT mutate consumer-owned files.
 
 ### 5.8 Explicit Format Override
 
@@ -854,7 +839,7 @@ Window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are reserved by the version 0.17.0 implementation.
+These words are reserved by the version 0.18.0 implementation.
 
 ### 6.6 Quoted Tokens
 
@@ -1157,7 +1142,7 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are implemented in version 0.17.0 for `mutate`
+Window expressions are implemented in version 0.18.0 for `mutate`
 assignments. Using a window expression outside `mutate`, nesting one window
 expression inside another, or using a window function without `over (...)` MUST
 produce `E1226`.
@@ -1365,7 +1350,7 @@ CSV loading MUST support:
 - comma delimiter by default
 
 Configurable CSV delimiters, quote characters, and null tokens remain deferred
-in version 0.17.0. A future release MAY promote them with source or CLI option
+in version 0.18.0. A future release MAY promote them with source or CLI option
 syntax, diagnostics, examples, and tests.
 
 CSV output MUST be deterministic.
@@ -1421,7 +1406,7 @@ Arrow streams begin with a continuation marker and schema message.
 
 The v0.15.0 native implementation supports `arrow-stream` for `--stdout-format`,
 `--stdin-format`, `load stdin`, `save stdout`, and explicit-format file
-loads/saves. The v0.17.0 WASM browser run ABI continues to reject binary stdout
+loads/saves. The v0.18.0 WASM browser run ABI continues to reject binary stdout
 formats because its current stdout field is UTF-8 text.
 
 The runtime SHOULD read and write record batches without unnecessary conversion.
@@ -1594,7 +1579,7 @@ New columns append in assignment order.
 
 Duplicate assignment targets in one `mutate` stage MUST produce `E1207`.
 
-The version 0.17.0 implementation supports scalar row expressions and window
+The version 0.18.0 implementation supports scalar row expressions and window
 expressions in `mutate`.
 
 ### 11.7 Group By
@@ -1775,7 +1760,7 @@ Aggregate expressions can reference aggregate functions and group keys.
 
 Window expressions are a row-expression form valid in `mutate` assignments.
 They do not introduce aggregate context, and they are not valid inside `agg`,
-`filter`, `sort`, or other non-`mutate` expression positions in version 0.17.0.
+`filter`, `sort`, or other non-`mutate` expression positions in version 0.18.0.
 
 Path context accepts string literals and future path functions.
 
@@ -1798,7 +1783,7 @@ Implementations SHOULD emit helpful diagnostics when a quoted token could plausi
 
 ### 12.3 Scalar Functions
 
-The version 0.17.0 implementation supports these scalar functions in row
+The version 0.18.0 implementation supports these scalar functions in row
 expressions:
 
 - `col(name)`: resolves a quoted value as a column reference.
@@ -1872,7 +1857,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions
 
-Window function syntax is implemented in version 0.17.0 for `mutate`
+Window function syntax is implemented in version 0.18.0 for `mutate`
 assignments.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
@@ -1939,7 +1924,7 @@ when `order_by` is present. Running calculations require an explicit frame:
 rows between unbounded_preceding and current_row
 ```
 
-Ranking, distribution, and offset functions ignore frames in version 0.17.0.
+Ranking, distribution, and offset functions ignore frames in version 0.18.0.
 
 For `rank` and `dense_rank`, peer rows are rows with equal `order_by` values.
 
@@ -1971,7 +1956,7 @@ Non-deterministic function not allowed MUST produce `E1405`.
 
 Divide by zero detected statically MUST produce `E1407`.
 
-Invalid window specifications MUST produce stable diagnostics; version 0.17.0
+Invalid window specifications MUST produce stable diagnostics; version 0.18.0
 uses `E1203`, `E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1401`, or
 `E1402` depending on the malformed clause.
 
@@ -2094,7 +2079,7 @@ It MUST exit non-zero on errors.
 
 `pdl schema file.pdl --json` prints deterministic JSON.
 
-The version 0.17.0 implementation emits column names, unknown logical types,
+The version 0.18.0 implementation emits column names, unknown logical types,
 nullability, stage traces, and diagnostics in JSON mode.
 
 `--binding name` MUST inspect the requested binding without changing normal
@@ -2110,7 +2095,7 @@ It SHOULD show source reads, transform stages, format decisions, and sinks.
 
 `pdl plan file.pdl --json` prints deterministic JSON.
 
-The version 0.17.0 implementation accepts `--stdin-format <format>` and
+The version 0.18.0 implementation accepts `--stdin-format <format>` and
 `--stdout-format <format>` so stream choices are reflected in the plan. It MUST
 NOT read stdin or execute transforms while planning.
 
@@ -2122,7 +2107,7 @@ NOT read stdin or execute transforms while planning.
 
 The formatter MUST preserve semantics.
 
-The version 0.17.0 implementation rewrites files in place in the stable
+The version 0.18.0 implementation rewrites files in place in the stable
 leading-pipe style when formatting is available. It keeps short item lists
 inline, expands long item-list stages, and expands top-level window assignments
 in `mutate`. It returns a non-zero exit code without writing when parse errors
@@ -2134,7 +2119,7 @@ are present or when comments make safe rewriting unavailable.
 
 It MUST NOT execute data pipelines or read table data.
 
-The version 0.17.0 implementation exits non-zero on parse errors. When parsing
+The version 0.18.0 implementation exits non-zero on parse errors. When parsing
 succeeds, its JSON payload includes the parsed program and parse diagnostics.
 
 ### 14.8 pdl ir
@@ -2143,7 +2128,7 @@ succeeds, its JSON payload includes the parsed program and parse diagnostics.
 
 It MUST NOT execute data pipelines or write output artifacts.
 
-The version 0.17.0 implementation exits non-zero when syntax, schema, or
+The version 0.18.0 implementation exits non-zero when syntax, schema, or
 semantic errors prevent IR construction.
 
 ### 14.9 pdl manifest
@@ -2152,9 +2137,9 @@ semantic errors prevent IR construction.
 
 It MUST NOT execute transforms or write output artifacts.
 
-The version 0.17.0 implementation accepts `--stdin-format <format>` and
+The version 0.18.0 implementation accepts `--stdin-format <format>` and
 `--stdout-format <format>`, includes source, driver, stream, execution-plan,
-final-schema, diagnostics, and Algraf Arrow-stdout hint fields, and exits
+final-schema, diagnostics, and Arrow-stdout stream hint fields, and exits
 non-zero when planning fails.
 
 ### 14.10 pdl lsp
@@ -2248,7 +2233,7 @@ Strict mode MUST fail on row-level parse errors.
 
 The runtime SHOULD emit a run manifest when requested.
 
-The version 0.17.0 native CLI implements `pdl manifest file.pdl` as a
+The version 0.18.0 native CLI implements `pdl manifest file.pdl` as a
 deterministic dry-run manifest inspection command. It plans but does not execute
 the pipeline, and it does not write output artifacts.
 
@@ -2263,19 +2248,15 @@ Manifest fields SHOULD include:
 - row counts where known
 - content hashes where computed
 - diagnostics
-- Algraf interop hints when stdout format is Arrow IPC
+- stream interop hints when stdout format is Arrow IPC
 
 Manifest JSON MUST be deterministic.
 
-## 16. Algraf Interoperability
+## 16. Stream Interoperability
 
 ### 16.1 Interop Principle
 
-PDL and Algraf are separate languages.
-
-PDL prepares tables.
-
-Algraf renders charts.
+PDL prepares tables for downstream consumers.
 
 The preferred interop boundary is Arrow IPC streaming over stdout/stdin.
 
@@ -2289,17 +2270,18 @@ PDL SHOULD support:
 pdl run prep.pdl --stdout-format arrow-stream
 ```
 
-Algraf-compatible workflows can pipe this stream:
+Workflows can pipe this stream into any consumer that understands Arrow IPC:
 
 ```bash
-pdl run prep.pdl --stdout-format arrow-stream | algraf render chart.ag --stdin-format arrow-stream --output chart.svg
+pdl run prep.pdl --stdout-format arrow-stream | consumer --stdin-format arrow-stream
 ```
 
 PDL's responsibility is to produce a valid Arrow IPC stream.
 
-Algraf's responsibility is to consume stdin if it supports that mode.
+The consumer's responsibility is to consume stdin if it supports that mode.
 
-This PDL specification does not require Algraf to implement new flags.
+This PDL specification does not require downstream consumers to implement new
+flags.
 
 ### 16.3 Stdin Format Sniffing For Consumers
 
@@ -2307,7 +2289,7 @@ PDL recommends that consumers reading unknown stdin support sniffing plus explic
 
 For PDL itself, this is normative for `load stdin`.
 
-For Algraf, this is interop guidance only.
+For downstream consumers, this is interop guidance only.
 
 ### 16.4 File-Based Handoff
 
@@ -2320,14 +2302,10 @@ load "sales.parquet"
   | save "build/revenue.csv"
 ```
 
-Algraf can reference that file:
+Downstream consumers can reference that file:
 
-```ag
-Chart(data: "build/revenue.csv") {
-    Space(region * revenue) {
-        Bar(fill: region)
-    }
-}
+```text
+consumer build/revenue.csv
 ```
 
 File-based handoff is slower than Arrow streaming but simpler to inspect and cache.
@@ -2336,15 +2314,15 @@ File-based handoff is slower than Arrow streaming but simpler to inspect and cac
 
 In browser hosts, PDL WASM SHOULD be able to return Arrow bytes as a `Uint8Array` through the host ABI.
 
-A host MAY pass those bytes to an Algraf WASM runtime if one is loaded.
+A host MAY pass those bytes to another WASM runtime if one is loaded.
 
-PDL WASM MUST NOT invoke native Algraf.
+PDL WASM MUST NOT invoke native external processes.
 
-PDL WASM MUST NOT assume Algraf WASM is present.
+PDL WASM MUST NOT assume another WASM runtime is present.
 
 ### 16.6 Integrated Runner
 
-A future integrated runner MAY link PDL and Algraf crates in one Rust process.
+A future integrated runner MAY link PDL and another runtime in one Rust process.
 
 Such a runner MAY pass table memory directly without IPC.
 
@@ -2366,7 +2344,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.17.0` LSP implementation provides diagnostics,
+The current `0.18.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
@@ -2570,16 +2548,16 @@ The v0.15 WASM implementation MUST expose packed JSON calls for:
 
 The browser run request's host file map is format-neutral and MAY contain
 multiple files: keys are logical file paths and values are host-supplied file
-contents. Version 0.17.0 requires CSV and JSON Lines host file contents to
+contents. Version 0.18.0 requires CSV and JSON Lines host file contents to
 execute successfully through this JSON ABI because host files are supplied as
 UTF-8 strings. Binary host-file contents remain deferred until the ABI accepts
 byte payloads. The ABI MUST NOT special-case CSV at the TypeScript editor layer.
 
-`pdl_run_json` in version 0.17.0 MUST support CSV and JSON Lines stdout for the
+`pdl_run_json` in version 0.18.0 MUST support CSV and JSON Lines stdout for the
 resulting table. Virtual path-backed output sinks, Arrow IPC byte output, and
 binary dataframe decoders remain deferred until a later plan promotes them.
 
-For hover requests, `pdl_editor_service_json` in version 0.17.0 MUST use the
+For hover requests, `pdl_editor_service_json` in version 0.18.0 MUST use the
 same host file map through in-memory driver I/O so Monaco/WASM hover previews
 match native LSP hover behavior for text-backed paths and columns.
 
@@ -2604,13 +2582,15 @@ Monaco editor, one host-supplied dataframe input display, one dataframe output
 display, and diagnostics. It MAY use CSV text controls as the initial dataframe
 display because CSV is the only implemented v0.7 data decoder.
 
-The demo MAY show generated Arrow, CSV, schema, manifest, and Algraf handoff examples.
+The demo MAY show generated CSV, JSON Lines, Arrow, schema, manifest, and stream
+handoff examples.
 
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
 
-PDL MUST follow the same general crate architecture as Algraf.
+PDL MUST follow a layered crate architecture that keeps syntax, semantics,
+driver boundaries, execution, editor services, CLI, LSP, and WASM decoupled.
 
 Recommended layout:
 
@@ -2652,28 +2632,9 @@ The design SHOULD keep module boundaries aligned with the future crates.
 
 ### 19.2 Cargo Manifest Templates
 
-The standalone PDL repository SHOULD copy Algraf's Cargo workspace structure as
-a one-to-one scaffold, replacing `algraf` package names with `pdl` package names
-and replacing the graphics render crate with the data-pipeline execution crate.
-
-The expected manifest mapping is:
-
-| Algraf manifest | PDL manifest |
-| --- | --- |
-| `Cargo.toml` | `Cargo.toml` |
-| `crates/algraf-core/Cargo.toml` | `crates/pdl-core/Cargo.toml` |
-| `crates/algraf-syntax/Cargo.toml` | `crates/pdl-syntax/Cargo.toml` |
-| `crates/algraf-data/Cargo.toml` | `crates/pdl-data/Cargo.toml` |
-| `crates/algraf-semantics/Cargo.toml` | `crates/pdl-semantics/Cargo.toml` |
-| `crates/algraf-driver/Cargo.toml` | `crates/pdl-driver/Cargo.toml` |
-| `crates/algraf-render/Cargo.toml` | `crates/pdl-exec/Cargo.toml` |
-| `crates/algraf-editor-services/Cargo.toml` | `crates/pdl-editor-services/Cargo.toml` |
-| `crates/algraf-lsp/Cargo.toml` | `crates/pdl-lsp/Cargo.toml` |
-| `crates/algraf-cli/Cargo.toml` | `crates/pdl-cli/Cargo.toml` |
-| `crates/algraf-wasm/Cargo.toml` | `crates/pdl-wasm/Cargo.toml` |
-
-All PDL crates MUST inherit package version, edition, license, repository, and
-Rust version from `[workspace.package]`, matching the Algraf manifest pattern.
+The standalone PDL repository SHOULD use one workspace manifest plus per-crate
+manifests under `crates/`. All PDL crates MUST inherit package version,
+edition, license, repository, and Rust version from `[workspace.package]`.
 
 The root workspace manifest SHOULD start from this structure:
 
@@ -2694,7 +2655,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3014,9 +2975,9 @@ name = "pdl-wasm-demo"
 path = "src/bin/demo.rs"
 ```
 
-Graphics-only Algraf dependencies such as SVG rasterization, projection, and
-geometry-source crates MUST NOT be copied into PDL unless a later PDL feature
-requires them and the specification documents that requirement.
+Rendering, graphics, projection, and geometry-source dependencies MUST NOT be
+added to PDL unless a later PDL feature requires them and the specification
+documents that requirement.
 
 ### 19.3 Module Boundaries
 
@@ -3100,9 +3061,8 @@ requires them and the specification documents that requirement.
 - plan and schema JSON rendering
 - human preview table rendering
 
-`pdl-exec` is the PDL analog of Algraf's render-stage crate.
-
-It executes the analyzed pipeline and turns internal table results into deterministic external artifacts.
+`pdl-exec` executes the analyzed pipeline and turns internal table results into
+deterministic external artifacts.
 
 PDL SHOULD use `pdl-exec` for this crate because the language executes data pipelines rather than rendering graphics.
 
@@ -3148,12 +3108,11 @@ PDL SHOULD use `pdl-exec` for this crate because the language executes data pipe
 
 ### 19.4 Dependency Guidelines
 
-PDL SHOULD keep the same general third-party dependency stack as Algraf wherever
-the domains overlap: Cargo workspace conventions, CLI parsing, resilient syntax
-trees, serde-based JSON, CSV/Arrow/Parquet data handling, LSP transport, async
-runtime, stable ordering, diagnostics, and snapshot/test helpers should use the
-same crate families unless the PDL specification documents a deliberate
-substitution.
+PDL SHOULD prefer established Rust ecosystem crates for Cargo workspace
+conventions, CLI parsing, resilient syntax trees, serde-based JSON,
+CSV/Arrow/Parquet data handling, LSP transport, async runtime, stable ordering,
+diagnostics, and snapshot/test helpers unless the PDL specification documents a
+deliberate substitution.
 
 Recommended dependencies:
 
@@ -3205,10 +3164,10 @@ CLI catches top-level errors and prints concise messages.
 
 LSP logs internal errors and avoids crashing where possible.
 
-### 19.6 Implementation Patterns From Algraf
+### 19.6 Implementation Patterns
 
-The standalone PDL repository SHOULD preserve Algraf's implementation patterns
-where they support deterministic analysis, resilient editor behavior, and shared
+The standalone PDL repository SHOULD preserve implementation patterns that
+support deterministic analysis, resilient editor behavior, and shared
 CLI/LSP/WASM contracts.
 
 The exact Rust type names are guidance, but the roles and crate boundaries in
@@ -3648,9 +3607,9 @@ Schema-loading diagnostics are attributed to `schema-facts`. Semantic
 diagnostics remain core diagnostic values and are not duplicated into the
 report when schema facts already own the failure.
 
-#### 19.7.6 Algraf Template Audit
+#### 19.7.6 Implementation Pattern Audit
 
-PDL copies these Algraf implementation lessons:
+PDL keeps these implementation lessons:
 
 - lossless syntax and typed AST views;
 - diagnostics as values;
@@ -3666,7 +3625,6 @@ PDL intentionally diverges here:
 - tabular execution replaces graphics rendering;
 - `pdl-data` owns dataframe and native format privacy;
 - source/sink descriptors prepare for Arrow stdout discipline;
-- `.pdl` and `.ag` source languages remain separate;
 - render-level asset loading and graphics-specific dependencies are not copied.
 
 #### 19.7.7 Arrow Source And Sink Sketch
@@ -3728,7 +3686,7 @@ Diagnostic codes are grouped:
 - `E1601`-`E1699`: CLI and invocation errors
 - `E1701`-`E1799`: materialization and output errors
 - `E1801`-`E1899`: data source and format runtime errors
-- `E1901`-`E1999`: Algraf interop errors
+- `E1901`-`E1999`: stream interop errors
 - `W2001`-`W2099`: author-facing warnings
 - `H3001`-`H3099`: author-facing hints
 - `R4001`-`R4099`: implementation-oriented runtime/internal diagnostics
@@ -4047,17 +4005,17 @@ stage-argument error.
 
 `E1818` source schema unavailable.
 
-### 20.11 Algraf Interop Diagnostics
+### 20.11 Stream Interop Diagnostics
 
-`E1901` Algraf handoff format unsupported.
+`E1901` stream handoff format unsupported.
 
-`E1902` Algraf interop manifest failed.
+`E1902` stream interop manifest failed.
 
-`E1903` Algraf handoff stream format conflict.
+`E1903` stream handoff format conflict.
 
-`E1904` Algraf handoff path invalid.
+`E1904` stream handoff path invalid.
 
-`E1905` Algraf consumer format could not be inferred.
+`E1905` consumer format could not be inferred.
 
 ### 20.12 Warning Diagnostics
 
@@ -4097,7 +4055,7 @@ stage-argument error.
 
 `H3005` add a tie-breaker column to window `order_by`.
 
-`H3006` use `arrow-stream` for Algraf handoff.
+`H3006` use `arrow-stream` for stream handoff.
 
 `H3007` use `--stdout-format` when piping data.
 
@@ -4146,7 +4104,7 @@ A PDL implementation SHOULD include:
 - CLI tests
 - LSP tests
 - WASM ABI tests
-- Algraf interop tests
+- stream interop tests
 - security tests
 - performance tests
 
@@ -4182,7 +4140,7 @@ CLI tests SHOULD verify stdout contains only data in data-output mode.
 
 Diagnostics and logs SHOULD be asserted on stderr.
 
-Pipeline-to-Algraf interop tests MAY use a fake consumer that validates Arrow IPC bytes.
+Pipeline-to-consumer interop tests MAY use a fake consumer that validates Arrow IPC bytes.
 
 ### 21.6 LSP Tests
 
@@ -4240,7 +4198,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.17.0.
+PDL source does not require an explicit version declaration in draft 0.18.0.
 
 The implementation SHOULD report supported language version.
 
@@ -4380,7 +4338,7 @@ load "orders_raw.csv"
 
 The runnable repository example is `examples/orders_cleaned.pdl`.
 
-### 26.4 Arrow Stream To Algraf
+### 26.4 Arrow Stream Output
 
 ```pdl
 load "sales.parquet"
@@ -4392,7 +4350,7 @@ load "sales.parquet"
 Run:
 
 ```bash
-pdl run sales_for_chart.pdl --stdout-format arrow-stream | algraf render chart.ag --stdin-format arrow-stream --output chart.svg
+pdl run sales_for_stream.pdl --stdout-format arrow-stream > sales.arrow
 ```
 
 ### 26.5 Join
@@ -4449,9 +4407,8 @@ Editor and browser:
 - WASM exposes editor-service JSON ABI.
 - Monaco demo uses WASM and does not reimplement language logic.
 
-Algraf interop:
+Stream interop:
 
 - PDL can stream Arrow IPC to stdout.
-- PDL can save CSV for file-based Algraf use.
+- PDL can save CSV for file-based consumers.
 - Tests validate Arrow stream output with a consumer.
-- PDL does not mutate `.ag` source.

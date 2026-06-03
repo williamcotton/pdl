@@ -57,7 +57,7 @@ formats, or browser output sinks.
   Status: Shipped in 0.14.0. `pdl manifest file.pdl` emits deterministic JSON
   for the dry-run manifest surface: implementation version, source path, driver
   inputs, sinks, streams, execution plan, final schema, diagnostics, and Arrow
-  stdout Algraf interop hints when applicable. It does not execute transforms or
+  stdout stream interop hints when applicable. It does not execute transforms or
   write artifacts.
 
 - Preserve stdout discipline and diagnostic behavior.

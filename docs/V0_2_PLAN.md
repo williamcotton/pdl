@@ -34,7 +34,7 @@ source language surface or example behavior.
 
 Status: Planned.
 
-Begin the Arrow IPC stdout/stdin path needed for Unix composition with Algraf,
+Begin the Arrow IPC stdout/stdin path needed for Unix composition with downstream consumers,
 including deterministic stdout behavior and clean separation between diagnostics
 on stderr and data on stdout.
 

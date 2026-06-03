@@ -8,7 +8,7 @@ Target version: 0.4.0
 PDL v0.4 gives the young repository a durable Rust module layout before the
 language and runtime grow much larger. The release maps the current crates onto
 the reusable language architecture in `docs/LANGUAGE_ARCH_BLUEPRINT.md` and the
-same general organization style that has worked for Algraf, while keeping PDL's
+same general layered organization style, while keeping PDL's
 source language, CLI behavior, diagnostics, examples, and public crate contracts
 stable.
 
@@ -151,15 +151,15 @@ Status: Landed in 0.4.0.
 Cargo lockfile entries, CLI version output, and VS Code package metadata now
 identify the reference implementation as 0.4.0.
 
-### Small Algraf Parity Notes
+### Small Crate Boundary Notes
 
 Status: Landed in 0.4.0.
 
-PDL follows Algraf's core/syntax/semantics/driver/editor/LSP/CLI/WASM boundary
+PDL follows a core/syntax/semantics/driver/editor/LSP/CLI/WASM boundary
 style and the rowan CST plus typed view pattern. PDL intentionally diverges at
-the runtime boundary: `pdl-exec` plans and emits tabular data, while Algraf's
+the runtime boundary: `pdl-exec` plans and emits tabular data, while rendering crates'
 rendering crate produces graphics. Arrow IPC interop remains a future runtime
-format feature, not an Algraf source-language merge.
+format feature, not a source-language merge.
 
 ### Phase Reports For Adapters
 
@@ -221,7 +221,7 @@ The v0.4 implementation followed the ordering guidance in
 
 - New source-language stages such as `mutate`, `join`, `union`, and `distinct`.
 - Arrow IPC, Parquet, JSON Lines, and stdin stream sniffing feature work.
-- A full Algraf-sized parser directory or large placeholder tree before the PDL
+- A full parser directory or large placeholder tree before the PDL
   grammar needs it.
 - Public API redesigns that are not needed to split existing implementation
   ownership.

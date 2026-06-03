@@ -7,7 +7,7 @@ Target version: 0.1.0, superseded by 0.2.0.
 
 PDL v0.1 establishes the standalone command-line data preparation language:
 load deterministic tabular inputs, apply pure pipeline stages, and write stable
-artifacts or stdout streams that can feed downstream tools such as Algraf.
+artifacts or stdout streams that can feed downstream consumers.
 
 The first implementation slice was intentionally narrow. It made the language
 runnable with a CSV-backed in-memory engine while preserving the planned crate

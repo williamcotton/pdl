@@ -112,15 +112,15 @@ pub fn plan_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> PlanOutput
 pub fn manifest_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> ManifestJson {
     let stdout_format = plan.stdout_format.map(|format| format.canonical_name());
     ManifestJson {
-        manifest_version: "0.17.0",
+        manifest_version: "0.18.0",
         implementation_version: env!("CARGO_PKG_VERSION"),
-        language_version: "0.17.0",
+        language_version: "0.18.0",
         source_path: prepared.path.display().to_string(),
         driver: driver_plan_json(&prepared.driver_plan),
         execution: execution_plan_json(plan),
         final_schema: final_schema_columns(prepared).map(SchemaJson::from_columns),
         diagnostics: prepared.diagnostics(),
-        algraf_interop: (stdout_format == Some("arrow-stream")).then_some(AlgrafInteropJson {
+        stream_interop: (stdout_format == Some("arrow-stream")).then_some(StreamInteropJson {
             stdout_format: "arrow-stream",
             stdin_format_hint: "arrow-stream",
         }),
@@ -179,7 +179,7 @@ pub struct ManifestJson {
     final_schema: Option<SchemaJson>,
     diagnostics: Vec<Diagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    algraf_interop: Option<AlgrafInteropJson>,
+    stream_interop: Option<StreamInteropJson>,
 }
 
 #[derive(Serialize)]
@@ -316,7 +316,7 @@ enum ExecutionStepJson {
 }
 
 #[derive(Serialize)]
-struct AlgrafInteropJson {
+struct StreamInteropJson {
     stdout_format: &'static str,
     stdin_format_hint: &'static str,
 }

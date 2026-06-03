@@ -21,7 +21,7 @@ CSV output in memory.
 Status: Complete.
 
 Add a small `demo/` app using the same React, Vite, Monaco, TextMate, Onigasm,
-and lucide-react setup as the Algraf demo, but without Algraf's routed site or
+and lucide-react setup, but without a routed site or
 chart rendering surface.
 
 Acceptance criteria:

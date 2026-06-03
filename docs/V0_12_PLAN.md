@@ -10,7 +10,7 @@ Predecessor plan: [`V0_11_PLAN.md`](V0_11_PLAN.md)
 
 PDL v0.12 is the first multi-input expansion after the v0.11 row-manipulation
 release. It promotes `join` and `union` from deferred syntax to implemented
-stages so the canonical Algraf segment-summary example (spec §26.5) and the
+stages so the canonical segment-summary example (spec §26.5) and the
 binding-driven workflows described throughout the spec become runnable.
 
 The release thesis is: authors should be able to combine two named pipelines

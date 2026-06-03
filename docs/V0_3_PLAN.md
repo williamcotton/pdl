@@ -8,7 +8,7 @@ Target version: 0.3.0
 PDL v0.3 turns the diagnostic model into a first-class source-language surface.
 The release replaces the early placeholder family with stable,
 category-specific diagnostic codes before larger language and runtime expansion,
-following the catalog-driven workflow that made Algraf diagnostics reliable
+following the catalog-driven workflow that keeps diagnostics reliable
 across parser, analyzer, CLI, editor, and runtime work.
 
 ## Must

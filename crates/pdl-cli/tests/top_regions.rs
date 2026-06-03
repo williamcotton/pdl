@@ -447,8 +447,8 @@ fn ast_ir_and_manifest_commands_emit_json() {
         String::from_utf8_lossy(&manifest.stderr)
     );
     let manifest_stdout = String::from_utf8(manifest.stdout).expect("manifest stdout is UTF-8");
-    assert!(manifest_stdout.contains("\"manifest_version\": \"0.17.0\""));
-    assert!(manifest_stdout.contains("\"algraf_interop\""));
+    assert!(manifest_stdout.contains("\"manifest_version\": \"0.18.0\""));
+    assert!(manifest_stdout.contains("\"stream_interop\""));
     assert!(manifest_stdout.contains("\"arrow-stream\""));
 }
 

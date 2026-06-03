@@ -1,12 +1,13 @@
 {
   "name": "pdl-wasm-demo",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build:wasm": "RUSTC=$(rustup which --toolchain stable rustc) rustup run stable cargo build --manifest-path ../Cargo.toml -p pdl-wasm --lib --target wasm32-unknown-unknown --release && mkdir -p public/wasm && cp ../target/wasm32-unknown-unknown/release/pdl_wasm.wasm public/wasm/pdl.wasm",
     "dev": "npm run build:wasm && vite --host 0.0.0.0",
-    "build": "npm run build:wasm && npm run check && vite build",
+    "build": "npm run build:wasm && npm run check && vite build && npm run build:pages-fallback",
+    "build:pages-fallback": "node scripts/copy-pages-fallback.mjs",
     "check": "tsc --noEmit",
     "preview": "vite preview --host 0.0.0.0"
   },

@@ -5,7 +5,7 @@ Target version: 0.5.0
 Owner: PDL maintainers
 Related spec: [`PDL_SPEC.md`](PDL_SPEC.md)
 Predecessor plan: [`V0_4_PLAN.md`](V0_4_PLAN.md)
-Roadmap theme: Algraf-derived architecture hardening for PDL's data pipeline.
+Roadmap theme: architecture hardening for PDL's data pipeline.
 
 ## Purpose
 
@@ -13,11 +13,11 @@ PDL v0.5 is a refactor-first release. The v0.4 split created the right crate
 layout; v0.5 tightens the seams before Arrow, Parquet, stdin sniffing, joins,
 mutations, and richer editor features add more weight to the codebase.
 
-Algraf is the architectural template for this release, not a source-language
-template. PDL keeps Algraf's phase ownership discipline, diagnostics-as-values,
+Layered Rust workspace design is the architectural template for this release, not a source-language
+template. PDL keeps phase ownership discipline, diagnostics-as-values,
 driver I/O seam, editor/LSP thinness, and planning-before-emission shape. PDL
 intentionally diverges at the runtime boundary: `pdl-exec` executes tabular data
-pipelines, while Algraf renders charts.
+pipelines.
 
 ## Release Thesis
 
@@ -61,7 +61,7 @@ The v0.4 code has the right package graph, but the seams are still early:
 
 ## Scope Rules
 
-- No PDL/Algraf source-language merge.
+- No source-language merge.
 - No new source syntax unless the item is explicitly promoted into this plan and
   the spec first.
 - Keep existing v0.4 CLI behavior, diagnostics, examples, LSP responses, and
@@ -228,22 +228,22 @@ cargo test --workspace
 
 ## v0.5.0 Should
 
-### Algraf Template Audit Note
+### Architecture Audit Note
 
 Status: Complete.
 
-Capture the Algraf architecture lessons that matter for PDL without making
-future contributors re-audit the Algraf repository.
+Capture the architecture lessons that matter for PDL without making future
+contributors re-audit unrelated repositories.
 
 Acceptance criteria:
 
-- Record what PDL copies from Algraf: lossless syntax, diagnostics-as-values,
+- Record what PDL keeps: lossless syntax, diagnostics-as-values,
   driver I/O seam, preparation reports, editor/LSP thinness, WASM host boundary,
   deterministic outputs, and planning-before-emission.
 - Record where PDL intentionally diverges: tabular execution instead of graphics
   rendering, Polars/data-engine privacy, Arrow/stdout source-sink discipline,
-  and no `.ag`/`.pdl` source-language merge.
-- Call out Algraf coupling to avoid copying blindly, especially render-level
+  and no source-language merge.
+- Call out unrelated coupling to avoid copying blindly, especially render-level
   asset loading through driver policy and concrete dataframe maps across runtime
   seams.
 

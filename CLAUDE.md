@@ -18,14 +18,9 @@ load "sales.parquet"
   | save "top_regions.csv"
 ```
 
-PDL is separate from Algraf, but it is designed to pair well with Algraf. The
-preferred interop path is Arrow IPC streaming over stdout/stdin:
-
-```bash
-pdl run prep.pdl --stdout-format arrow-stream | algraf render chart.ag --stdin-format arrow-stream --output chart.svg
-```
-
-PDL prepares tables. Algraf renders charts. Do not merge their source languages.
+PDL prepares tables and emits ordinary files or stdout streams for downstream
+consumers. The preferred typed stream path is Arrow IPC streaming over
+stdout/stdin.
 
 ## Spec and versioned plans
 
@@ -83,8 +78,8 @@ plan if the release is now closed.
 
 ## Workspace layout
 
-PDL follows the same general architecture shape as Algraf, with `pdl-exec`
-instead of a graphics render crate:
+PDL follows a layered Rust workspace architecture, with `pdl-exec` owning
+planning and execution:
 
 | Crate | Responsibility |
 | --- | --- |
@@ -234,7 +229,7 @@ must not read arbitrary host files, fetch network resources by itself, inspect
 process state, or invoke external processes.
 
 `demo/` is a static Monaco host for that ABI. It may show PDL examples, schemas,
-plans, CSV/Arrow previews, manifests, and Algraf handoff examples, but it must
+plans, CSV/Arrow previews, manifests, and stream handoff examples, but it must
 not contain a separate parser or analyzer.
 
 ## Example generation
@@ -250,7 +245,7 @@ Arrow, or Parquet fixtures that make expected row order and output schema clear.
 When adding a new example, update the top-level README or tutorial docs so the
 example set stays discoverable. Place examples in tutorial order: loading and
 filtering, projection, mutation, grouping and aggregation, joins, streaming,
-Algraf handoff, editor/WASM examples.
+editor/WASM examples.
 
 ## Conventions
 

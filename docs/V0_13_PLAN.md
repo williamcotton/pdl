@@ -12,7 +12,7 @@ PDL v0.13 is the first stream-interoperability expansion after the v0.12
 multi-input release. It promotes the smallest coherent slice of the data-boundary
 work already described by the spec: native CLI pipelines can read from stdin,
 make deterministic format decisions for streams, and emit Arrow IPC streams to
-stdout for Unix-style composition with Algraf and other consumers.
+stdout for Unix-style composition with downstream consumers.
 
 The release thesis is: authors should be able to use the existing table stages
 over file or stdin sources, then choose CSV or Arrow IPC stream output without
@@ -72,7 +72,7 @@ the current CSV-backed implementation and the interop contract in spec sections
 
   Status: Shipped in 0.13.0. Added small deterministic examples covering CSV stdin,
   Arrow-stream stdout, and an Arrow-stream stdin-to-stdout flow that can be
-  validated in CI without requiring Algraf. README docs make the new examples
+  validated in CI with a fake stream consumer. README docs make the new examples
   discoverable. Tests assert clean stdout bytes,
   stderr diagnostics, sniffing-byte preservation, format-conflict diagnostics,
   and deterministic Arrow IPC output.
