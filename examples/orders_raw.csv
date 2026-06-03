@@ -1,0 +1,6 @@
+order_id,region,channel,gross_amount,discount,status
+A100, North ,Web,120,20, Completed
+A100, North ,Web,120,20, Completed
+A101,South,Store,80,5,pending
+A102,West,Web,200,50,completed
+A103,East,Partner,90,,Completed

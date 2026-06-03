@@ -1,5 +1,5 @@
 use pdl_core::{Diagnostic, Severity, Span};
-use pdl_semantics::registry::{AGGREGATE_FUNCTIONS, FORMATS, KEYWORDS, STAGES};
+use pdl_semantics::registry::{AGGREGATE_FUNCTIONS, FORMATS, KEYWORDS, SCALAR_FUNCTIONS, STAGES};
 use pdl_semantics::{analyze_program, FormatInfo, FunctionInfo, LoadRequest, StageInfo};
 use pdl_syntax::{Expr, ParseResult, Pipeline, PipelineStart, Program, Stage};
 use serde::{Deserialize, Serialize};
@@ -197,6 +197,8 @@ pub fn completions(
         );
     } else if context.in_agg_function_context {
         completions.extend(AGGREGATE_FUNCTIONS.iter().map(function_completion));
+    } else if context.in_scalar_function_context {
+        completions.extend(SCALAR_FUNCTIONS.iter().map(function_completion));
     } else if context.in_sort_direction_context {
         completions.extend([
             keyword_completion("asc", "Sort ascending"),
@@ -261,7 +263,9 @@ pub fn semantic_tokens(source: &str) -> Vec<EditorSemanticToken> {
             let text = &source[pos..end];
             let token_type = if KEYWORDS.contains(&text) {
                 SemanticTokenKind::Keyword
-            } else if AGGREGATE_FUNCTIONS.iter().any(|info| info.name == text) {
+            } else if AGGREGATE_FUNCTIONS.iter().any(|info| info.name == text)
+                || SCALAR_FUNCTIONS.iter().any(|info| info.name == text)
+            {
                 SemanticTokenKind::Function
             } else {
                 SemanticTokenKind::Variable
@@ -287,7 +291,7 @@ pub fn document_symbols(source: &str) -> Vec<EditorDocumentSymbol> {
             name: binding.name.value.clone(),
             detail: "binding".to_string(),
             kind: DocumentSymbolKind::Binding,
-            range: range_for_span(source, binding.pipeline.span),
+            range: range_for_span(source, binding.name.span.join(binding.pipeline.span)),
             selection_range: range_for_span(source, binding.name.span),
             children: pipeline_stage_symbols(source, &binding.pipeline),
         });
@@ -410,6 +414,7 @@ struct CompletionContext {
     in_pipeline_start: bool,
     in_format_context: bool,
     in_agg_function_context: bool,
+    in_scalar_function_context: bool,
     in_sort_direction_context: bool,
     in_column_context: bool,
     inside_string: bool,
@@ -442,13 +447,26 @@ impl CompletionContext {
         let in_agg_function_context = stage.as_deref() == Some("agg")
             && !inside_string
             && after_keyword.is_some_and(|suffix| !suffix.contains('(') || suffix.ends_with(','));
+        let in_scalar_function_context = matches!(stage.as_deref(), Some("filter" | "mutate"))
+            && !inside_string
+            && word.chars().all(is_ident_char);
         let in_sort_direction_context = stage.as_deref() == Some("sort")
             && !inside_string
             && line_prefix.contains('"')
             && word.chars().all(is_ident_char);
         let in_column_context = matches!(
             stage.as_deref(),
-            Some("filter" | "select" | "drop" | "rename" | "group_by" | "agg" | "sort")
+            Some(
+                "filter"
+                    | "select"
+                    | "drop"
+                    | "rename"
+                    | "mutate"
+                    | "group_by"
+                    | "agg"
+                    | "sort"
+                    | "distinct"
+            )
         );
 
         Self {
@@ -456,6 +474,7 @@ impl CompletionContext {
             in_pipeline_start,
             in_format_context,
             in_agg_function_context,
+            in_scalar_function_context,
             in_sort_direction_context,
             in_column_context,
             inside_string,
@@ -502,6 +521,12 @@ fn collect_pipeline_columns(pipeline: &Pipeline, columns: &mut BTreeSet<String>)
                     columns.insert(item.new.value.clone());
                 }
             }
+            Stage::Mutate { items, .. } => {
+                for item in items {
+                    columns.insert(item.column.value.clone());
+                    collect_expr_columns(&item.expr, columns);
+                }
+            }
             Stage::Agg { items, .. } => {
                 for item in items {
                     for arg in &item.args {
@@ -513,6 +538,11 @@ fn collect_pipeline_columns(pipeline: &Pipeline, columns: &mut BTreeSet<String>)
             Stage::Sort { items, .. } => {
                 for item in items {
                     columns.insert(item.column.value.clone());
+                }
+            }
+            Stage::Distinct { columns: keys, .. } => {
+                for column in keys {
+                    columns.insert(column.value.clone());
                 }
             }
             Stage::Limit { .. } | Stage::Save(_) | Stage::Unsupported { .. } => {}
@@ -624,7 +654,11 @@ impl DocumentFacts {
 
 fn apply_stage_to_schema(schema: &mut SchemaState, stage: &Stage) {
     match stage {
-        Stage::Filter { .. } | Stage::Sort { .. } | Stage::Limit { .. } | Stage::Save(_) => {}
+        Stage::Filter { .. }
+        | Stage::Sort { .. }
+        | Stage::Limit { .. }
+        | Stage::Distinct { .. }
+        | Stage::Save(_) => {}
         Stage::Select { items, .. } => {
             schema.columns = items
                 .iter()
@@ -642,6 +676,18 @@ fn apply_stage_to_schema(schema: &mut SchemaState, stage: &Stage) {
             for column in &mut schema.columns {
                 if let Some(rename) = items.iter().find(|rename| rename.old.value == *column) {
                     *column = rename.new.value.clone();
+                }
+            }
+            schema.grouping = None;
+        }
+        Stage::Mutate { items, .. } => {
+            for item in items {
+                if !schema
+                    .columns
+                    .iter()
+                    .any(|column| column == &item.column.value)
+                {
+                    schema.columns.push(item.column.value.clone());
                 }
             }
             schema.grouping = None;
@@ -957,16 +1003,16 @@ pub(crate) fn stage_name(stage: &Stage) -> &'static str {
         Stage::Select { .. } => "select",
         Stage::Drop { .. } => "drop",
         Stage::Rename { .. } => "rename",
+        Stage::Mutate { .. } => "mutate",
         Stage::GroupBy { .. } => "group_by",
         Stage::Agg { .. } => "agg",
         Stage::Sort { .. } => "sort",
         Stage::Limit { .. } => "limit",
+        Stage::Distinct { .. } => "distinct",
         Stage::Save(_) => "save",
         Stage::Unsupported { name, .. } => match name.value.as_str() {
-            "mutate" => "mutate",
             "join" => "join",
             "union" => "union",
-            "distinct" => "distinct",
             _ => "unknown",
         },
     }
@@ -1222,5 +1268,40 @@ mod tests {
                 "missing intact semantic token for {text}"
             );
         }
+    }
+
+    #[test]
+    fn binding_document_symbol_selection_range_is_inside_full_range() {
+        let source = r#"let cleaned =
+  load "orders_raw.csv"
+  | filter lower(trim("status")) == "completed"
+  | mutate "net_amount" = "gross_amount" - coalesce("discount", 0), "region_channel" = concat(upper(trim("region")), lit(":"), lower(trim("channel")))
+  | distinct "order_id"
+
+cleaned
+  | group_by "region_channel"
+  | agg count() as "orders", sum("net_amount") as "revenue"
+  | sort "revenue" desc"#;
+
+        let symbols = document_symbols(source);
+        let cleaned = symbols
+            .iter()
+            .find(|symbol| symbol.name == "cleaned")
+            .expect("cleaned binding symbol");
+
+        assert!(
+            range_contains(cleaned.range, cleaned.selection_range),
+            "binding range {:?} must contain selection range {:?}",
+            cleaned.range,
+            cleaned.selection_range
+        );
+    }
+
+    fn range_contains(outer: TextRange, inner: TextRange) -> bool {
+        position_lte(outer.start, inner.start) && position_lte(inner.end, outer.end)
+    }
+
+    fn position_lte(left: TextPosition, right: TextPosition) -> bool {
+        left.line < right.line || (left.line == right.line && left.character <= right.character)
     }
 }

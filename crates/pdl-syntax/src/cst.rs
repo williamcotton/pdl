@@ -130,6 +130,13 @@ impl CstBuilder<'_> {
                         );
                     }
                 }
+                Stage::Mutate { items, .. } => {
+                    for item in items {
+                        builder.node(SyntaxKind::MutateItemNode, item.span, |builder| {
+                            builder.expr(&item.expr);
+                        });
+                    }
+                }
                 Stage::Agg { items, .. } => {
                     for item in items {
                         builder.agg_item(item);
@@ -141,6 +148,7 @@ impl CstBuilder<'_> {
                     }
                 }
                 Stage::Drop { .. }
+                | Stage::Distinct { .. }
                 | Stage::GroupBy { .. }
                 | Stage::Limit { .. }
                 | Stage::Save(_)

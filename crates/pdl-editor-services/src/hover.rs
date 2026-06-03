@@ -1,7 +1,7 @@
 use pdl_core::Span;
 use pdl_data::{DataFormat, LogicalType, Table, Value};
 use pdl_driver::{resolve_input_path, DriverIo, OsDriverIo};
-use pdl_semantics::{aggregate_function, format_info, stage_info};
+use pdl_semantics::{aggregate_function, format_info, scalar_function, stage_info};
 use pdl_syntax::{Expr, LoadStage, Pipeline, PipelineStart, Program, SaveStage, SourceRef, Stage};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -197,6 +197,14 @@ fn hover_stage_detail(
                         info.documentation,
                     ));
                 }
+            }
+        }
+    }
+
+    for (name, span) in scalar_function_spans(stage) {
+        if contains(span, offset) {
+            if let Some(info) = scalar_function(&name) {
+                return Some(info_hover(source, span, info.name, info.documentation));
             }
         }
     }
@@ -550,7 +558,11 @@ fn resolve_csv_load_path(load: &LoadStage, program_path: &Path) -> Option<PathBu
 
 fn apply_stage_to_preview(preview: &mut TablePreview, stage: &Stage) {
     match stage {
-        Stage::Filter { .. } | Stage::Sort { .. } | Stage::GroupBy { .. } | Stage::Save(_) => {}
+        Stage::Filter { .. }
+        | Stage::Sort { .. }
+        | Stage::GroupBy { .. }
+        | Stage::Distinct { .. }
+        | Stage::Save(_) => {}
         Stage::Limit { n, .. } => {
             preview.rows_sampled = preview.rows_sampled.min(*n);
             preview.sample_rows.truncate(*n);
@@ -582,6 +594,20 @@ fn apply_stage_to_preview(preview: &mut TablePreview, stage: &Stage) {
             for column in &mut preview.columns {
                 if let Some(rename) = items.iter().find(|rename| rename.old.value == column.name) {
                     column.name = rename.new.value.clone();
+                }
+            }
+            preview.sample_rows.clear();
+        }
+        Stage::Mutate { items, .. } => {
+            for item in items {
+                if !preview
+                    .columns
+                    .iter()
+                    .any(|column| column.name == item.column.value)
+                {
+                    preview
+                        .columns
+                        .push(ColumnPreview::unknown(item.column.value.clone()));
                 }
             }
             preview.sample_rows.clear();
@@ -637,6 +663,14 @@ fn column_spans(stage: &Stage) -> Vec<Span> {
             .iter()
             .flat_map(|item| [item.old.span, item.new.span])
             .collect(),
+        Stage::Mutate { items, .. } => items
+            .iter()
+            .flat_map(|item| {
+                expr_column_spans(&item.expr)
+                    .into_iter()
+                    .chain([item.column.span])
+            })
+            .collect(),
         Stage::Agg { items, .. } => items
             .iter()
             .flat_map(|item| {
@@ -647,7 +681,50 @@ fn column_spans(stage: &Stage) -> Vec<Span> {
             })
             .collect(),
         Stage::Sort { items, .. } => items.iter().map(|item| item.column.span).collect(),
+        Stage::Distinct { columns, .. } => columns.iter().map(|column| column.span).collect(),
         Stage::Limit { .. } | Stage::Save(_) | Stage::Unsupported { .. } => Vec::new(),
+    }
+}
+
+fn scalar_function_spans(stage: &Stage) -> Vec<(String, Span)> {
+    match stage {
+        Stage::Filter { expr, .. } => expr_function_spans(expr),
+        Stage::Mutate { items, .. } => items
+            .iter()
+            .flat_map(|item| expr_function_spans(&item.expr))
+            .collect(),
+        Stage::Agg { items, .. } => items
+            .iter()
+            .flat_map(|item| item.args.iter().flat_map(expr_function_spans))
+            .collect(),
+        Stage::Select { .. }
+        | Stage::Drop { .. }
+        | Stage::Rename { .. }
+        | Stage::GroupBy { .. }
+        | Stage::Sort { .. }
+        | Stage::Limit { .. }
+        | Stage::Distinct { .. }
+        | Stage::Save(_)
+        | Stage::Unsupported { .. } => Vec::new(),
+    }
+}
+
+fn expr_function_spans(expr: &Expr) -> Vec<(String, Span)> {
+    match expr {
+        Expr::Call { name, args, .. } => {
+            let mut spans = vec![(name.value.clone(), name.span)];
+            spans.extend(args.iter().flat_map(expr_function_spans));
+            spans
+        }
+        Expr::Unary { expr, .. } => expr_function_spans(expr),
+        Expr::Binary { left, right, .. } => {
+            let mut spans = expr_function_spans(left);
+            spans.extend(expr_function_spans(right));
+            spans
+        }
+        Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => {
+            Vec::new()
+        }
     }
 }
 

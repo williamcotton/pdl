@@ -1,8 +1,8 @@
 use pdl_core::Severity;
 
 use crate::{
-    parse, AggItem, BinaryOp, Expr, NullsOrder, Pipeline, PipelineStart, SinkRef, SortDirection,
-    SourceRef, Spanned, Stage, UnaryOp,
+    parse, AggItem, BinaryOp, Expr, MutateItem, NullsOrder, Pipeline, PipelineStart, SinkRef,
+    SortDirection, SourceRef, Spanned, Stage, UnaryOp,
 };
 
 pub type FormatResult = Option<String>;
@@ -91,6 +91,14 @@ fn format_stage(stage: &Stage) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Stage::Mutate { items, .. } => format!(
+            "mutate {}",
+            items
+                .iter()
+                .map(format_mutate_item)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Stage::GroupBy { columns, .. } => format!("group_by {}", format_columns(columns)),
         Stage::Agg { items, .. } => format!(
             "agg {}",
@@ -121,6 +129,8 @@ fn format_stage(stage: &Stage) -> String {
                 .join(", ")
         ),
         Stage::Limit { n, .. } => format!("limit {n}"),
+        Stage::Distinct { columns, .. } if columns.is_empty() => "distinct".to_string(),
+        Stage::Distinct { columns, .. } => format!("distinct {}", format_columns(columns)),
         Stage::Save(save) => {
             let mut text = match &save.sink {
                 SinkRef::Path(path) => format!("save {}", quote(&path.value)),
@@ -141,6 +151,14 @@ fn format_columns(columns: &[Spanned<String>]) -> String {
         .map(|column| quote(&column.value))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn format_mutate_item(item: &MutateItem) -> String {
+    format!(
+        "{} = {}",
+        quote(&item.column.value),
+        format_expr(&item.expr)
+    )
 }
 
 fn format_agg_item(item: &AggItem) -> String {

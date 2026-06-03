@@ -5,8 +5,8 @@ use pdl_data::{
 };
 use pdl_driver::{DriverIo, OsDriverIo, PreparedProgram, SinkDescriptor, SourceDescriptor};
 use pdl_semantics::{
-    AggItemIr, BinaryOpIr, ExprIr, NullsOrderIr, PipelineIr, PipelineStartIr, SortDirectionIr,
-    StageIr, UnaryOpIr,
+    AggItemIr, BinaryOpIr, ExprIr, MutateItemIr, NullsOrderIr, PipelineIr, PipelineStartIr,
+    SortDirectionIr, StageIr, UnaryOpIr,
 };
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -158,6 +158,10 @@ impl Runtime<'_> {
                     table = table.rename_columns(&renames);
                     grouping = None;
                 }
+                StageIr::Mutate { items, .. } => {
+                    table = self.mutate(table, items)?;
+                    grouping = None;
+                }
                 StageIr::GroupBy { columns, .. } => {
                     grouping = Some(columns.clone());
                 }
@@ -194,13 +198,17 @@ impl Runtime<'_> {
                 StageIr::Limit { n, .. } => {
                     table = table.limit(*n);
                 }
+                StageIr::Distinct { columns, .. } => {
+                    table = table.distinct(columns);
+                    grouping = None;
+                }
                 StageIr::Save { format, span, .. } => {
                     self.execute_save(*span, format.as_deref(), &table)?;
                 }
                 StageIr::Unsupported { name, span } => {
                     return Err(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{name}` is deferred in 0.10.0"),
+                        format!("stage `{name}` is deferred in 0.11.0"),
                         *span,
                     ));
                 }
@@ -241,7 +249,7 @@ impl Runtime<'_> {
             if format != "csv" {
                 return Err(Diagnostic::error(
                     codes::E1215,
-                    format!("format `{format}` is not supported in 0.10.0"),
+                    format!("format `{format}` is not supported in 0.11.0"),
                     stage_span,
                 ));
             }
@@ -267,7 +275,7 @@ impl Runtime<'_> {
             }
             SourceDescriptor::Stdin => Err(Diagnostic::error(
                 codes::E1211,
-                "stdin loading is deferred in 0.10.0",
+                "stdin loading is deferred in 0.11.0",
                 input.span,
             )),
         }
@@ -286,7 +294,7 @@ impl Runtime<'_> {
             if format != "csv" {
                 return Err(Diagnostic::error(
                     codes::E1705,
-                    format!("output format `{format}` is not supported in 0.10.0"),
+                    format!("output format `{format}` is not supported in 0.11.0"),
                     stage_span,
                 ));
             }
@@ -361,6 +369,38 @@ impl Runtime<'_> {
             }
             rows.push(Row { values });
         }
+
+        Ok(Table { columns, rows })
+    }
+
+    fn mutate(&self, table: Table, items: &[MutateItemIr]) -> Result<Table, Diagnostic> {
+        let input_columns = table.columns.clone();
+        let mut columns = input_columns.clone();
+        for item in items {
+            if !columns.iter().any(|column| column == &item.column) {
+                columns.push(item.column.clone());
+            }
+        }
+
+        let rows = table
+            .rows
+            .iter()
+            .map(|row| {
+                let mut values = row.values.clone();
+                for item in items {
+                    let value = eval_row_expr(&item.expr, &table, row, ExprRole::Default)?;
+                    if let Some(index) = input_columns
+                        .iter()
+                        .position(|column| column == &item.column)
+                    {
+                        values[index] = value;
+                    } else {
+                        values.push(value);
+                    }
+                }
+                Ok(Row { values })
+            })
+            .collect::<Result<Vec<_>, Diagnostic>>()?;
 
         Ok(Table { columns, rows })
     }
@@ -482,11 +522,117 @@ fn eval_call(
                 span,
             )),
         },
+        "coalesce" => {
+            for arg in args {
+                let value = eval_row_expr(arg, table, row, ExprRole::Default)?;
+                if !matches!(value, Value::Null) {
+                    return Ok(value);
+                }
+            }
+            Ok(Value::Null)
+        }
+        "concat" => {
+            let mut text = String::new();
+            for arg in args {
+                let value = eval_row_expr(arg, table, row, ExprRole::Default)?;
+                if !matches!(value, Value::Null) {
+                    text.push_str(&value.to_csv_cell());
+                }
+            }
+            Ok(Value::String(text))
+        }
+        "lower" => eval_single_arg(args, table, row, span, |value| {
+            Ok(map_text(value, |text| text.to_ascii_lowercase()))
+        }),
+        "upper" => eval_single_arg(args, table, row, span, |value| {
+            Ok(map_text(value, |text| text.to_ascii_uppercase()))
+        }),
+        "trim" => eval_single_arg(args, table, row, span, |value| {
+            Ok(map_text(value, |text| text.trim().to_string()))
+        }),
+        "to_number" => eval_single_arg(args, table, row, span, |value| {
+            Ok(match value {
+                Value::Null => Value::Null,
+                Value::Number(_) => value,
+                _ => value
+                    .to_csv_cell()
+                    .trim()
+                    .parse::<f64>()
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null),
+            })
+        }),
+        "abs" => eval_single_arg(args, table, row, span, |value| match value {
+            Value::Null => Ok(Value::Null),
+            Value::Number(value) => Ok(Value::Number(value.abs())),
+            _ => Err(Diagnostic::error(
+                codes::E1302,
+                "abs() requires a number",
+                span,
+            )),
+        }),
+        "round" => eval_single_arg(args, table, row, span, |value| match value {
+            Value::Null => Ok(Value::Null),
+            Value::Number(value) => Ok(Value::Number(value.round())),
+            _ => Err(Diagnostic::error(
+                codes::E1302,
+                "round() requires a number",
+                span,
+            )),
+        }),
+        "if_else" => match args {
+            [condition, when_true, when_false] => {
+                let condition = eval_row_expr(condition, table, row, ExprRole::Default)?;
+                match condition {
+                    Value::Bool(true) => eval_row_expr(when_true, table, row, ExprRole::Default),
+                    Value::Bool(false) => eval_row_expr(when_false, table, row, ExprRole::Default),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(Diagnostic::error(
+                        codes::E1302,
+                        "if_else() condition requires a boolean",
+                        span,
+                    )),
+                }
+            }
+            _ => Err(Diagnostic::error(
+                codes::E1402,
+                "if_else() expects three arguments",
+                span,
+            )),
+        },
         _ => Err(Diagnostic::error(
             codes::E1401,
             format!("unknown function `{name}`"),
             span,
         )),
+    }
+}
+
+fn eval_single_arg(
+    args: &[ExprIr],
+    table: &Table,
+    row: &Row,
+    span: Span,
+    apply: impl FnOnce(Value) -> Result<Value, Diagnostic>,
+) -> Result<Value, Diagnostic> {
+    match args {
+        [expr] => {
+            let value = eval_row_expr(expr, table, row, ExprRole::Default)?;
+            apply(value)
+        }
+        _ => Err(Diagnostic::error(
+            codes::E1402,
+            "function expects one argument",
+            span,
+        )),
+    }
+}
+
+fn map_text(value: Value, apply: impl FnOnce(String) -> String) -> Value {
+    match value {
+        Value::Null => Value::Null,
+        Value::String(value) => Value::String(apply(value)),
+        _ => Value::String(apply(value.to_csv_cell())),
     }
 }
 
@@ -692,4 +838,43 @@ fn is_comparison_op(op: BinaryOpIr) -> bool {
             | BinaryOpIr::Gt
             | BinaryOpIr::Gte
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pdl_driver::{prepare_source_with_io, InMemoryDriverIo};
+
+    #[test]
+    fn executes_mutate_distinct_and_scalar_functions() {
+        let io = InMemoryDriverIo::default().with_file_bytes(
+            "memory/orders.csv",
+            "order_id,region,channel,gross,discount,status\nA1,North,web,120,20,completed\nA1,North,web,120,20,completed\nA2,South,store,80,5,pending\nA3,West,Web,200,50,completed\n",
+        );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "orders.csv"
+  | filter "status" == "completed"
+  | mutate "net_amount" = "gross" - "discount", "region_channel" = concat(upper("region"), lit(":"), lower("channel")), "priority" = if_else("gross" >= 150, lit("high"), lit("standard"))
+  | distinct "order_id"
+  | select "order_id", "region_channel", "net_amount", "priority"
+  | sort "order_id""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "order_id,region_channel,net_amount,priority\nA1,NORTH:web,100,standard\nA3,WEST:web,150,high\n"
+        );
+    }
 }

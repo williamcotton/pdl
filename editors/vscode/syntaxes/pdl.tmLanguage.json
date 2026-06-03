@@ -92,6 +92,10 @@
         {
           "name": "support.function.aggregate.pdl",
           "match": "\\b(?:count|sum|mean|min|max)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.scalar.pdl",
+          "match": "\\b(?:col|lit|is_null|not_null|coalesce|concat|lower|upper|trim|to_number|abs|round|if_else)\\b(?=\\s*\\()"
         }
       ]
     }

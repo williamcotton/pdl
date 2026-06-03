@@ -1,22 +1,25 @@
 # PDL Detailed Specification
 
-Status: Draft 0.10.0
+Status: Draft 0.11.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.10.0`.
+The current repository implementation is `0.11.0`.
 
 This release keeps the existing CSV-backed language, runtime, editor, LSP, WASM,
-and browser demo slice stable while adding rustc-style terminal-aware CLI
-diagnostic rendering and driver-backed editor hover previews for CSV sources and
-columns. It retains the recoverable syntax diagnostics for malformed filter,
-aggregate, sort, missing-pipe, and trailing-token cases. It implements the `pdl` CLI commands
+and browser demo slice stable while adding row-preserving data manipulation:
+`mutate`, `distinct`, scalar cleanup functions, and runnable cleaning examples.
+It retains the recoverable syntax diagnostics for malformed filter, aggregate,
+sort, missing-pipe, and trailing-token cases. It implements the `pdl` CLI commands
 `run`, `check`, `lsp`, and `version`; CSV file loading with header rows; CSV
 file and stdout output; deterministic in-memory execution for `load`, `filter`,
-`select`, `drop`, `rename`, `group_by`, `agg`, `sort`, `limit`, and `save`; and
-the aggregate functions `count`, `sum`, `mean`, `min`, and `max`. It also
+`select`, `drop`, `rename`, `mutate`, `group_by`, `agg`, `sort`, `limit`,
+`distinct`, and `save`; the scalar functions `col`, `lit`, `is_null`,
+`not_null`, `coalesce`, `concat`, `lower`, `upper`, `trim`, `to_number`, `abs`,
+`round`, and `if_else`; and the aggregate functions `count`, `sum`, `mean`,
+`min`, and `max`. It also
 implements registered lettered diagnostic codes in `pdl-core`, a `codes::*`
 registry, `related` spans and `help` diagnostic payload fields, diagnostic
 catalog drift tests, a lossless lexer with trivia and EOF, a rowan CST with
@@ -35,13 +38,13 @@ It also ships a minimal React/Vite/Monaco demo under `demo/` with one PDL
 editor, one editable host-supplied CSV input, diagnostics and hover from the
 WASM editor-service ABI, and CSV stdout output from WASM execution.
 
-Version 0.10.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
-loading, stream sniffing, configurable CSV dialect options, `mutate`, `join`,
-`union`, `distinct`, window expressions, schema/plan subcommands, CLI
-formatting, full LSP code actions or cross-document navigation, Arrow IPC
-browser output, virtual browser output sinks, or multi-dataset browser controls.
+Version 0.11.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
+loading, stream sniffing, configurable CSV dialect options, `join`, `union`,
+window expressions, schema/plan subcommands, CLI formatting, full LSP code
+actions or cross-document navigation, Arrow IPC browser output, virtual browser
+output sinks, or multi-dataset browser controls.
 Those features are tracked as deferred or planned work in successor release
-plans after `docs/V0_10_PLAN.md`.
+plans after `docs/V0_11_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -127,7 +130,7 @@ The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
 over a partition and order of rows. Window expressions are planned but not
-implemented in version 0.10.0.
+implemented in version 0.11.0.
 
 The keyword `column` means a named field with a static PDL type and nullability.
 
@@ -634,6 +637,11 @@ Assignments in one `mutate` stage are evaluated against the input schema in para
 
 Later stages see newly created columns.
 
+The version 0.11.0 implementation supports row expressions in `mutate`
+assignments. New columns append in assignment order. Replacing an existing
+column preserves that column's position. Duplicate assignment targets in one
+stage MUST produce `E1207`.
+
 ### 5.5 Join
 
 ```pdl
@@ -833,7 +841,7 @@ Planned window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are not reserved by the version 0.10.0 implementation until window
+These words are not reserved by the version 0.11.0 implementation until window
 syntax is implemented.
 
 ### 6.6 Quoted Tokens
@@ -1025,6 +1033,9 @@ Assignment    ::= ColumnName "=" ValueExpr ;
 
 The left side names a new or replaced column.
 
+Assignments are evaluated in parallel against the input row. An assignment MUST
+NOT reference a column created earlier in the same `mutate` stage.
+
 ### 7.8 Group And Aggregate
 
 ```ebnf
@@ -1088,6 +1099,10 @@ ColumnRefList ::= ColumnRef ("," ColumnRef)* ;
 
 `distinct` removes duplicate rows.
 
+Without a column list, `distinct` uses all columns as the duplicate key. With a
+column list, `distinct` uses the listed key columns and retains the first row
+for each key in current row order.
+
 ### 7.12 Expressions
 
 ```ebnf
@@ -1124,7 +1139,7 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are planned syntax and are not implemented in version 0.10.0.
+Window expressions are planned syntax and are not implemented in version 0.11.0.
 
 Until implemented, parsers MAY recover with `E1211` or ordinary parse diagnostics
 when they encounter `over`.
@@ -1536,6 +1551,11 @@ Replacing an existing column preserves its position.
 
 New columns append in assignment order.
 
+Duplicate assignment targets in one `mutate` stage MUST produce `E1207`.
+
+The version 0.11.0 implementation supports scalar row expressions in `mutate`
+and does not yet support window expressions.
+
 ### 11.7 Group By
 
 `group_by` sets grouping state.
@@ -1636,6 +1656,8 @@ The first row in current order is retained.
 
 Output order follows retained row order.
 
+Unknown distinct key columns MUST produce `E1005`.
+
 ### 11.14 Window Expressions (Planned)
 
 Window expressions are planned row expressions that add or replace columns
@@ -1706,17 +1728,31 @@ Implementations SHOULD emit helpful diagnostics when a quoted token could plausi
 
 ### 12.3 Scalar Functions
 
-Recommended scalar functions:
+The version 0.11.0 implementation supports these scalar functions in row
+expressions:
 
-- `col(name)`
-- `lit(value)`
-- `is_null(value)`
-- `not_null(value)`
-- `coalesce(values...)`
-- `concat(values...)`
-- `lower(value)`
-- `upper(value)`
-- `trim(value)`
+- `col(name)`: resolves a quoted value as a column reference.
+- `lit(value)`: resolves a quoted value as a literal string.
+- `is_null(value)`: returns true when the value is null.
+- `not_null(value)`: returns true when the value is not null.
+- `coalesce(value, ...)`: returns the first non-null value, or null if all
+  arguments are null.
+- `concat(value, ...)`: renders non-null arguments as text and concatenates
+  them. Null arguments are skipped.
+- `lower(value)`: renders a non-null value as text and lowercases it.
+- `upper(value)`: renders a non-null value as text and uppercases it.
+- `trim(value)`: renders a non-null value as text and trims leading and
+  trailing whitespace.
+- `to_number(value)`: passes through numbers and parses text as a number.
+  Empty, null, or unparseable values return null.
+- `abs(value)`: returns the numeric absolute value.
+- `round(value)`: rounds a numeric value to the nearest integer.
+- `if_else(condition, when_true, when_false)`: returns `when_true` when the
+  condition is true, `when_false` when it is false, and null when the condition
+  is null.
+
+Recommended future scalar functions:
+
 - `contains(value, pattern)`
 - `starts_with(value, prefix)`
 - `ends_with(value, suffix)`
@@ -1728,6 +1764,8 @@ Recommended scalar functions:
 - `day(value)`
 
 Unknown functions MUST produce `E1401`.
+
+Invalid scalar function arity MUST produce `E1402`.
 
 Function calls MUST be pure.
 
@@ -1764,7 +1802,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions (Planned)
 
-Window function syntax is planned and not implemented in version 0.10.0.
+Window function syntax is planned and not implemented in version 0.11.0.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
 
@@ -2192,7 +2230,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.10.0` LSP implementation provides diagnostics,
+The current `0.11.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
@@ -2370,15 +2408,15 @@ The v0.7 WASM implementation MUST expose packed JSON calls for:
   diagnostics plus the requested editor-service result
 
 The browser run request's host file map is format-neutral: keys are logical file
-paths and values are host-supplied file contents. Version 0.10.0 only requires
+paths and values are host-supplied file contents. Version 0.11.0 only requires
 CSV file contents to execute successfully because CSV is the only implemented
 data decoder. The ABI MUST NOT special-case CSV at the TypeScript editor layer.
 
-`pdl_run_json` in version 0.10.0 MUST support CSV stdout for the resulting table.
+`pdl_run_json` in version 0.11.0 MUST support CSV stdout for the resulting table.
 Virtual path-backed output sinks, Arrow IPC byte output, and non-CSV dataframe
 decoders remain deferred until a later plan promotes them.
 
-For hover requests, `pdl_editor_service_json` in version 0.10.0 MUST use the
+For hover requests, `pdl_editor_service_json` in version 0.11.0 MUST use the
 same host file map through in-memory driver I/O so Monaco/WASM hover previews
 match native LSP hover behavior for CSV paths and columns.
 
@@ -2493,7 +2531,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3479,7 +3517,7 @@ support:
 
 Descriptors record explicit format names, inferred path formats, and unresolved
 sniffing decisions. Real Arrow IPC parsing/writing, Parquet loading, JSON Lines
-loading, and stdin sniffing remain deferred past v0.10.0 unless a future plan
+loading, and stdin sniffing remain deferred past v0.11.0 unless a future plan
 promotes them with spec, examples, and tests.
 
 #### 19.7.8 Schema Cache And Preview Boundary
@@ -4035,7 +4073,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.10.0.
+PDL source does not require an explicit version declaration in draft 0.11.0.
 
 The implementation SHOULD report supported language version.
 
@@ -4162,7 +4200,20 @@ load "raw_orders.csv"
   | save "orders.csv"
 ```
 
-### 26.3 Arrow Stream To Algraf
+### 26.3 Clean And Deduplicate Orders
+
+```pdl
+load "orders_raw.csv"
+  | filter lower(trim("status")) == "completed"
+  | mutate "net_amount" = "gross_amount" - coalesce("discount", 0), "region_channel" = concat(upper(trim("region")), lit(":"), lower(trim("channel"))), "priority" = if_else("gross_amount" >= 150, lit("high"), lit("standard"))
+  | distinct "order_id"
+  | select "order_id", "region_channel", "net_amount", "priority"
+  | sort "order_id"
+```
+
+The runnable repository example is `examples/orders_cleaned.pdl`.
+
+### 26.4 Arrow Stream To Algraf
 
 ```pdl
 load "sales.parquet"
@@ -4177,7 +4228,7 @@ Run:
 pdl run sales_for_chart.pdl --stdout-format arrow-stream | algraf render chart.ag --stdin-format arrow-stream --output chart.svg
 ```
 
-### 26.4 Join
+### 26.5 Join
 
 ```pdl
 let customers =

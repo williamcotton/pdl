@@ -67,6 +67,10 @@ pub enum StageIr {
         items: Vec<RenameItemIr>,
         span: Span,
     },
+    Mutate {
+        items: Vec<MutateItemIr>,
+        span: Span,
+    },
     GroupBy {
         columns: Vec<String>,
         span: Span,
@@ -81,6 +85,10 @@ pub enum StageIr {
     },
     Limit {
         n: usize,
+        span: Span,
+    },
+    Distinct {
+        columns: Vec<String>,
         span: Span,
     },
     Save {
@@ -105,6 +113,13 @@ pub struct SelectItemIr {
 pub struct RenameItemIr {
     pub old: String,
     pub new: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MutateItemIr {
+    pub column: String,
+    pub expr: ExprIr,
     pub span: Span,
 }
 
@@ -288,6 +303,17 @@ fn lower_stage(stage: &Stage) -> StageIr {
                 .collect(),
             span: *span,
         },
+        Stage::Mutate { items, span } => StageIr::Mutate {
+            items: items
+                .iter()
+                .map(|item| MutateItemIr {
+                    column: item.column.value.clone(),
+                    expr: lower_expr(&item.expr),
+                    span: item.span,
+                })
+                .collect(),
+            span: *span,
+        },
         Stage::GroupBy { columns, span } => StageIr::GroupBy {
             columns: columns.iter().map(|column| column.value.clone()).collect(),
             span: *span,
@@ -301,6 +327,10 @@ fn lower_stage(stage: &Stage) -> StageIr {
             span: *span,
         },
         Stage::Limit { n, span } => StageIr::Limit { n: *n, span: *span },
+        Stage::Distinct { columns, span } => StageIr::Distinct {
+            columns: columns.iter().map(|column| column.value.clone()).collect(),
+            span: *span,
+        },
         Stage::Save(save) => StageIr::Save {
             sink: match &save.sink {
                 SinkRef::Path(path) => SinkIr::Path(path.value.clone()),

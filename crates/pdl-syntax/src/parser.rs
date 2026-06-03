@@ -67,6 +67,7 @@ pub enum SyntaxKind {
     RenameItemNode,
     AggItemNode,
     SortItemNode,
+    MutateItemNode,
     ExprNode,
 }
 
@@ -109,7 +110,8 @@ impl SyntaxKind {
             33 => SyntaxKind::RenameItemNode,
             34 => SyntaxKind::AggItemNode,
             35 => SyntaxKind::SortItemNode,
-            36 => SyntaxKind::ExprNode,
+            36 => SyntaxKind::MutateItemNode,
+            37 => SyntaxKind::ExprNode,
             _ => SyntaxKind::Error,
         }
     }
@@ -184,6 +186,10 @@ pub enum Stage {
         items: Vec<RenameItem>,
         span: Span,
     },
+    Mutate {
+        items: Vec<MutateItem>,
+        span: Span,
+    },
     GroupBy {
         columns: Vec<Spanned<String>>,
         span: Span,
@@ -200,6 +206,10 @@ pub enum Stage {
         n: usize,
         span: Span,
     },
+    Distinct {
+        columns: Vec<Spanned<String>>,
+        span: Span,
+    },
     Save(SaveStage),
     Unsupported {
         name: Spanned<String>,
@@ -214,10 +224,12 @@ impl Stage {
             | Stage::Select { span, .. }
             | Stage::Drop { span, .. }
             | Stage::Rename { span, .. }
+            | Stage::Mutate { span, .. }
             | Stage::GroupBy { span, .. }
             | Stage::Agg { span, .. }
             | Stage::Sort { span, .. }
             | Stage::Limit { span, .. }
+            | Stage::Distinct { span, .. }
             | Stage::Unsupported { span, .. } => *span,
             Stage::Save(save) => save.span,
         }
@@ -241,6 +253,13 @@ pub struct SelectItem {
 pub struct RenameItem {
     pub old: Spanned<String>,
     pub new: Spanned<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MutateItem {
+    pub column: Spanned<String>,
+    pub expr: Expr,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -500,12 +519,14 @@ impl<'a> Parser<'a> {
             "select" => self.parse_select(name.span),
             "drop" => self.parse_drop(name.span),
             "rename" => self.parse_rename(name.span),
+            "mutate" => self.parse_mutate(name.span),
             "group_by" => self.parse_group_by(name.span),
             "agg" => self.parse_agg(name.span),
             "sort" => self.parse_sort(name.span),
             "limit" => self.parse_limit(name.span),
+            "distinct" => self.parse_distinct(name.span),
             "save" => self.parse_save(name.span).map(Stage::Save),
-            "mutate" | "join" | "union" | "distinct" => {
+            "join" | "union" => {
                 let span = self.consume_until_stage_boundary(name.span);
                 Some(Stage::Unsupported { name, span })
             }
@@ -608,6 +629,31 @@ impl<'a> Parser<'a> {
         }
         let end = items.last().map_or(name_span.end, |item| item.new.span.end);
         Some(Stage::Rename {
+            items,
+            span: Span::new(name_span.start, end),
+        })
+    }
+
+    fn parse_mutate(&mut self, name_span: Span) -> Option<Stage> {
+        let mut items = Vec::new();
+        loop {
+            let column = self.expect_column_name()?;
+            if !self.consume_equal() {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1203,
+                    "mutate assignments require `=`",
+                    self.current().span,
+                ));
+            }
+            let expr = self.parse_expr(0)?;
+            let span = column.span.join(expr.span());
+            items.push(MutateItem { column, expr, span });
+            if !self.consume_comma() {
+                break;
+            }
+        }
+        let end = items.last().map_or(name_span.end, |item| item.span.end);
+        Some(Stage::Mutate {
             items,
             span: Span::new(name_span.start, end),
         })
@@ -787,6 +833,24 @@ impl<'a> Parser<'a> {
                 None
             }
         }
+    }
+
+    fn parse_distinct(&mut self, name_span: Span) -> Option<Stage> {
+        if self.at_stage_boundary() {
+            return Some(Stage::Distinct {
+                columns: Vec::new(),
+                span: name_span,
+            });
+        }
+
+        let columns = self.parse_column_list()?;
+        let end = columns
+            .last()
+            .map_or(name_span.end, |column| column.span.end);
+        Some(Stage::Distinct {
+            columns,
+            span: Span::new(name_span.start, end),
+        })
     }
 
     fn parse_save(&mut self, name_span: Span) -> Option<SaveStage> {
@@ -1116,6 +1180,15 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn consume_equal(&mut self) -> bool {
+        if self.current().kind == TokenKind::Equal {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
     fn consume_pipe(&mut self) -> bool {
         if self.current().kind == TokenKind::Pipe {
             self.pos += 1;
@@ -1389,6 +1462,28 @@ mod tests {
         let main = result.program.main.expect("main pipeline");
         assert_eq!(main.stages.len(), 3);
         assert!(matches!(main.stages[0], Stage::Filter { .. }));
+    }
+
+    #[test]
+    fn parses_mutate_and_distinct_stages() {
+        let result = parse(
+            r#"load "orders.csv"
+  | mutate "net_amount" = "gross_amount" - "discount", "label" = concat(upper("region"), lit(":"), lower("channel"))
+  | distinct "order_id""#,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let main = result.program.main.expect("main pipeline");
+        let Stage::Mutate { items, .. } = &main.stages[0] else {
+            panic!("mutate stage");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].column.value, "net_amount");
+        assert!(matches!(items[0].expr, Expr::Binary { .. }));
+        let Stage::Distinct { columns, .. } = &main.stages[1] else {
+            panic!("distinct stage");
+        };
+        assert_eq!(columns[0].value, "order_id");
     }
 
     #[test]

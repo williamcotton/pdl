@@ -75,7 +75,7 @@ pub fn run_cli() -> Result<ExitCode, String> {
         }
         Command::Version => {
             println!(
-                "pdl {} (language draft 0.10.0, data engine {})",
+                "pdl {} (language draft 0.11.0, data engine {})",
                 env!("CARGO_PKG_VERSION"),
                 pdl_data::native_engine_name()
             );

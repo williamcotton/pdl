@@ -37,7 +37,7 @@ pub fn plan_prepared(
         if format != "csv" {
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
-                format!("stdout format `{format}` is not supported in 0.10.0"),
+                format!("stdout format `{format}` is not supported in 0.11.0"),
                 Span::zero(),
             ));
             return Err(diagnostics);
@@ -130,16 +130,16 @@ fn stage_name(stage: &StageIr) -> &'static str {
         StageIr::Select { .. } => "select",
         StageIr::Drop { .. } => "drop",
         StageIr::Rename { .. } => "rename",
+        StageIr::Mutate { .. } => "mutate",
         StageIr::GroupBy { .. } => "group_by",
         StageIr::Agg { .. } => "agg",
         StageIr::Sort { .. } => "sort",
         StageIr::Limit { .. } => "limit",
+        StageIr::Distinct { .. } => "distinct",
         StageIr::Save { .. } => "save",
         StageIr::Unsupported { name, .. } => match name.as_str() {
-            "mutate" => "mutate",
             "join" => "join",
             "union" => "union",
-            "distinct" => "distinct",
             _ => "unknown",
         },
     }

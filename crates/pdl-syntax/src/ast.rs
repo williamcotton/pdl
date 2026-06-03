@@ -1,7 +1,7 @@
 pub use crate::parser::{
-    AggItem, BinaryOp, Binding, Expr, LoadStage, NullsOrder, Pipeline, PipelineStart, Program,
-    RenameItem, SaveStage, SelectItem, SinkRef, SortDirection, SortItem, SourceRef, Spanned, Stage,
-    UnaryOp,
+    AggItem, BinaryOp, Binding, Expr, LoadStage, MutateItem, NullsOrder, Pipeline, PipelineStart,
+    Program, RenameItem, SaveStage, SelectItem, SinkRef, SortDirection, SortItem, SourceRef,
+    Spanned, Stage, UnaryOp,
 };
 
 use pdl_core::Span;
@@ -212,6 +212,10 @@ impl StageNode {
         child_nodes(&self.syntax, RenameItemNode::cast)
     }
 
+    pub fn mutate_items(&self) -> Vec<MutateItemNode> {
+        child_nodes(&self.syntax, MutateItemNode::cast)
+    }
+
     pub fn agg_items(&self) -> Vec<AggItemNode> {
         child_nodes(&self.syntax, AggItemNode::cast)
     }
@@ -252,6 +256,11 @@ ast_node!(
 ast_node!(
     /// One item inside `rename`.
     RenameItemNode = RenameItemNode
+);
+
+ast_node!(
+    /// One assignment inside `mutate`.
+    MutateItemNode = MutateItemNode
 );
 
 ast_node!(

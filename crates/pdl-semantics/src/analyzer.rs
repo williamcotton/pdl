@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::ir::{lower_program, ProgramIr};
-use crate::registry::{accepts_arity, aggregate_function, format_info};
+use crate::registry::{accepts_arity, aggregate_function, format_info, scalar_function};
 use crate::schema::{GroupingState, StageTrace};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -115,9 +115,7 @@ where
             let input_schema = schema.clone();
             match stage {
                 Stage::Filter { expr, .. } => {
-                    for column in row_expr_column_refs(expr, &schema, ExprRole::PredicateRoot) {
-                        self.require_column(&schema, &column.value, column.span);
-                    }
+                    self.analyze_row_expr(&schema, expr, ExprRole::PredicateRoot);
                 }
                 Stage::Select { items, .. } => {
                     let mut output = Vec::new();
@@ -168,6 +166,25 @@ where
                     schema = output;
                     grouping = None;
                 }
+                Stage::Mutate { items, .. } => {
+                    let mut seen = BTreeSet::new();
+                    let mut output = schema.clone();
+                    for item in items {
+                        self.analyze_row_expr(&schema, &item.expr, ExprRole::Default);
+                        if !seen.insert(item.column.value.clone()) {
+                            self.diagnostics.push(Diagnostic::error(
+                                codes::E1207,
+                                format!("duplicate output column `{}`", item.column.value),
+                                item.column.span,
+                            ));
+                        }
+                        if !output.iter().any(|column| column == &item.column.value) {
+                            output.push(item.column.value.clone());
+                        }
+                    }
+                    schema = output;
+                    grouping = None;
+                }
                 Stage::GroupBy { columns, .. } => {
                     for column in columns {
                         self.require_column(&schema, &column.value, column.span);
@@ -197,11 +214,17 @@ where
                     }
                 }
                 Stage::Limit { .. } => {}
+                Stage::Distinct { columns, .. } => {
+                    for column in columns {
+                        self.require_column(&schema, &column.value, column.span);
+                    }
+                    grouping = None;
+                }
                 Stage::Save(save) => self.analyze_save(save),
                 Stage::Unsupported { name, .. } => {
                     self.diagnostics.push(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{}` is deferred in 0.10.0", name.value),
+                        format!("stage `{}` is deferred in 0.11.0", name.value),
                         name.span,
                     ));
                 }
@@ -227,7 +250,7 @@ where
             if !format_info(&format.value).is_some_and(|info| info.save_supported) {
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1215,
-                    format!("format `{}` is not supported in 0.10.0", format.value),
+                    format!("format `{}` is not supported in 0.11.0", format.value),
                     format.span,
                 ));
             }
@@ -255,9 +278,50 @@ where
             ));
         }
         for arg in &item.args {
+            self.analyze_scalar_expr(arg);
             for column in aggregate_expr_column_refs(arg) {
                 self.require_column(schema, &column.value, column.span);
             }
+        }
+    }
+
+    fn analyze_row_expr(&mut self, schema: &[String], expr: &Expr, role: ExprRole) {
+        self.analyze_scalar_expr(expr);
+        for column in row_expr_column_refs(expr, schema, role) {
+            self.require_column(schema, &column.value, column.span);
+        }
+    }
+
+    fn analyze_scalar_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Call { name, args, span } => {
+                match scalar_function(&name.value) {
+                    Some(info) if !accepts_arity(*info, args.len()) => {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1402,
+                            format!("function `{}` expects {}", name.value, info.expected_arity),
+                            *span,
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1401,
+                            format!("unknown function `{}`", name.value),
+                            name.span,
+                        ));
+                    }
+                }
+                for arg in args {
+                    self.analyze_scalar_expr(arg);
+                }
+            }
+            Expr::Unary { expr, .. } => self.analyze_scalar_expr(expr),
+            Expr::Binary { left, right, .. } => {
+                self.analyze_scalar_expr(left);
+                self.analyze_scalar_expr(right);
+            }
+            Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => {}
         }
     }
 
@@ -323,6 +387,7 @@ fn row_expr_column_refs(
                 _ => None,
             })
             .unwrap_or_default(),
+        Expr::Call { name, .. } if name.value == "lit" => Vec::new(),
         Expr::Call { args, .. } => args
             .iter()
             .flat_map(|arg| row_expr_column_refs(arg, schema, ExprRole::Default))
@@ -388,10 +453,12 @@ fn stage_name(stage: &Stage) -> &'static str {
         Stage::Select { .. } => "select",
         Stage::Drop { .. } => "drop",
         Stage::Rename { .. } => "rename",
+        Stage::Mutate { .. } => "mutate",
         Stage::GroupBy { .. } => "group_by",
         Stage::Agg { .. } => "agg",
         Stage::Sort { .. } => "sort",
         Stage::Limit { .. } => "limit",
+        Stage::Distinct { .. } => "distinct",
         Stage::Save(_) => "save",
         Stage::Unsupported { name, .. } => match name.value.as_str() {
             "mutate" => "mutate",
@@ -439,5 +506,65 @@ mod tests {
             analysis.traces[1].output_schema,
             Some(vec!["region".to_string()])
         );
+    }
+
+    #[test]
+    fn mutate_adds_columns_and_distinct_preserves_schema() {
+        let parse = pdl_syntax::parse(
+            r#"load "orders.csv"
+  | mutate "net_amount" = "gross" - "discount", "region_channel" = concat(upper("region"), lit(":"), lower("channel"))
+  | distinct "order_id""#,
+        );
+
+        let analysis = analyze_program(&parse.program, |_| {
+            Ok(vec![
+                "order_id".to_string(),
+                "region".to_string(),
+                "channel".to_string(),
+                "gross".to_string(),
+                "discount".to_string(),
+            ])
+        });
+
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
+        assert!(analysis.ir.is_some());
+        assert_eq!(
+            analysis.traces[0].output_schema,
+            Some(vec![
+                "order_id".to_string(),
+                "region".to_string(),
+                "channel".to_string(),
+                "gross".to_string(),
+                "discount".to_string(),
+                "net_amount".to_string(),
+                "region_channel".to_string(),
+            ])
+        );
+        assert_eq!(analysis.traces[1].stage_name, "distinct");
+        assert_eq!(
+            analysis.traces[1].output_schema,
+            analysis.traces[0].output_schema
+        );
+    }
+
+    #[test]
+    fn mutate_assignments_are_parallel() {
+        let parse = pdl_syntax::parse(
+            r#"load "orders.csv"
+  | mutate "net_amount" = "gross" - "discount", "is_large" = "net_amount" > 100"#,
+        );
+
+        let analysis = analyze_program(&parse.program, |_| {
+            Ok(vec!["gross".to_string(), "discount".to_string()])
+        });
+
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E1005" && diagnostic.message == "unknown column `net_amount`"
+        }));
+        assert!(analysis.ir.is_none());
     }
 }

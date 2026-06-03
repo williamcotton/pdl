@@ -1,5 +1,6 @@
 use indexmap::IndexMap;
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 
 use crate::value::Value;
 
@@ -98,6 +99,35 @@ impl Table {
         Table {
             columns: self.columns.clone(),
             rows: self.rows.iter().take(n).cloned().collect(),
+        }
+    }
+
+    pub fn distinct(&self, key_columns: &[String]) -> Self {
+        let keys: Vec<String> = if key_columns.is_empty() {
+            self.columns.clone()
+        } else {
+            key_columns.to_vec()
+        };
+        let key_indices: Vec<usize> = keys
+            .iter()
+            .filter_map(|column| self.column_index(column))
+            .collect();
+        let mut seen = BTreeSet::new();
+        let rows = self
+            .rows
+            .iter()
+            .filter(|row| {
+                let key = key_indices
+                    .iter()
+                    .map(|index| row.values.get(*index).unwrap_or(&Value::Null).to_csv_cell())
+                    .collect::<Vec<_>>();
+                seen.insert(key)
+            })
+            .cloned()
+            .collect();
+        Table {
+            columns: self.columns.clone(),
+            rows,
         }
     }
 

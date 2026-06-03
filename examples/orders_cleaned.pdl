@@ -1,0 +1,6 @@
+load "orders_raw.csv"
+  | filter lower(trim("status")) == "completed"
+  | mutate "net_amount" = "gross_amount" - coalesce("discount", 0), "region_channel" = concat(upper(trim("region")), lit(":"), lower(trim("channel"))), "priority" = if_else("gross_amount" >= 150, lit("high"), lit("standard"))
+  | distinct "order_id"
+  | select "order_id", "region_channel", "net_amount", "priority"
+  | sort "order_id"
