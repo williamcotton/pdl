@@ -1,2 +1,5 @@
 /target/
 /examples/top_regions.csv
+/editors/vscode/node_modules/
+/editors/vscode/dist/
+/editors/vscode/*.vsix

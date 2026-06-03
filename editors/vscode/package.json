@@ -1,0 +1,102 @@
+{
+  "name": "pdl-vscode",
+  "displayName": "PDL",
+  "description": "Language support for the Pipeline Data Language.",
+  "version": "0.2.0",
+  "publisher": "pdl",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/williamcotton/pdl"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:pdl"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "pdl",
+        "aliases": [
+          "PDL",
+          "pdl"
+        ],
+        "extensions": [
+          ".pdl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "pdl",
+        "scopeName": "source.pdl",
+        "path": "./syntaxes/pdl.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "PDL",
+      "properties": {
+        "pdl.server.path": {
+          "type": "string",
+          "default": "pdl",
+          "description": "Path to the PDL executable."
+        },
+        "pdl.server.args": {
+          "type": "array",
+          "default": [
+            "lsp"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments passed to the PDL executable for language server startup."
+        },
+        "pdl.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace communication with the PDL language server."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "pdl.restartServer",
+        "title": "PDL: Restart Language Server"
+      },
+      {
+        "command": "pdl.showOutput",
+        "title": "PDL: Show Language Server Output"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "lint": "tsc --noEmit",
+    "test": "node -e \"require('fs').accessSync('dist/extension.js')\"",
+    "package": "npm run compile && vsce package --no-dependencies",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.8",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.2"
+  }
+}

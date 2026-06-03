@@ -36,7 +36,7 @@ pub fn run_prepared(prepared: &PreparedProgram, options: RunOptions) -> RunResul
             let mut diagnostics = diagnostics;
             diagnostics.push(Diagnostic::error(
                 "P1705",
-                format!("stdout format `{format}` is not supported in 0.1.0-alpha.1"),
+                format!("stdout format `{format}` is not supported in 0.2.0"),
                 Span::zero(),
             ));
             return RunResult {
@@ -185,7 +185,7 @@ impl Runtime<'_> {
                 Stage::Unsupported { name, .. } => {
                     return Err(Diagnostic::error(
                         "P1211",
-                        format!("stage `{}` is deferred in 0.1.0-alpha.1", name.value),
+                        format!("stage `{}` is deferred in 0.2.0", name.value),
                         name.span,
                     ));
                 }
@@ -218,10 +218,7 @@ impl Runtime<'_> {
                     if format.value != "csv" {
                         return Err(Diagnostic::error(
                             "P1215",
-                            format!(
-                                "format `{}` is not supported in 0.1.0-alpha.1",
-                                format.value
-                            ),
+                            format!("format `{}` is not supported in 0.2.0", format.value),
                             format.span,
                         ));
                     }
@@ -230,7 +227,7 @@ impl Runtime<'_> {
             }
             SourceRef::Stdin(span) => Err(Diagnostic::error(
                 "P1211",
-                "stdin loading is deferred in 0.1.0-alpha.1",
+                "stdin loading is deferred in 0.2.0",
                 *span,
             )),
         }
@@ -244,10 +241,7 @@ impl Runtime<'_> {
             if format.value != "csv" {
                 return Err(Diagnostic::error(
                     "P1705",
-                    format!(
-                        "output format `{}` is not supported in 0.1.0-alpha.1",
-                        format.value
-                    ),
+                    format!("output format `{}` is not supported in 0.2.0", format.value),
                     format.span,
                 ));
             }

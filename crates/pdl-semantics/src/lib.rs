@@ -184,7 +184,7 @@ where
                 Stage::Unsupported { name, .. } => {
                     self.diagnostics.push(Diagnostic::error(
                         "P1211",
-                        format!("stage `{}` is deferred in 0.1.0-alpha.1", name.value),
+                        format!("stage `{}` is deferred in 0.2.0", name.value),
                         name.span,
                     ));
                 }
@@ -209,10 +209,7 @@ where
             if format.value != "csv" {
                 self.diagnostics.push(Diagnostic::error(
                     "P1215",
-                    format!(
-                        "format `{}` is not supported in 0.1.0-alpha.1",
-                        format.value
-                    ),
+                    format!("format `{}` is not supported in 0.2.0", format.value),
                     format.span,
                 ));
             }

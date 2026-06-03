@@ -1,0 +1,9 @@
+src/**
+node_modules/**
+out/**
+*.vsix
+*.map
+**/*.map
+esbuild.js
+tsconfig.json
+package-lock.json

@@ -34,6 +34,12 @@ pub fn prepare_file(path: impl AsRef<Path>) -> Result<PreparedProgram, Diagnosti
             pdl_core::Span::zero(),
         )
     })?;
+    Ok(prepare_source(path, source))
+}
+
+pub fn prepare_source(path: impl AsRef<Path>, source: impl Into<String>) -> PreparedProgram {
+    let path = path.as_ref().to_path_buf();
+    let source = source.into();
     let parse = parse(&source);
     let base_dir = path
         .parent()
@@ -47,12 +53,12 @@ pub fn prepare_file(path: impl AsRef<Path>) -> Result<PreparedProgram, Diagnosti
         })
     };
 
-    Ok(PreparedProgram {
+    PreparedProgram {
         path,
         source,
         parse,
         analysis,
-    })
+    }
 }
 
 pub fn resolve_input_path(program_path: &Path, source: &str) -> PathBuf {
@@ -84,10 +90,7 @@ fn load_schema_for_request(
                 if format.value != "csv" {
                     return Err(Diagnostic::error(
                         "P1215",
-                        format!(
-                            "format `{}` is not supported in 0.1.0-alpha.1",
-                            format.value
-                        ),
+                        format!("format `{}` is not supported in 0.2.0", format.value),
                         format.span,
                     ));
                 }
@@ -102,7 +105,7 @@ fn load_schema_for_request(
         }
         SourceRef::Stdin(span) => Err(Diagnostic::error(
             "P1211",
-            "stdin loading is deferred in 0.1.0-alpha.1",
+            "stdin loading is deferred in 0.2.0",
             *span,
         )),
     }

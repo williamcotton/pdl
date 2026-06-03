@@ -1,26 +1,29 @@
 # PDL Detailed Specification
 
-Status: Draft 0.1.0
+Status: Draft 0.2.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.1.0-alpha.1`.
+The current repository implementation is `0.2.0`.
 
-This alpha is the first runnable slice of the draft v0.1 language. It implements
+This release is the first plain repository release line. It implements
 the `pdl` CLI commands `run`, `check`, and `version`; CSV file loading with
 header rows; CSV file and stdout output; deterministic in-memory execution for
 `load`, `filter`, `select`, `drop`, `rename`, `group_by`, `agg`, `sort`,
 `limit`, and `save`; and the aggregate functions `count`, `sum`, `mean`, `min`,
-and `max`.
+and `max`. It also implements `pdl lsp` with full-document sync, diagnostics,
+completion, hover, formatting, semantic tokens, document symbols, and
+same-document binding definition/reference/rename; and it ships a thin VS Code
+client under `editors/vscode/`.
 
-The alpha does not yet implement Arrow IPC, Parquet, JSON Lines, stdin loading,
-stream sniffing, configurable CSV dialect options, `mutate`, `join`, `union`,
-`distinct`, manifests, schema/plan subcommands, formatting, full LSP behavior,
-WASM entry points, VS Code, or browser demo support. Those features remain part
-of the draft v0.1 target and are tracked as deferred work in
-`docs/V0_1_PLAN.md`.
+Version 0.2.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
+loading, stream sniffing, configurable CSV dialect options, `mutate`, `join`,
+`union`, `distinct`, manifests, schema/plan subcommands, CLI formatting, full
+LSP code actions or cross-document navigation, WASM entry points, or browser
+demo support. Those features are tracked as deferred or planned work in
+`docs/V0_2_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -1964,6 +1967,15 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
+The current `0.2.0` LSP implementation provides diagnostics,
+completion, hover, formatting, semantic tokens, document symbols, and
+same-document binding go-to-definition, references, and rename. Code actions and
+cross-document navigation remain deferred.
+
+The current formatter withholds edits for documents containing comments because
+the current parser does not preserve comment trivia. This avoids changing source
+text in ways the syntax tree cannot faithfully represent yet.
+
 ### 17.2 Completion
 
 Completion SHOULD support:
@@ -2209,7 +2221,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3315,7 +3327,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.1.0.
+PDL source does not require an explicit version declaration in draft 0.2.0.
 
 The implementation SHOULD report supported language version.
 
