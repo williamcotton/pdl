@@ -1,4 +1,4 @@
-use pdl_core::{has_errors, Diagnostic, Span};
+use pdl_core::{codes, has_errors, Diagnostic, Span};
 use pdl_data::{
     compare_values, read_csv, write_csv, write_csv_to_vec, NullsOrder, Row, SortDirection,
     SortSpec, Table, Value,
@@ -35,8 +35,8 @@ pub fn run_prepared(prepared: &PreparedProgram, options: RunOptions) -> RunResul
         if format != "csv" {
             let mut diagnostics = diagnostics;
             diagnostics.push(Diagnostic::error(
-                "P1705",
-                format!("stdout format `{format}` is not supported in 0.2.0"),
+                codes::E1705,
+                format!("stdout format `{format}` is not supported in 0.3.0"),
                 Span::zero(),
             ));
             return RunResult {
@@ -55,7 +55,7 @@ pub fn run_prepared(prepared: &PreparedProgram, options: RunOptions) -> RunResul
     };
     let Some(main) = &program(prepared).main else {
         runtime.diagnostics.push(Diagnostic::error(
-            "P1502",
+            codes::E1502,
             "no runnable main pipeline",
             Span::zero(),
         ));
@@ -184,8 +184,8 @@ impl Runtime<'_> {
                 }
                 Stage::Unsupported { name, .. } => {
                     return Err(Diagnostic::error(
-                        "P1211",
-                        format!("stage `{}` is deferred in 0.2.0", name.value),
+                        codes::E1211,
+                        format!("stage `{}` is deferred in 0.3.0", name.value),
                         name.span,
                     ));
                 }
@@ -204,7 +204,11 @@ impl Runtime<'_> {
             .iter()
             .find(|binding| binding.name.value == name)
             .ok_or_else(|| {
-                Diagnostic::error("P1007", format!("unknown binding `{name}`"), Span::zero())
+                Diagnostic::error(
+                    codes::E1007,
+                    format!("unknown binding `{name}`"),
+                    Span::zero(),
+                )
             })?;
         let table = self.execute_pipeline(&binding.pipeline)?;
         self.cache.insert(name.to_string(), table.clone());
@@ -217,8 +221,8 @@ impl Runtime<'_> {
                 if let Some(format) = &load.format {
                     if format.value != "csv" {
                         return Err(Diagnostic::error(
-                            "P1215",
-                            format!("format `{}` is not supported in 0.2.0", format.value),
+                            codes::E1215,
+                            format!("format `{}` is not supported in 0.3.0", format.value),
                             format.span,
                         ));
                     }
@@ -226,8 +230,8 @@ impl Runtime<'_> {
                 read_csv(&resolve_input_path(&self.prepared.path, &path.value))
             }
             SourceRef::Stdin(span) => Err(Diagnostic::error(
-                "P1211",
-                "stdin loading is deferred in 0.2.0",
+                codes::E1211,
+                "stdin loading is deferred in 0.3.0",
                 *span,
             )),
         }
@@ -240,8 +244,8 @@ impl Runtime<'_> {
         if let Some(format) = &save.format {
             if format.value != "csv" {
                 return Err(Diagnostic::error(
-                    "P1705",
-                    format!("output format `{}` is not supported in 0.2.0", format.value),
+                    codes::E1705,
+                    format!("output format `{}` is not supported in 0.3.0", format.value),
                     format.span,
                 ));
             }
@@ -344,7 +348,7 @@ fn eval_row_expr(
         Expr::Bool(value) => Ok(Value::Bool(value.value)),
         Expr::Null(_) => Ok(Value::Null),
         Expr::Ident(value) => Err(Diagnostic::error(
-            "P0008",
+            codes::E0008,
             format!("unexpected bare identifier `{}` in expression", value.value),
             value.span,
         )),
@@ -356,14 +360,18 @@ fn eval_row_expr(
                     Value::Bool(value) => Ok(Value::Bool(!value)),
                     Value::Null => Ok(Value::Null),
                     _ => Err(Diagnostic::error(
-                        "P1302",
+                        codes::E1302,
                         "`not` requires a boolean",
                         *span,
                     )),
                 },
                 UnaryOp::Neg => match value {
                     Value::Number(value) => Ok(Value::Number(-value)),
-                    _ => Err(Diagnostic::error("P1302", "`-` requires a number", *span)),
+                    _ => Err(Diagnostic::error(
+                        codes::E1302,
+                        "`-` requires a number",
+                        *span,
+                    )),
                 },
             }
         }
@@ -387,7 +395,7 @@ fn eval_call(
         "col" => match args {
             [Expr::Quoted(column)] => column_value(table, row, &column.value, column.span),
             _ => Err(Diagnostic::error(
-                "P1402",
+                codes::E1402,
                 "col() expects one quoted column name",
                 span,
             )),
@@ -396,7 +404,7 @@ fn eval_call(
             [Expr::Quoted(value)] => Ok(Value::String(value.value.clone())),
             [expr] => eval_row_expr(expr, table, row, ExprRole::Default),
             _ => Err(Diagnostic::error(
-                "P1402",
+                codes::E1402,
                 "lit() expects one argument",
                 span,
             )),
@@ -407,7 +415,7 @@ fn eval_call(
                 Value::Null
             ))),
             _ => Err(Diagnostic::error(
-                "P1402",
+                codes::E1402,
                 "is_null() expects one argument",
                 span,
             )),
@@ -418,13 +426,13 @@ fn eval_call(
                 Value::Null
             ))),
             _ => Err(Diagnostic::error(
-                "P1402",
+                codes::E1402,
                 "not_null() expects one argument",
                 span,
             )),
         },
         _ => Err(Diagnostic::error(
-            "P1401",
+            codes::E1401,
             format!("unknown function `{name}`"),
             span,
         )),
@@ -461,7 +469,7 @@ fn eval_binary(
             let right = eval_row_expr(right, table, row, ExprRole::Default)?;
             let (Some(left), Some(right)) = (left.as_number(), right.as_number()) else {
                 return Err(Diagnostic::error(
-                    "P1302",
+                    codes::E1302,
                     "arithmetic requires numeric operands",
                     span,
                 ));
@@ -471,7 +479,7 @@ fn eval_binary(
                 BinaryOp::Sub => Ok(Value::Number(left - right)),
                 BinaryOp::Mul => Ok(Value::Number(left * right)),
                 BinaryOp::Div if right == 0.0 => {
-                    Err(Diagnostic::error("P1407", "division by zero", span))
+                    Err(Diagnostic::error(codes::E1407, "division by zero", span))
                 }
                 BinaryOp::Div => Ok(Value::Number(left / right)),
                 BinaryOp::Rem => Ok(Value::Number(left % right)),
@@ -520,7 +528,7 @@ fn column_value(table: &Table, row: &Row, column: &str, span: Span) -> Result<Va
     table
         .value(row, column)
         .cloned()
-        .ok_or_else(|| Diagnostic::error("P1005", format!("unknown column `{column}`"), span))
+        .ok_or_else(|| Diagnostic::error(codes::E1005, format!("unknown column `{column}`"), span))
 }
 
 fn eval_aggregate(item: &AggItem, table: &Table, rows: &[&Row]) -> Result<Value, Diagnostic> {
@@ -580,7 +588,7 @@ fn eval_aggregate(item: &AggItem, table: &Table, rows: &[&Row]) -> Result<Value,
                 .unwrap_or(Value::Null)
         }),
         function => Err(Diagnostic::error(
-            "P1401",
+            codes::E1401,
             format!("unknown aggregate function `{function}`"),
             item.function.span,
         )),
@@ -603,7 +611,7 @@ fn eval_aggregate_expr(expr: &Expr, table: &Table, row: &Row) -> Result<Value, D
         Expr::Call { name, args, span } if name.value == "lit" => match args.as_slice() {
             [Expr::Quoted(value)] => Ok(Value::String(value.value.clone())),
             _ => Err(Diagnostic::error(
-                "P1402",
+                codes::E1402,
                 "lit() expects one quoted value",
                 *span,
             )),
@@ -611,7 +619,7 @@ fn eval_aggregate_expr(expr: &Expr, table: &Table, row: &Row) -> Result<Value, D
         Expr::Call { name, args, .. } if name.value == "col" => match args.as_slice() {
             [Expr::Quoted(value)] => column_value(table, row, &value.value, value.span),
             _ => Err(Diagnostic::error(
-                "P1402",
+                codes::E1402,
                 "col() expects one quoted column name",
                 name.span,
             )),

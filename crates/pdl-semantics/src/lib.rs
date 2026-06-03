@@ -1,4 +1,4 @@
-use pdl_core::{Diagnostic, Span};
+use pdl_core::{codes, Diagnostic, Span};
 use pdl_syntax::{
     AggItem, Binding, Expr, LoadStage, Pipeline, PipelineStart, Program, SaveStage, SourceRef,
     Stage,
@@ -63,7 +63,7 @@ where
         for binding in bindings {
             if !seen.insert(binding.name.value.clone()) {
                 self.diagnostics.push(Diagnostic::error(
-                    "P1001",
+                    codes::E1001,
                     format!("duplicate binding `{}`", binding.name.value),
                     binding.name.span,
                 ));
@@ -85,7 +85,7 @@ where
                 Some(schema) => schema.clone(),
                 None => {
                     self.diagnostics.push(Diagnostic::error(
-                        "P1007",
+                        codes::E1007,
                         format!("unknown binding `{}`", name.value),
                         name.span,
                     ));
@@ -110,7 +110,7 @@ where
                         let output_name = item.alias.as_ref().unwrap_or(&item.column);
                         if !seen.insert(output_name.value.clone()) {
                             self.diagnostics.push(Diagnostic::error(
-                                "P1207",
+                                codes::E1207,
                                 format!("duplicate output column `{}`", output_name.value),
                                 output_name.span,
                             ));
@@ -137,7 +137,7 @@ where
                             && item.old.value != item.new.value
                         {
                             self.diagnostics.push(Diagnostic::error(
-                                "P1207",
+                                codes::E1207,
                                 format!("rename target `{}` already exists", item.new.value),
                                 item.new.span,
                             ));
@@ -165,7 +165,7 @@ where
                         self.analyze_aggregate_item(&schema, item);
                         if !seen.insert(item.alias.value.clone()) {
                             self.diagnostics.push(Diagnostic::error(
-                                "P1207",
+                                codes::E1207,
                                 format!("duplicate output column `{}`", item.alias.value),
                                 item.alias.span,
                             ));
@@ -183,8 +183,8 @@ where
                 Stage::Save(save) => self.analyze_save(save),
                 Stage::Unsupported { name, .. } => {
                     self.diagnostics.push(Diagnostic::error(
-                        "P1211",
-                        format!("stage `{}` is deferred in 0.2.0", name.value),
+                        codes::E1211,
+                        format!("stage `{}` is deferred in 0.3.0", name.value),
                         name.span,
                     ));
                 }
@@ -194,7 +194,7 @@ where
         if let Some(keys) = grouping {
             if !keys.is_empty() {
                 self.diagnostics.push(Diagnostic::warning(
-                    "P1212",
+                    codes::W2001,
                     "pipeline ended with active grouping state and no `agg`",
                     pipeline.span,
                 ));
@@ -208,8 +208,8 @@ where
         if let Some(format) = &save.format {
             if format.value != "csv" {
                 self.diagnostics.push(Diagnostic::error(
-                    "P1215",
-                    format!("format `{}` is not supported in 0.2.0", format.value),
+                    codes::E1215,
+                    format!("format `{}` is not supported in 0.3.0", format.value),
                     format.span,
                 ));
             }
@@ -235,7 +235,7 @@ where
             }
             _ => {
                 self.diagnostics.push(Diagnostic::error(
-                    "P1401",
+                    codes::E1401,
                     format!("unknown aggregate function `{function}`"),
                     item.function.span,
                 ));
@@ -244,7 +244,7 @@ where
         };
         if let Some(expected) = expected_arity {
             self.diagnostics.push(Diagnostic::error(
-                "P1402",
+                codes::E1402,
                 format!("aggregate function `{function}` expects {expected}"),
                 item.span,
             ));
@@ -259,7 +259,7 @@ where
     fn require_column(&mut self, schema: &[String], name: &str, span: Span) {
         if !schema.iter().any(|column| column == name) {
             self.diagnostics.push(Diagnostic::error(
-                "P1005",
+                codes::E1005,
                 format!("unknown column `{name}`"),
                 span,
             ));

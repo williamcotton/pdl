@@ -1,5 +1,5 @@
 use logos::Logos;
-use pdl_core::{Diagnostic, Span};
+use pdl_core::{codes, Diagnostic, Span};
 use rowan::{
     GreenNode, GreenNodeBuilder, Language, SyntaxKind as RowanSyntaxKind,
     SyntaxNode as RowanSyntaxNode,
@@ -497,9 +497,9 @@ fn lex(source: &str) -> Lexed {
                     format!("invalid character `{text}`")
                 };
                 let code = if text.starts_with('"') {
-                    "P0002"
+                    codes::E0002
                 } else {
-                    "P0005"
+                    codes::E0005
                 };
                 diagnostics.push(Diagnostic::error(code, message, span));
                 builder.token(RowanSyntaxKind(SyntaxKind::Error as u16), text);
@@ -565,7 +565,7 @@ fn strip_block_comments(source: &str) -> (String, Vec<Diagnostic>) {
 
             if depth != 0 {
                 diagnostics.push(Diagnostic::error(
-                    "P0003",
+                    codes::E0003,
                     "unterminated block comment",
                     Span::new(start, source.len()),
                 ));
@@ -583,7 +583,7 @@ fn parse_quoted_token(text: &str, span: Span) -> (String, Vec<Diagnostic>) {
     let mut diagnostics = Vec::new();
     if !text.ends_with('"') || text.len() < 2 {
         diagnostics.push(Diagnostic::error(
-            "P0002",
+            codes::E0002,
             "unterminated quoted token",
             span,
         ));
@@ -601,7 +601,7 @@ fn parse_quoted_token(text: &str, span: Span) -> (String, Vec<Diagnostic>) {
         let escape_start = span.start + 1 + offset;
         let Some((_, escaped)) = chars.next() else {
             diagnostics.push(Diagnostic::error(
-                "P0004",
+                codes::E0004,
                 "invalid escape sequence",
                 Span::new(escape_start, span.end),
             ));
@@ -616,13 +616,13 @@ fn parse_quoted_token(text: &str, span: Span) -> (String, Vec<Diagnostic>) {
             'u' => match parse_unicode_escape(&mut chars) {
                 Some(ch) => value.push(ch),
                 None => diagnostics.push(Diagnostic::error(
-                    "P0004",
+                    codes::E0004,
                     "invalid unicode escape sequence",
                     Span::new(escape_start, span.end.min(escape_start + 8)),
                 )),
             },
             _ => diagnostics.push(Diagnostic::error(
-                "P0004",
+                codes::E0004,
                 format!("invalid escape sequence `\\{escaped}`"),
                 Span::new(escape_start, escape_start + 1 + escaped.len_utf8()),
             )),
@@ -688,7 +688,7 @@ impl Parser {
 
         let main = if self.at_eof() {
             self.diagnostics.push(Diagnostic::error(
-                "P1502",
+                codes::E1502,
                 "no runnable main pipeline",
                 self.current().span,
             ));
@@ -720,7 +720,7 @@ impl Parser {
             PipelineStart::Binding(name)
         } else {
             self.diagnostics.push(Diagnostic::error(
-                "P0007",
+                codes::E0007,
                 "expected pipeline start",
                 self.current().span,
             ));
@@ -731,7 +731,7 @@ impl Parser {
         while self.consume_pipe() {
             if self.at_eof() {
                 self.diagnostics.push(Diagnostic::error(
-                    "P0006",
+                    codes::E0006,
                     "missing stage after pipe",
                     self.previous_span(),
                 ));
@@ -773,7 +773,7 @@ impl Parser {
         match name.value.as_str() {
             "load" => {
                 self.diagnostics.push(Diagnostic::error(
-                    "P1202",
+                    codes::E1202,
                     "`load` is valid only as a pipeline start",
                     name.span,
                 ));
@@ -798,7 +798,7 @@ impl Parser {
             }
             _ => {
                 self.diagnostics.push(Diagnostic::error(
-                    "P1201",
+                    codes::E1201,
                     format!("unknown stage `{}`", name.value),
                     name.span,
                 ));
@@ -855,7 +855,7 @@ impl Parser {
             let old = self.expect_column_name()?;
             if !self.consume_ident("as") {
                 self.diagnostics.push(Diagnostic::error(
-                    "P1203",
+                    codes::E1203,
                     "rename items require `as`",
                     self.current().span,
                 ));
@@ -903,7 +903,7 @@ impl Parser {
                 .map_or(function.span, |token| token.span);
             if !self.consume_ident("as") {
                 self.diagnostics.push(Diagnostic::error(
-                    "P1213",
+                    codes::E1213,
                     "aggregate items require `as`",
                     close_span,
                 ));
@@ -972,7 +972,7 @@ impl Parser {
                 }),
                 Err(_) => {
                     self.diagnostics.push(Diagnostic::error(
-                        "P1206",
+                        codes::E1206,
                         "limit requires a non-negative integer",
                         token.span,
                     ));
@@ -981,7 +981,7 @@ impl Parser {
             },
             _ => {
                 self.diagnostics.push(Diagnostic::error(
-                    "P1203",
+                    codes::E1203,
                     "limit requires a row count",
                     token.span,
                 ));
@@ -1022,7 +1022,7 @@ impl Parser {
             TokenKind::Minus => Some(SourceRef::Stdin(token.span)),
             _ => {
                 self.diagnostics.push(Diagnostic::error(
-                    "P1203",
+                    codes::E1203,
                     "load requires a path or stdin",
                     token.span,
                 ));
@@ -1039,7 +1039,7 @@ impl Parser {
             TokenKind::Minus => Some(SinkRef::Stdout(token.span)),
             _ => {
                 self.diagnostics.push(Diagnostic::error(
-                    "P1203",
+                    codes::E1203,
                     "save requires a path or stdout",
                     token.span,
                 ));
@@ -1060,7 +1060,7 @@ impl Parser {
             }
             _ => {
                 self.diagnostics.push(Diagnostic::error(
-                    "P1203",
+                    codes::E1203,
                     "format requires a format name",
                     token.span,
                 ));
@@ -1105,7 +1105,7 @@ impl Parser {
                 Ok(value) => Some(Expr::Number(Spanned::new(value, token.span))),
                 Err(_) => {
                     self.diagnostics.push(Diagnostic::error(
-                        "P1206",
+                        codes::E1206,
                         "invalid number literal",
                         token.span,
                     ));
@@ -1172,7 +1172,7 @@ impl Parser {
             }
             _ => {
                 self.diagnostics.push(Diagnostic::error(
-                    "P0008",
+                    codes::E0008,
                     "expected expression",
                     token.span,
                 ));
@@ -1204,7 +1204,7 @@ impl Parser {
         let name = self.expect_identifier("binding name")?;
         if is_reserved_keyword(&name.value) {
             self.diagnostics.push(Diagnostic::error(
-                "P1002",
+                codes::E1002,
                 format!(
                     "reserved keyword `{}` cannot be used as a binding",
                     name.value
@@ -1221,7 +1221,7 @@ impl Parser {
             TokenKind::String(value) => Some(Spanned::new(value, token.span)),
             _ => {
                 self.diagnostics.push(Diagnostic::error(
-                    "P0009",
+                    codes::E0009,
                     "expected quoted column name",
                     token.span,
                 ));
@@ -1236,7 +1236,7 @@ impl Parser {
             TokenKind::Ident(value) => Some(Spanned::new(value, token.span)),
             _ => {
                 self.diagnostics.push(Diagnostic::error(
-                    "P0008",
+                    codes::E0008,
                     format!("expected {label}"),
                     token.span,
                 ));
@@ -1251,7 +1251,7 @@ impl Parser {
             TokenKind::Ident(value) if value == expected => Some(token),
             _ => {
                 self.diagnostics.push(Diagnostic::error(
-                    "P0001",
+                    codes::E0001,
                     format!("expected `{expected}`"),
                     token.span,
                 ));
@@ -1264,14 +1264,14 @@ impl Parser {
         let token = self.advance().clone();
         if token.kind != TokenKind::Equal {
             self.diagnostics
-                .push(Diagnostic::error("P0001", "expected `=`", token.span));
+                .push(Diagnostic::error(codes::E0001, "expected `=`", token.span));
         }
     }
 
     fn expect_lparen(&mut self) {
         if !self.consume_lparen() {
             self.diagnostics.push(Diagnostic::error(
-                "P0001",
+                codes::E0001,
                 "expected `(`",
                 self.current().span,
             ));
@@ -1284,7 +1284,7 @@ impl Parser {
             Some(token)
         } else {
             self.diagnostics
-                .push(Diagnostic::error("P0001", "expected `)`", token.span));
+                .push(Diagnostic::error(codes::E0001, "expected `)`", token.span));
             None
         }
     }
@@ -1460,6 +1460,6 @@ mod tests {
     #[test]
     fn reports_unknown_stage() {
         let result = parse(r#"load "sales.csv" | nope "x""#);
-        assert_eq!(result.diagnostics[0].code, "P1201");
+        assert_eq!(result.diagnostics[0].code, "E1201");
     }
 }

@@ -34,7 +34,7 @@ Three artifacts govern behavior, and they must stay in sync:
 1. **`docs/PDL_SPEC.md` — the normative reference.** It describes what the
    implementation does. Read the relevant section before implementing or
    changing behavior. The spec uses RFC-2119-style keywords (`MUST`, `SHOULD`,
-   `MAY`, `MUST NOT`) and reserves stable diagnostic codes such as `P1201`;
+   `MAY`, `MUST NOT`) and reserves stable diagnostic codes such as `E1201`;
    honor both. When code intentionally deviates from a `SHOULD`, document why in
    a comment.
 
@@ -261,6 +261,3 @@ Algraf handoff, editor/WASM examples.
   selected parser.
 - PDL source must not execute shell commands, arbitrary code, or network fetches
   by default.
-- Tests live in each crate's `tests/` directory or in top-level integration
-  fixtures. Add tests alongside new behavior.
-

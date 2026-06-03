@@ -311,6 +311,7 @@ fn lsp_diagnostic(diagnostic: EditorDiagnostic) -> LspDiagnostic {
             pdl_core::Severity::Error => DiagnosticSeverity::ERROR,
             pdl_core::Severity::Warning => DiagnosticSeverity::WARNING,
             pdl_core::Severity::Info => DiagnosticSeverity::INFORMATION,
+            pdl_core::Severity::Hint => DiagnosticSeverity::HINT,
         }),
         code: Some(NumberOrString::String(diagnostic.code)),
         source: Some("pdl".to_string()),
@@ -452,5 +453,38 @@ fn semantic_token_index(kind: SemanticTokenKind) -> u32 {
         SemanticTokenKind::String => 3,
         SemanticTokenKind::Number => 4,
         SemanticTokenKind::Operator => 5,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lsp_diagnostic_preserves_code_severity_and_range() {
+        let diagnostic = EditorDiagnostic {
+            range: TextRange {
+                start: TextPosition {
+                    line: 1,
+                    character: 2,
+                },
+                end: TextPosition {
+                    line: 1,
+                    character: 7,
+                },
+            },
+            severity: pdl_core::Severity::Hint,
+            code: "H3001".to_string(),
+            message: "use col(...)".to_string(),
+        };
+
+        let lsp = lsp_diagnostic(diagnostic);
+
+        assert_eq!(lsp.severity, Some(DiagnosticSeverity::HINT));
+        assert_eq!(lsp.code, Some(NumberOrString::String("H3001".to_string())));
+        assert_eq!(lsp.source.as_deref(), Some("pdl"));
+        assert_eq!(lsp.range.start.line, 1);
+        assert_eq!(lsp.range.start.character, 2);
+        assert_eq!(lsp.range.end.character, 7);
     }
 }

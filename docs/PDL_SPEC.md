@@ -1,29 +1,32 @@
 # PDL Detailed Specification
 
-Status: Draft 0.2.0
+Status: Draft 0.3.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.2.0`.
+The current repository implementation is `0.3.0`.
 
-This release is the first plain repository release line. It implements
-the `pdl` CLI commands `run`, `check`, and `version`; CSV file loading with
-header rows; CSV file and stdout output; deterministic in-memory execution for
-`load`, `filter`, `select`, `drop`, `rename`, `group_by`, `agg`, `sort`,
-`limit`, and `save`; and the aggregate functions `count`, `sum`, `mean`, `min`,
-and `max`. It also implements `pdl lsp` with full-document sync, diagnostics,
+This release keeps the existing CSV-backed language and runtime slice stable and
+promotes diagnostics into a first-class compatibility surface. It implements the
+`pdl` CLI commands `run`, `check`, and `version`; CSV file loading with header
+rows; CSV file and stdout output; deterministic in-memory execution for `load`,
+`filter`, `select`, `drop`, `rename`, `group_by`, `agg`, `sort`, `limit`, and
+`save`; and the aggregate functions `count`, `sum`, `mean`, `min`, and `max`.
+It also implements registered lettered diagnostic codes in `pdl-core`, a
+`codes::*` registry, `related` spans and `help` diagnostic payload fields,
+diagnostic catalog drift tests, `pdl lsp` with full-document sync, diagnostics,
 completion, hover, formatting, semantic tokens, document symbols, and
 same-document binding definition/reference/rename; and it ships a thin VS Code
 client under `editors/vscode/`.
 
-Version 0.2.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
+Version 0.3.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
 loading, stream sniffing, configurable CSV dialect options, `mutate`, `join`,
-`union`, `distinct`, manifests, schema/plan subcommands, CLI formatting, full
-LSP code actions or cross-document navigation, WASM entry points, or browser
-demo support. Those features are tracked as deferred or planned work in
-`docs/V0_2_PLAN.md`.
+`union`, `distinct`, window expressions, manifests, schema/plan subcommands,
+CLI formatting, full LSP code actions or cross-document navigation, WASM entry
+points, or browser demo support. Those features are tracked as deferred or
+planned work in successor release plans such as `docs/V0_4_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -107,6 +110,10 @@ The keyword `table` means an ordered, typed, rectangular relation with named col
 
 The keyword `row` means one record in a table.
 
+The keyword `window expression` means a row-preserving expression that evaluates
+over a partition and order of rows. Window expressions are planned but not
+implemented in version 0.3.0.
+
 The keyword `column` means a named field with a static PDL type and nullability.
 
 The keyword `schema` means the ordered set of columns, types, nullability, metadata, and optional key information for a table.
@@ -133,9 +140,23 @@ The keyword `CST` means concrete syntax tree.
 
 The keyword `IR` means intermediate representation.
 
-PDL diagnostics use code family `Pxxxx`.
+PDL uses lettered diagnostic code namespaces:
+
+- `Exxxx` for author-facing errors
+- `Wxxxx` for author-facing warnings
+- `Hxxxx` for author-facing hints
+- `Rxxxx` for implementation-oriented runtime/internal diagnostics
+
+Diagnostic severity is independent of the code string.
+
+The leading code letter SHOULD match serialized severity for author-facing
+diagnostics. Internal `Rxxxx` diagnostics MUST still serialize explicit
+severity.
 
 Diagnostic codes emitted by an implementation MUST be reserved in this specification or in a versioned successor of this specification.
+
+Every normative rule that requires an author-facing diagnostic SHOULD name the
+stable diagnostic code in this specification before implementation.
 
 Reserved diagnostic codes MAY be listed before implementation.
 
@@ -392,9 +413,9 @@ limit 10
 save "out.csv"
 ```
 
-Unknown stage names MUST produce `P1201`.
+Unknown stage names MUST produce `E1201`.
 
-Using a stage in an invalid position MUST produce `P1202`.
+Using a stage in an invalid position MUST produce `E1202`.
 
 ### 4.3 Table
 
@@ -448,7 +469,8 @@ filter "region" == col("home_region")
 
 When a schema is unavailable, the analyzer MAY treat quoted atoms in filter-left position as provisional column references.
 
-Ambiguous quoted atoms SHOULD produce warnings with suggested `col("...")` or `lit("...")` disambiguation.
+Ambiguous quoted atoms SHOULD produce `W2002` with suggested `col("...")` or
+`lit("...")` disambiguation.
 
 ### 4.5 Literal
 
@@ -683,7 +705,8 @@ Explicit source syntax overrides sniffing.
 
 CLI flags override runtime defaults.
 
-If both source syntax and CLI flags specify incompatible formats for the same stream, the CLI SHOULD produce a diagnostic before reading.
+If both source syntax and CLI flags specify incompatible formats for the same
+stream, the CLI SHOULD produce `E1217` before reading.
 
 ## 6. Lexical Structure
 
@@ -719,7 +742,7 @@ Block comments begin with `/*` and end with `*/`.
 
 Block comments MAY nest.
 
-Unterminated block comments MUST produce `P0003`.
+Unterminated block comments MUST produce `E0003`.
 
 Comments are trivia.
 
@@ -782,6 +805,22 @@ Reserved words MUST NOT be used as binding identifiers.
 
 Column names may match reserved words because quoted column references are strings.
 
+Planned window expression syntax uses additional clause words:
+
+- `over`
+- `partition_by`
+- `order_by`
+- `rows`
+- `between`
+- `unbounded_preceding`
+- `current_row`
+- `unbounded_following`
+- `preceding`
+- `following`
+
+These words are not reserved by the version 0.3.0 implementation until window
+syntax is implemented.
+
 ### 6.6 Quoted Tokens
 
 Double-quoted tokens are used for both column names and string literals.
@@ -797,9 +836,9 @@ The escape sequences are:
 - `\t`
 - `\u{HEX}`
 
-Unterminated quoted tokens MUST produce `P0002`.
+Unterminated quoted tokens MUST produce `E0002`.
 
-Invalid escapes MUST produce `P0004`.
+Invalid escapes MUST produce `E0004`.
 
 ### 6.7 Number Literals
 
@@ -1032,15 +1071,32 @@ UnaryExpr     ::= ("not" | "!" | "-") UnaryExpr | PrimaryExpr ;
 PrimaryExpr   ::= Literal
                 | ColumnToken
                 | Ident
+                | WindowExpr
                 | CallExpr
                 | "(" ValueExpr ")" ;
-CallExpr      ::= Ident "(" ArgList? ")" ;
-ArgList       ::= ValueExpr ("," ValueExpr)* ;
+WindowExpr      ::= CallExpr "over" "(" WindowSpec ")" ;
+WindowSpec      ::= PartitionClause? OrderClause? WindowFrame? ;
+PartitionClause ::= "partition_by" ColumnRef ("," ColumnRef)* ;
+OrderClause     ::= "order_by" SortItem ("," SortItem)* ;
+WindowFrame     ::= "rows" "between" FrameBound "and" FrameBound ;
+FrameBound      ::= "unbounded_preceding"
+                  | IntLiteral "preceding"
+                  | "current_row"
+                  | IntLiteral "following"
+                  | "unbounded_following" ;
+CallExpr        ::= Ident "(" ArgList? ")" ;
+ArgList         ::= ValueExpr ("," ValueExpr)* ;
 ```
 
 Comparison chaining is not supported.
 
-`"a" < "b" < "c"` MUST produce a diagnostic or a type error with help suggesting `"a" < "b" and "b" < "c"`.
+`"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
+`"a" < "b" and "b" < "c"`.
+
+Window expressions are planned syntax and are not implemented in version 0.3.0.
+
+Until implemented, parsers MAY recover with `E1211` or ordinary parse diagnostics
+when they encounter `over`.
 
 ### 7.13 Error Recovery
 
@@ -1090,7 +1146,7 @@ Dropped columns are unavailable to later stages.
 
 Column resolution is deterministic.
 
-Unknown columns MUST produce `P1005`.
+Unknown columns MUST produce `E1005`.
 
 If schema is unknown during editor analysis, column references MAY be provisional.
 
@@ -1098,9 +1154,9 @@ Provisional column references SHOULD be labelled as such in hover or diagnostics
 
 ### 8.4 Binding Resolution
 
-Unknown bindings MUST produce `P1007`.
+Unknown bindings MUST produce `E1007`.
 
-Binding cycles MUST produce `P1501`.
+Binding cycles MUST produce `E1501`.
 
 The diagnostic for a cycle SHOULD include the cycle path.
 
@@ -1210,15 +1266,15 @@ LSP inference from sampled CSV data is provisional.
 
 ### 9.8 Type Diagnostics
 
-Unknown types MUST produce `P1301`.
+Unknown types MUST produce `E1301`.
 
-Incompatible operands MUST produce `P1302`.
+Incompatible operands MUST produce `E1302`.
 
-Invalid assignment type MUST produce `P1303`.
+Invalid assignment type MUST produce `E1303`.
 
-Nullability violations SHOULD produce `P1308`.
+Nullability violations SHOULD produce `E1308`.
 
-Ambiguous inference SHOULD produce `P1309`.
+Ambiguous inference SHOULD produce `E1309`.
 
 ## 10. Data Sources And Formats
 
@@ -1266,7 +1322,7 @@ Parquet sources carry schema.
 
 Parquet output MAY be supported in version 0.1.
 
-Unsupported Parquet logical types MUST produce diagnostics.
+Unsupported Parquet logical types MUST produce `E1808`.
 
 Parquet reading SHOULD push down projection and filters where practical, but optimization MUST NOT change semantics.
 
@@ -1336,7 +1392,8 @@ Sniffing MUST preserve the consumed bytes.
 
 The driver MUST pass a reader containing the full stream to the selected parser.
 
-If sniffing cannot distinguish formats, the driver MUST use deterministic fallback order or produce a diagnostic.
+If sniffing cannot distinguish formats, the driver MUST use deterministic
+fallback order or produce `E1216`.
 
 Recommended fallback order:
 
@@ -1369,7 +1426,8 @@ CLI flags can specify stream formats:
 pdl run prep.pdl --stdin-format csv --stdout-format arrow-stream
 ```
 
-Explicit source syntax and CLI override conflicts MUST produce diagnostics unless the CLI explicitly documents override precedence.
+Explicit source syntax and CLI override conflicts MUST produce `E1217` unless
+the CLI explicitly documents override precedence.
 
 ### 10.10 Source Security
 
@@ -1413,9 +1471,9 @@ Predicate type must be boolean or nullable boolean.
 
 `select "a" as "b"` renames a selected column.
 
-Unknown selected columns MUST produce diagnostics.
+Unknown selected columns MUST produce `E1005`.
 
-Duplicate output column names MUST produce `P1207`.
+Duplicate output column names MUST produce `E1207`.
 
 ### 11.4 Drop
 
@@ -1423,9 +1481,9 @@ Duplicate output column names MUST produce `P1207`.
 
 `drop` preserves order of remaining columns.
 
-Dropping an unknown column MUST produce `P1005`.
+Dropping an unknown column MUST produce `E1005`.
 
-Dropping all columns is legal but SHOULD warn.
+Dropping all columns is legal but SHOULD produce `W2003`.
 
 ### 11.5 Rename
 
@@ -1433,7 +1491,7 @@ Dropping all columns is legal but SHOULD warn.
 
 Rename preserves column order.
 
-Renaming to an existing column MUST produce `P1207` unless overwrite behavior is explicitly supported.
+Renaming to an existing column MUST produce `E1207` unless overwrite behavior is explicitly supported.
 
 ### 11.6 Mutate
 
@@ -1457,7 +1515,7 @@ Grouping keys must exist.
 
 Grouping keys remain first in aggregate output.
 
-A pipeline ending with active group state and no `agg` SHOULD produce a warning.
+A pipeline ending with active group state and no `agg` SHOULD produce `W2001`.
 
 ### 11.8 Agg
 
@@ -1495,7 +1553,7 @@ Default null order SHOULD be `nulls_last` for ascending and `nulls_first` for de
 
 `limit` preserves current order.
 
-Using `limit` after a stage with unstable order SHOULD produce a warning.
+Using `limit` after a stage with unstable order SHOULD produce `W2004`.
 
 ### 11.11 Join
 
@@ -1518,7 +1576,8 @@ Duplicate non-key output column names MUST be resolved or diagnosed.
 
 The default collision policy SHOULD suffix right-side columns with `_right`.
 
-If a suffix creates another collision, the analyzer MUST produce a diagnostic unless an explicit suffix option is introduced.
+If a suffix creates another collision, the analyzer MUST produce `E1207` unless
+an explicit suffix option is introduced.
 
 ### 11.12 Union
 
@@ -1542,6 +1601,42 @@ The first row in current order is retained.
 
 Output order follows retained row order.
 
+### 11.14 Window Expressions (Planned)
+
+Window expressions are planned row expressions that add or replace columns
+without changing row count.
+
+They are intended primarily for `mutate`:
+
+```pdl
+load "sales.parquet"
+  | mutate "region_revenue" = sum("amount") over (partition_by "region")
+  | mutate "region_rank" = dense_rank() over (partition_by "region" order_by "amount" desc)
+```
+
+Window expressions MUST NOT use active `group_by` state.
+
+`group_by` remains state for `agg` only; a window partition is always declared
+explicitly with `partition_by`.
+
+Window expressions preserve the current row order.
+
+`partition_by` columns must exist.
+
+`order_by` uses the same sort item syntax and null ordering rules as `sort`.
+
+If `partition_by` is omitted, the whole input table is one partition.
+
+If `order_by` is omitted, aggregate window functions operate over the current
+partition order.
+
+Ranking and offset window functions require `order_by`.
+
+Assignments in a `mutate` stage containing window expressions remain parallel:
+one assignment MUST NOT see another assignment from the same stage.
+
+Window execution MAY require materializing the current table or partition.
+
 ## 12. Expressions And Functions
 
 ### 12.1 Expression Contexts
@@ -1551,6 +1646,9 @@ PDL has row expression context, aggregate context, path context, and format cont
 Row expressions can reference columns.
 
 Aggregate expressions can reference aggregate functions and group keys.
+
+Window expressions are a planned row-expression form. They do not introduce
+aggregate context, and they are not valid inside `agg`.
 
 Path context accepts string literals and future path functions.
 
@@ -1594,7 +1692,7 @@ Recommended scalar functions:
 - `month(value)`
 - `day(value)`
 
-Unknown functions MUST produce `P1401`.
+Unknown functions MUST produce `E1401`.
 
 Function calls MUST be pure.
 
@@ -1629,7 +1727,76 @@ Recommended aggregate functions:
 
 Aggregating an empty group returns null except for `count`, which returns zero.
 
-### 12.5 Determinism
+### 12.5 Window Functions (Planned)
+
+Window function syntax is planned and not implemented in version 0.3.0.
+
+Window functions use ordinary function-call syntax followed by an `over` clause.
+
+Examples:
+
+```pdl
+load "orders.csv"
+  | mutate "customer_total" = sum("amount") over (partition_by "customer_id")
+  | mutate "running_total" =
+      sum("amount") over (
+        partition_by "customer_id"
+        order_by "order_date" asc
+        rows between unbounded_preceding and current_row
+      )
+```
+
+```pdl
+load "orders.csv"
+  | mutate "rn" =
+      row_number() over (
+        partition_by "customer_id"
+        order_by "order_date" desc, "order_id" asc
+      )
+  | filter "rn" == 1
+```
+
+Planned ranking and offset functions:
+
+- `row_number()`
+- `rank()`
+- `dense_rank()`
+- `lag(column)`
+- `lead(column)`
+
+Planned aggregate-style window functions:
+
+- `count()`
+- `count(column)`
+- `sum(column)`
+- `mean(column)`
+- `min(column)`
+- `max(column)`
+- `first(column)`
+- `last(column)`
+
+Aggregate-style window functions without `order_by` default to the whole
+partition.
+
+Aggregate-style window functions with `order_by` default to:
+
+```pdl
+rows between unbounded_preceding and current_row
+```
+
+Ranking and offset functions ignore frames and SHOULD reject explicit frames
+unless a future version gives them frame semantics.
+
+For `rank` and `dense_rank`, peer rows are rows with equal `order_by` values.
+
+For `row_number`, rows with equal `order_by` values use the current stable row
+order as the deterministic tie-breaker. Users SHOULD add explicit tie-breaker
+columns when they need durable rankings independent of input order.
+
+Invalid window specifications MUST produce `E1409` once window syntax is
+implemented.
+
+### 12.6 Determinism
 
 Version 0.1 functions MUST be deterministic.
 
@@ -1637,17 +1804,20 @@ Functions that read wall-clock time, random values, environment variables, files
 
 Such values must enter through CLI flags or future parameter mechanisms.
 
-### 12.6 Expression Diagnostics
+### 12.7 Expression Diagnostics
 
-Invalid function arity MUST produce `P1402`.
+Invalid function arity MUST produce `E1402`.
 
-Invalid function argument type MUST produce `P1403`.
+Invalid function argument type MUST produce `E1403`.
 
-Function not allowed in context MUST produce `P1404`.
+Function not allowed in context MUST produce `E1404`.
 
-Non-deterministic function not allowed MUST produce `P1405`.
+Non-deterministic function not allowed MUST produce `E1405`.
 
-Divide by zero detected statically MUST produce `P1407`.
+Divide by zero detected statically MUST produce `E1407`.
+
+Invalid window specification MUST produce `E1409` once window syntax is
+implemented.
 
 ## 13. Row Ordering And Determinism
 
@@ -1833,7 +2003,8 @@ PDL SHOULD stream where semantics permit.
 
 `filter`, `select`, `drop`, `rename`, and simple `mutate` can stream.
 
-`group_by` plus `agg`, `sort`, `join`, `distinct`, and some `union` modes may require materialization.
+`group_by` plus `agg`, `sort`, `join`, `distinct`, window expressions, and
+some `union` modes may require materialization.
 
 The plan SHOULD identify blocking stages.
 
@@ -1967,7 +2138,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.2.0` LSP implementation provides diagnostics,
+The current `0.3.0` LSP implementation provides diagnostics,
 completion, hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
@@ -2221,7 +2392,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -2785,8 +2956,11 @@ PDL parser recovery SHOULD synchronize at:
 - newline boundaries where a new pipeline can begin
 - EOF
 
-A missing or malformed stage MUST produce a diagnostic and a partial syntax
-node when a partial node lets editor features continue.
+A missing stage MUST produce `E0006` and a partial syntax node when a partial
+node lets editor features continue.
+
+A malformed stage MUST produce the most specific applicable syntax or stage
+diagnostic, such as `E1201`, `E1203`, or `E1206`.
 
 The parser MUST NOT perform schema lookup, file IO, Polars planning, or semantic
 validation.
@@ -2798,24 +2972,45 @@ Diagnostics are data, not exceptions.
 All diagnostics emitted by syntax, data, driver, semantics, exec, CLI, LSP, or
 WASM MUST use the same core diagnostic structure.
 
-The diagnostic structure SHOULD include:
+The diagnostic structure SHOULD be shaped like:
 
 ```rust
+pub struct DiagnosticCode(&'static str);
+
 pub struct Diagnostic {
-    pub code: DiagnosticCode,
+    pub code: &'static str,
     pub severity: Severity,
     pub message: String,
-    pub span: Option<Span>,
-    pub labels: Vec<DiagnosticLabel>,
-    pub notes: Vec<String>,
+    pub span: Span,
+    pub related: Vec<RelatedSpan>,
+    pub help: Option<String>,
 }
+
+pub struct RelatedSpan {
+    pub span: Span,
+    pub message: String,
+}
+```
+
+Registered code constants SHOULD live under `pdl_core::codes`.
+
+Example:
+
+```rust
+use pdl_core::{codes, Diagnostic, Span};
+
+let diagnostic = Diagnostic::error(
+    codes::E1005,
+    "unknown column",
+    Span::new(42, 47),
+);
 ```
 
 `Span` MUST be a half-open byte range into a known source document.
 
 Diagnostics that point into generated schemas, manifests, or host-provided
-metadata MAY omit a source span, but they MUST still carry a stable diagnostic
-code.
+metadata MAY use an implementation-defined sentinel span such as `Span::zero()`,
+but they MUST still carry a stable diagnostic code.
 
 CLI human output, CLI JSON output, LSP diagnostics, WASM JSON payloads, and
 snapshot tests MUST derive from this same diagnostic data.
@@ -3060,160 +3255,415 @@ asserting spans or UTF-16 LSP ranges.
 
 Diagnostic codes are grouped:
 
-- `P0001`-`P0999`: lexical and syntax diagnostics
-- `P1000`-`P1199`: name, declaration, scope, and column diagnostics
-- `P1200`-`P1299`: stage and format diagnostics
-- `P1300`-`P1399`: type diagnostics
-- `P1400`-`P1499`: expression and function diagnostics
-- `P1500`-`P1599`: graph and planning diagnostics
-- `P1600`-`P1699`: CLI and invocation diagnostics
-- `P1700`-`P1799`: materialization diagnostics
-- `P1800`-`P1899`: data source runtime diagnostics
-- `P1900`-`P1999`: Algraf interop diagnostics
+- `E0001`-`E0099`: lexical and syntax errors
+- `E1001`-`E1099`: binding and scope errors
+- `E1101`-`E1199`: column and schema errors
+- `E1201`-`E1299`: stage and format errors
+- `E1301`-`E1399`: type errors
+- `E1401`-`E1499`: expression, function, aggregate, and window errors
+- `E1501`-`E1599`: graph and planning errors
+- `E1601`-`E1699`: CLI and invocation errors
+- `E1701`-`E1799`: materialization and output errors
+- `E1801`-`E1899`: data source and format runtime errors
+- `E1901`-`E1999`: Algraf interop errors
+- `W2001`-`W2099`: author-facing warnings
+- `H3001`-`H3099`: author-facing hints
+- `R4001`-`R4099`: implementation-oriented runtime/internal diagnostics
+
+The implementation MUST NOT emit an unregistered code.
+
+When a condition could fit multiple codes, the most specific source-facing code
+wins. For example, an unknown column in `select` is `E1005`; it is not a generic
+stage-argument error.
 
 ### 20.2 Syntax Diagnostics
 
-`P0001` unexpected token.
+`E0001` unexpected token.
 
-`P0002` unterminated quoted token.
+`E0002` unterminated quoted token.
 
-`P0003` unterminated block comment.
+`E0003` unterminated block comment.
 
-`P0004` invalid escape sequence.
+`E0004` invalid escape sequence.
 
-`P0005` invalid character.
+`E0005` invalid character.
 
-`P0006` missing stage after pipe.
+`E0006` missing stage after pipe.
 
-`P0007` expected pipeline start.
+`E0007` expected pipeline start.
 
-`P0008` expected expression.
+`E0008` expected expression.
 
-`P0009` expected column name.
+`E0009` expected column name.
 
-`P0010` expected binding name.
+`E0010` expected binding name.
 
-### 20.3 Name And Column Diagnostics
+`E0011` expected string token.
 
-`P1001` duplicate binding name.
+`E0012` expected function call.
 
-`P1002` reserved keyword used as binding.
+`E0013` expected comma or closing delimiter.
 
-`P1005` unknown column.
+`E0014` expected alias after `as`.
 
-`P1007` unknown binding.
+`E0015` expected `=`.
 
-`P1011` ambiguous quoted token.
+`E0016` expected format name.
 
-`P1012` provisional schema required.
+`E0017` expected integer literal.
+
+`E0018` malformed sort item.
+
+`E0019` malformed window clause.
+
+`E0020` unmatched delimiter.
+
+`E0021` trailing tokens after pipeline.
+
+`E0022` malformed `let` binding.
+
+`E0023` expected stage name.
+
+`E0024` expected source or sink target.
+
+`E0025` required language feature is not enabled.
+
+### 20.3 Binding, Scope, Column, And Schema Diagnostics
+
+`E1001` duplicate binding name.
+
+`E1002` reserved keyword used as binding.
+
+`E1003` binding name conflicts with generated artifact name.
+
+`E1004` binding is not a pipeline value.
+
+`E1005` unknown column.
+
+`E1006` ambiguous column.
+
+`E1007` unknown binding.
+
+`E1008` duplicate source column.
+
+`E1009` schema unavailable for column resolution.
+
+`E1010` duplicate output column name.
+
+`E1011` column reference is not valid in this context.
+
+`E1012` provisional schema required.
+
+`E1013` duplicate schema field.
+
+`E1014` schema field type is unsupported.
+
+`E1015` schema field nullability is incompatible.
 
 ### 20.4 Stage And Format Diagnostics
 
-`P1201` unknown stage.
+`E1201` unknown stage.
 
-`P1202` stage used in invalid position.
+`E1202` stage used in invalid position.
 
-`P1203` missing required stage argument.
+`E1203` missing required stage argument.
 
-`P1204` unknown stage option.
+`E1204` unknown stage option.
 
-`P1205` duplicate stage option.
+`E1205` duplicate stage option.
 
-`P1206` invalid stage argument type.
+`E1206` invalid stage argument type.
 
-`P1207` output column collision.
+`E1207` output column collision.
 
-`P1208` incompatible join keys.
+`E1208` incompatible join keys.
 
-`P1209` incompatible union schemas.
+`E1209` incompatible union schemas.
 
-`P1210` invalid enum value.
+`E1210` invalid enum value.
 
-`P1211` unsupported optional construct.
+`E1211` unsupported optional construct.
 
-`P1212` invalid grouping state.
+`E1212` invalid grouping state.
 
-`P1213` invalid aggregate context.
+`E1213` invalid aggregate context.
 
-`P1214` invalid sort specification.
+`E1214` invalid sort specification.
 
-`P1215` unknown format.
+`E1215` unknown format.
 
-`P1216` format inference failed.
+`E1216` format inference failed.
 
-`P1217` explicit format conflicts with CLI override.
+`E1217` explicit format conflicts with CLI override.
+
+`E1218` duplicate save option.
+
+`E1219` invalid save option.
+
+`E1220` missing load source.
+
+`E1221` missing save sink.
+
+`E1222` negative limit.
+
+`E1223` invalid join kind.
+
+`E1224` invalid CSV dialect option.
+
+`E1225` unsupported format alias.
+
+`E1226` window syntax is not enabled.
 
 ### 20.5 Type Diagnostics
 
-`P1301` unknown type.
+`E1301` unknown type.
 
-`P1302` incompatible operand types.
+`E1302` incompatible operand types.
 
-`P1303` invalid assignment type.
+`E1303` invalid assignment type.
 
-`P1304` invalid cast.
+`E1304` invalid cast.
 
-`P1308` nullability violation.
+`E1305` unsupported implicit coercion.
 
-`P1309` ambiguous type inference.
+`E1306` numeric overflow.
+
+`E1307` invalid temporal value.
+
+`E1308` nullability violation.
+
+`E1309` ambiguous type inference.
+
+`E1310` predicate is not boolean.
+
+`E1311` sort key type is not orderable.
+
+`E1312` grouping key type is not hashable or comparable.
+
+`E1313` incompatible output schema.
 
 ### 20.6 Expression Diagnostics
 
-`P1401` unknown function.
+`E1401` unknown function.
 
-`P1402` wrong function arity.
+`E1402` wrong function arity.
 
-`P1403` invalid function argument type.
+`E1403` invalid function argument type.
 
-`P1404` function not allowed in context.
+`E1404` function not allowed in context.
 
-`P1405` non-deterministic function not allowed.
+`E1405` non-deterministic function not allowed.
 
-`P1407` divide by zero detected statically.
+`E1406` invalid literal value.
 
-`P1408` comparison chain not supported.
+`E1407` divide by zero detected statically.
+
+`E1408` comparison chain not supported.
+
+`E1409` invalid window specification.
+
+`E1410` aggregate function not allowed in row context.
+
+`E1411` scalar function not allowed in aggregate context.
+
+`E1412` invalid aggregate argument.
+
+`E1413` invalid window frame bound.
+
+`E1414` ranking or offset window function requires `order_by`.
+
+`E1415` explicit frame is not allowed for this window function.
+
+`E1416` window function is not allowed in aggregate context.
+
+`E1417` aggregate item requires `as`.
 
 ### 20.7 Planning Diagnostics
 
-`P1501` binding dependency cycle.
+`E1501` binding dependency cycle.
 
-`P1502` no runnable main pipeline.
+`E1502` no runnable main pipeline.
 
-`P1503` selected binding not found.
+`E1503` selected binding not found.
 
-`P1504` cache entry invalid.
+`E1504` cache entry invalid.
 
-`P1505` unsupported plan node.
+`E1505` unsupported plan node.
 
-### 20.8 Runtime Diagnostics
+`E1506` unsupported streaming plan.
 
-`P1701` invalid output path.
+`E1507` blocking stage cannot run in requested mode.
 
-`P1702` output exists and overwrite is false.
+`E1508` selected target is not runnable.
 
-`P1703` output directory unavailable.
+`E1509` manifest dependency resolution failed.
 
-`P1704` write failed.
+`E1510` planning limit exceeded.
 
-`P1705` unsupported output format.
+### 20.8 CLI Diagnostics
 
-`P1801` source file not found.
+`E1601` unknown CLI command.
 
-`P1802` source file unreadable.
+`E1602` unknown CLI option.
 
-`P1803` source encoding invalid.
+`E1603` missing CLI argument.
 
-`P1804` row parse failed.
+`E1604` invalid CLI argument value.
 
-`P1805` source schema mismatch.
+`E1605` conflicting CLI options.
 
-`P1806` stdin unavailable.
+`E1606` no input pipeline was provided.
 
-`P1807` stream sniffing failed.
+`E1607` stdout data stream would be mixed with human output.
 
-`P1901` Algraf handoff format unsupported.
+`E1608` requested subcommand is not implemented.
 
-`P1902` Algraf interop manifest failed.
+`E1609` selected binding was not found.
+
+`E1610` current working directory is unavailable.
+
+`E1611` requested runtime feature is unavailable.
+
+### 20.9 Materialization And Output Diagnostics
+
+`E1701` invalid output path.
+
+`E1702` output exists and overwrite is false.
+
+`E1703` output directory unavailable.
+
+`E1704` write failed.
+
+`E1705` unsupported output format.
+
+`E1706` stdout unavailable.
+
+`E1707` overwrite is not supported for this sink.
+
+`E1708` manifest write failed.
+
+`E1709` output encoding failed.
+
+`E1710` output row or byte limit exceeded.
+
+### 20.10 Data Source Runtime Diagnostics
+
+`E1801` source file not found.
+
+`E1802` source file unreadable.
+
+`E1803` source encoding invalid.
+
+`E1804` row parse failed.
+
+`E1805` source schema mismatch.
+
+`E1806` stdin unavailable.
+
+`E1807` stream sniffing failed.
+
+`E1808` unsupported Parquet logical type.
+
+`E1809` CSV header missing.
+
+`E1810` duplicate source column.
+
+`E1811` row width does not match header width.
+
+`E1812` source format parse failed.
+
+`E1813` JSON Lines row is not an object.
+
+`E1814` unsupported Arrow schema.
+
+`E1815` unsupported Parquet column type.
+
+`E1816` source path is outside allowed roots.
+
+`E1817` source fingerprint changed during preparation.
+
+`E1818` source schema unavailable.
+
+### 20.11 Algraf Interop Diagnostics
+
+`E1901` Algraf handoff format unsupported.
+
+`E1902` Algraf interop manifest failed.
+
+`E1903` Algraf handoff stream format conflict.
+
+`E1904` Algraf handoff path invalid.
+
+`E1905` Algraf consumer format could not be inferred.
+
+### 20.12 Warning Diagnostics
+
+`W2001` active grouping state was not consumed by `agg`.
+
+`W2002` ambiguous quoted token.
+
+`W2003` dropping all columns.
+
+`W2004` `limit` follows a stage with unstable order.
+
+`W2005` format sniffing used a fallback.
+
+`W2006` unsupported optional construct was ignored.
+
+`W2007` rows were dropped due to missing values.
+
+`W2008` default null ordering was applied.
+
+`W2009` output overwrite was requested.
+
+`W2010` schema is provisional.
+
+`W2011` stage may require full materialization.
+
+`W2012` source format was inferred from extension only.
+
+### 20.13 Hint Diagnostics
+
+`H3001` use `col(...)` or `lit(...)` to disambiguate a quoted token.
+
+`H3002` add `agg` after `group_by`.
+
+`H3003` add `sort` before `limit` for deterministic top-N output.
+
+`H3004` add an explicit `format` clause.
+
+`H3005` add a tie-breaker column to window `order_by`.
+
+`H3006` use `arrow-stream` for Algraf handoff.
+
+`H3007` use `--stdout-format` when piping data.
+
+`H3008` add `as` to avoid an output column collision.
+
+`H3009` use the canonical lowercase format name.
+
+`H3010` add an explicit overwrite option when replacing files.
+
+### 20.14 Internal Runtime Diagnostics
+
+`R4001` internal invariant violation.
+
+`R4002` execution engine error not attributable to source.
+
+`R4003` dataframe backend error was not classified.
+
+`R4004` serialization adapter failure.
+
+`R4005` LSP document cache inconsistency.
+
+`R4006` WASM host ABI contract violation.
+
+`R4007` diagnostic code is not registered.
+
+`R4008` preview execution budget exceeded after planning.
+
+Internal diagnostics SHOULD NOT be used when an author-facing `E`, `W`, or `H`
+code can describe the condition.
 
 ## 21. Testing Strategy
 
@@ -3327,7 +3777,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.2.0.
+PDL source does not require an explicit version declaration in draft 0.3.0.
 
 The implementation SHOULD report supported language version.
 
@@ -3410,8 +3860,19 @@ UnaryExpr        ::= ("not" | "!" | "-") UnaryExpr | PrimaryExpr ;
 PrimaryExpr      ::= Literal
                    | ColumnToken
                    | Ident
+                   | WindowExpr
                    | CallExpr
                    | "(" ValueExpr ")" ;
+WindowExpr       ::= CallExpr "over" "(" WindowSpec ")" ;
+WindowSpec       ::= PartitionClause? OrderClause? WindowFrame? ;
+PartitionClause  ::= "partition_by" ColumnRef ("," ColumnRef)* ;
+OrderClause      ::= "order_by" SortItem ("," SortItem)* ;
+WindowFrame      ::= "rows" "between" FrameBound "and" FrameBound ;
+FrameBound       ::= "unbounded_preceding"
+                   | IntLiteral "preceding"
+                   | "current_row"
+                   | IntLiteral "following"
+                   | "unbounded_following" ;
 CallExpr         ::= Ident "(" ArgList? ")" ;
 ArgList          ::= ValueExpr ("," ValueExpr)* ;
 ColumnRef        ::= StringToken | CallExpr ;

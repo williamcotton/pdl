@@ -1,6 +1,6 @@
 # PDL v0.2 Plan
 
-Status: Active
+Status: Shipped
 Target version: 0.2.0
 
 ## Release Thesis
@@ -57,6 +57,8 @@ navigation while keeping the VS Code extension as a thin client.
 - Full Parquet, Arrow IPC file, and JSON Lines parity.
 - Stdin stream sniffing beyond the first stream interop slice.
 - `mutate`, `join`, `union`, and `distinct`.
+- Window expressions, including partitioned ranks, offsets, and running
+  aggregates.
 - Manifests, `schema`, `plan`, `fmt`, `ast`, and `ir` subcommands.
 - WASM and browser demo behavior.
 - Full Polars-backed native dataframe execution and optimization.

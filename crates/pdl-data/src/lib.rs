@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use pdl_core::{Diagnostic, Span};
+use pdl_core::{codes, Diagnostic, Span};
 use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
@@ -205,7 +205,7 @@ pub struct SortSpec {
 pub fn read_csv_schema(path: &Path) -> Result<Vec<String>, Diagnostic> {
     let file = File::open(path).map_err(|error| {
         Diagnostic::error(
-            "P1801",
+            codes::E1801,
             format!(
                 "source file `{}` could not be opened: {error}",
                 path.display()
@@ -218,7 +218,7 @@ pub fn read_csv_schema(path: &Path) -> Result<Vec<String>, Diagnostic> {
         .from_reader(BufReader::new(file));
     let headers = reader.headers().map_err(|error| {
         Diagnostic::error(
-            "P1804",
+            codes::E1804,
             format!("CSV header parse failed for `{}`: {error}", path.display()),
             Span::zero(),
         )
@@ -229,7 +229,7 @@ pub fn read_csv_schema(path: &Path) -> Result<Vec<String>, Diagnostic> {
 pub fn read_csv(path: &Path) -> Result<Table, Diagnostic> {
     let file = File::open(path).map_err(|error| {
         Diagnostic::error(
-            "P1801",
+            codes::E1801,
             format!(
                 "source file `{}` could not be opened: {error}",
                 path.display()
@@ -242,7 +242,7 @@ pub fn read_csv(path: &Path) -> Result<Table, Diagnostic> {
         .from_reader(BufReader::new(file));
     let headers = reader.headers().map_err(|error| {
         Diagnostic::error(
-            "P1804",
+            codes::E1804,
             format!("CSV header parse failed for `{}`: {error}", path.display()),
             Span::zero(),
         )
@@ -253,7 +253,7 @@ pub fn read_csv(path: &Path) -> Result<Table, Diagnostic> {
     for record in reader.records() {
         let record = record.map_err(|error| {
             Diagnostic::error(
-                "P1804",
+                codes::E1804,
                 format!("CSV row parse failed for `{}`: {error}", path.display()),
                 Span::zero(),
             )
@@ -269,7 +269,7 @@ pub fn read_csv(path: &Path) -> Result<Table, Diagnostic> {
 pub fn write_csv(path: &Path, table: &Table) -> Result<(), Diagnostic> {
     let file = File::create(path).map_err(|error| {
         Diagnostic::error(
-            "P1704",
+            codes::E1704,
             format!(
                 "output file `{}` could not be created: {error}",
                 path.display()
@@ -293,7 +293,7 @@ fn write_csv_to_writer<W: Write>(writer: W, table: &Table) -> Result<(), Diagnos
         .from_writer(writer);
     writer.write_record(&table.columns).map_err(|error| {
         Diagnostic::error(
-            "P1704",
+            codes::E1704,
             format!("CSV header write failed: {error}"),
             Span::zero(),
         )
@@ -302,14 +302,18 @@ fn write_csv_to_writer<W: Write>(writer: W, table: &Table) -> Result<(), Diagnos
         let record: Vec<String> = row.values.iter().map(Value::to_csv_cell).collect();
         writer.write_record(record).map_err(|error| {
             Diagnostic::error(
-                "P1704",
+                codes::E1704,
                 format!("CSV row write failed: {error}"),
                 Span::zero(),
             )
         })?;
     }
     writer.flush().map_err(|error| {
-        Diagnostic::error("P1704", format!("CSV flush failed: {error}"), Span::zero())
+        Diagnostic::error(
+            codes::E1704,
+            format!("CSV flush failed: {error}"),
+            Span::zero(),
+        )
     })
 }
 

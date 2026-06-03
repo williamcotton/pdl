@@ -1,4 +1,4 @@
-use pdl_core::{has_errors, Diagnostic};
+use pdl_core::{codes, has_errors, Diagnostic};
 use pdl_data::read_csv_schema;
 use pdl_semantics::{analyze_program, Analysis, LoadRequest};
 use pdl_syntax::{parse, ParseResult, Program, SourceRef};
@@ -29,7 +29,7 @@ pub fn prepare_file(path: impl AsRef<Path>) -> Result<PreparedProgram, Diagnosti
     let path = path.as_ref().to_path_buf();
     let source = fs::read_to_string(&path).map_err(|error| {
         Diagnostic::error(
-            "P1802",
+            codes::E1802,
             format!("could not read PDL file `{}`: {error}", path.display()),
             pdl_core::Span::zero(),
         )
@@ -89,14 +89,14 @@ fn load_schema_for_request(
             if let Some(format) = &request.load.format {
                 if format.value != "csv" {
                     return Err(Diagnostic::error(
-                        "P1215",
-                        format!("format `{}` is not supported in 0.2.0", format.value),
+                        codes::E1215,
+                        format!("format `{}` is not supported in 0.3.0", format.value),
                         format.span,
                     ));
                 }
             } else if !path.value.ends_with(".csv") {
                 return Err(Diagnostic::error(
-                    "P1216",
+                    codes::E1216,
                     format!("could not infer supported format for `{}`", path.value),
                     path.span,
                 ));
@@ -104,8 +104,8 @@ fn load_schema_for_request(
             read_csv_schema(&base_dir.join(&path.value))
         }
         SourceRef::Stdin(span) => Err(Diagnostic::error(
-            "P1211",
-            "stdin loading is deferred in 0.2.0",
+            codes::E1211,
+            "stdin loading is deferred in 0.3.0",
             *span,
         )),
     }
