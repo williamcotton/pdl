@@ -995,13 +995,13 @@ impl<'a> Parser<'a> {
             let mut item_end = column.span.end;
             let direction = self.parse_sort_direction(&mut item_end);
             let nulls = self.parse_sort_nulls(&mut item_end);
-            if !self.at_sort_item_boundary() {
+            if !self.at_sort_item_boundary_after(item_end) {
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1214,
                     "malformed sort item",
                     self.current().span,
                 ));
-                while !self.at_sort_item_boundary() {
+                while !self.at_sort_item_boundary_after(item_end) {
                     item_end = self.advance().span.end;
                 }
             }
@@ -1021,6 +1021,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_sort_direction(&mut self, item_end: &mut usize) -> SortDirection {
+        if self.at_pipeline_boundary_after(*item_end) {
+            return SortDirection::Asc;
+        }
+
         let token = self.current().clone();
         match token.kind {
             TokenKind::Ident(value) if value == "desc" => {
@@ -1049,6 +1053,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_sort_nulls(&mut self, item_end: &mut usize) -> Option<NullsOrder> {
+        if self.at_pipeline_boundary_after(*item_end) {
+            return None;
+        }
+
         let token = self.current().clone();
         match token.kind {
             TokenKind::Ident(value) if value == "nulls_first" => {
@@ -1786,11 +1794,11 @@ impl<'a> Parser<'a> {
         matches!(self.current().kind, TokenKind::Pipe | TokenKind::Eof)
     }
 
-    fn at_sort_item_boundary(&self) -> bool {
+    fn at_sort_item_boundary_after(&self, item_end: usize) -> bool {
         matches!(
             self.current().kind,
             TokenKind::Comma | TokenKind::Pipe | TokenKind::Eof
-        )
+        ) || self.at_pipeline_boundary_after(item_end)
     }
 
     fn at_window_sort_item_boundary(&self) -> bool {
@@ -1802,6 +1810,11 @@ impl<'a> Parser<'a> {
 
     fn at_recoverable_stage_start(&self) -> bool {
         matches!(&self.current().kind, TokenKind::Ident(value) if is_recoverable_stage_name(value))
+    }
+
+    fn at_pipeline_boundary_after(&self, end: usize) -> bool {
+        matches!(self.current().kind, TokenKind::Ident(_))
+            && !self.current_is_on_same_line_after_end(end)
     }
 
     fn current(&self) -> &Token {
@@ -1835,7 +1848,11 @@ impl<'a> Parser<'a> {
     }
 
     fn current_is_on_same_line_after(&self, span: Span) -> bool {
-        !self.source[span.end..self.current().span.start].contains('\n')
+        self.current_is_on_same_line_after_end(span.end)
+    }
+
+    fn current_is_on_same_line_after_end(&self, end: usize) -> bool {
+        !self.source[end..self.current().span.start].contains('\n')
     }
 
     fn consume_until_stage_boundary(&mut self, start: Span) -> Span {
@@ -1968,6 +1985,36 @@ mod tests {
             result.diagnostics[0].span.start,
             source.find("des").expect("direction offset")
         );
+    }
+
+    #[test]
+    fn parses_binding_ending_in_sort_before_main_binding_reference() {
+        let result = parse(
+            r#"let cleaned =
+  load "orders_raw.csv"
+    | sort "order_date"
+
+cleaned
+  | group_by "region"
+  | agg count() as "orders""#,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.program.bindings.len(), 1);
+        let binding = &result.program.bindings[0];
+        let Stage::Sort { items, .. } = binding.pipeline.stages.last().expect("binding sort stage")
+        else {
+            panic!("sort stage");
+        };
+        assert_eq!(items[0].column.value, "order_date");
+        assert_eq!(items[0].direction, SortDirection::Asc);
+
+        let main = result.program.main.expect("main pipeline");
+        assert!(matches!(
+            main.start,
+            PipelineStart::Binding(Spanned { ref value, .. }) if value == "cleaned"
+        ));
+        assert_eq!(main.stages.len(), 2);
     }
 
     #[test]

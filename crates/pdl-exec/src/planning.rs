@@ -40,7 +40,7 @@ pub fn plan_prepared(
         let Some(data_format) = DataFormat::from_name(format) else {
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
-                format!("stdout format `{format}` is not supported in 0.19.0"),
+                format!("stdout format `{format}` is not supported in 0.20.0"),
                 Span::zero(),
             ));
             return Err(diagnostics);
@@ -49,7 +49,7 @@ pub fn plan_prepared(
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
                 format!(
-                    "stdout format `{}` is not supported in 0.19.0",
+                    "stdout format `{}` is not supported in 0.20.0",
                     data_format.canonical_name()
                 ),
                 Span::zero(),

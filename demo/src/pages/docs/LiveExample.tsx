@@ -1,5 +1,5 @@
 import React from "react";
-import { AlertCircle, CheckCircle2, Code2, LoaderCircle, Play, Table2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Code2, Database, LoaderCircle, Play, Table2 } from "lucide-react";
 
 import { PdlEditor } from "../../PdlEditor";
 import type { PdlEditorDiagnostic, PdlRunResult } from "../../pdlWasm";
@@ -31,6 +31,17 @@ export function LiveExample({
   const [snapshot, setSnapshot] = React.useState<RunSnapshot | null>(null);
   const [running, setRunning] = React.useState(false);
   const filesSignature = React.useMemo(() => stableFilesSignature(files), [files]);
+  const inputFiles = React.useMemo(
+    () => Object.keys(files).sort((left, right) => left.localeCompare(right)),
+    [files],
+  );
+  const [activeInputFile, setActiveInputFile] = React.useState(inputFiles[0] ?? "");
+
+  React.useEffect(() => {
+    if (!inputFiles.includes(activeInputFile)) {
+      setActiveInputFile(inputFiles[0] ?? "");
+    }
+  }, [activeInputFile, inputFiles]);
 
   const runCurrent = React.useCallback(() => {
     if (!runtime) {
@@ -83,13 +94,15 @@ export function LiveExample({
   const runtimeDiagnostics = result?.diagnostics ?? [];
   const output = result?.stdout ?? "";
   const outputDetail = output ? outputStats(output, stdoutFormat) : "Awaiting output";
+  const inputText = activeInputFile ? files[activeInputFile] ?? "" : "";
+  const inputDetail = activeInputFile ? inputStats(inputText, activeInputFile) : "No input files";
   const hasError =
     Boolean(result?.error) ||
     runtimeDiagnostics.some((diagnostic) => diagnostic.severity === "error") ||
     editorDiagnostics.some((diagnostic) => diagnostic.severity === "error");
 
   return (
-    <div className="tutorial-live-pair">
+    <div className="tutorial-live-grid">
       <section className="tutorial-example-panel tutorial-example-editor-panel">
         <div className="mini-panel-header">
           <span>
@@ -111,6 +124,35 @@ export function LiveExample({
             value={value}
           />
         </div>
+      </section>
+
+      <section className="tutorial-example-panel tutorial-example-input-panel">
+        <div className="mini-panel-header">
+          <span>
+            <Database size={16} aria-hidden="true" />
+            Input data
+          </span>
+          <span className="mini-status">{inputDetail}</span>
+        </div>
+        {inputFiles.length > 1 ? (
+          <div className="file-tabs" role="tablist" aria-label="Input files">
+            {inputFiles.map((name) => (
+              <button
+                aria-selected={name === activeInputFile}
+                className={`file-tab ${name === activeInputFile ? "file-tab-active" : ""}`}
+                key={name}
+                onClick={() => setActiveInputFile(name)}
+                role="tab"
+                type="button"
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <pre className={`tutorial-input-stage ${inputText ? "" : "tutorial-output-empty"}`}>
+          {inputText || "No input data"}
+        </pre>
       </section>
 
       <section className="tutorial-example-panel tutorial-example-output-panel">
@@ -190,6 +232,30 @@ function outputStats(text: string, format: string): string {
   }
   const columns = lines[0]?.split(",").length ?? 0;
   return `${Math.max(0, lines.length - 1)} rows, ${columns} cols`;
+}
+
+function inputStats(text: string, file: string): string {
+  if (!text.trim()) {
+    return "Empty file";
+  }
+  if (file.endsWith(".jsonl") || file.endsWith(".ndjson")) {
+    const rows = text.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
+    return `${rows} JSON Lines row${rows === 1 ? "" : "s"}, ${formatBytes(text.length)}`;
+  }
+  const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const rows = Math.max(0, lines.length - 1);
+  const columns = lines[0]?.split(",").length ?? 0;
+  return `${rows} rows, ${columns} cols, ${formatBytes(text.length)}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${bytes} B`;
 }
 
 function stableFilesSignature(files: Record<string, string>): string {

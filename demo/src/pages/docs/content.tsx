@@ -254,22 +254,91 @@ load "daily_orders_2026_02_01.csv"
     title: "Window analytics",
     lede: (
       <>
-        Window expressions are row-preserving analytics inside <Code>mutate</Code>. They compute over
-        partitions, ordering, and optional row frames without collapsing the table.
+        Window expressions add analytics without collapsing the table. Use them when each input row should
+        stay visible, but each row needs context from related rows, such as customer totals, regional ranks,
+        running sums, previous values, or first and last values.
       </>
     ),
     sections: [
       {
-        id: "customer-metrics",
-        title: "Customer and region metrics",
+        id: "one-window",
+        title: "Step 1: rank one table",
         body: (
-          <p>
-            Windowed <Code>row_number</Code>, <Code>sum</Code>, and <Code>dense_rank</Code> add analytic
-            columns while retaining each completed sale.
-          </p>
+          <>
+            <p>
+              Start with the smallest useful window: one calculation over the whole filtered table. This
+              pipeline keeps completed sales, then adds <Code>sale_rank</Code> with{" "}
+              <Code>row_number()</Code>.
+            </p>
+            <ol>
+              <li>
+                <Code>row_number()</Code> is the calculation. It writes <Code>1</Code>, <Code>2</Code>,{" "}
+                <Code>3</Code>, and so on.
+              </li>
+              <li>
+                <Code>over (...)</Code> says this is a window expression instead of a plain scalar
+                function.
+              </li>
+              <li>
+                <Code>order_by "amount" desc</Code> tells the window how to rank the rows: largest sale
+                first.
+              </li>
+              <li>
+                There is no <Code>partition_by</Code> yet, so all completed sales share one window.
+              </li>
+            </ol>
+            <p>
+              Notice the final <Code>sort "sale_rank"</Code>. The window's <Code>order_by</Code> controls
+              the calculation, while a pipeline <Code>sort</Code> controls how the output is displayed.
+            </p>
+          </>
         ),
         example: {
-          id: "windows-customer-metrics",
+          id: "windows-one-table-rank",
+          files: SALES_FILES,
+          source: `load "sales.csv"
+  | filter "status" == "completed"
+  | mutate
+      "sale_rank" =
+        row_number() over (
+          order_by "amount" desc
+        )
+  | select "region", "customer_id", "amount", "sale_rank"
+  | sort "sale_rank"
+`,
+        },
+      },
+      {
+        id: "partitioned-window",
+        title: "Step 2: restart per customer",
+        body: (
+          <>
+            <p>
+              Add <Code>partition_by</Code> when each group should get its own independent calculation.
+              Here the row number restarts for every <Code>customer_id</Code>.
+            </p>
+            <ol>
+              <li>
+                PDL first forms one customer partition for <Code>C001</Code>, one for <Code>C003</Code>,
+                and so on.
+              </li>
+              <li>
+                Inside each customer partition, <Code>order_by "amount" desc</Code> puts that customer's
+                largest completed sale first.
+              </li>
+              <li>
+                <Code>row_number()</Code> then writes <Code>1</Code>, <Code>2</Code>, and so on within
+                that customer only.
+              </li>
+            </ol>
+            <p>
+              Customer <Code>C001</Code> has two completed sales in the input. In the output, only those
+              two rows share the same numbering sequence.
+            </p>
+          </>
+        ),
+        example: {
+          id: "windows-partitioned-rank",
           files: SALES_FILES,
           source: `load "sales.csv"
   | filter "status" == "completed"
@@ -278,11 +347,94 @@ load "daily_orders_2026_02_01.csv"
         row_number() over (
           partition_by "customer_id"
           order_by "amount" desc
+        )
+  | select "customer_id", "amount", "customer_sale_number"
+  | sort "customer_id", "customer_sale_number"
+`,
+        },
+      },
+      {
+        id: "partition-totals",
+        title: "Step 3: add totals without collapsing rows",
+        body: (
+          <>
+            <p>
+              A grouped aggregate answers one row per group. A window aggregate answers the same question,
+              then repeats the answer on every row in the partition. That is the main reason windows are
+              useful during cleanup and feature engineering.
+            </p>
+            <ol>
+              <li>
+                <Code>sum("amount") over (partition_by "customer_id")</Code> gives each row that
+                customer's total completed revenue.
+              </li>
+              <li>
+                <Code>sum("amount") over (partition_by "region")</Code> gives each row that region's total
+                completed revenue.
+              </li>
+              <li>
+                There is no <Code>order_by</Code> here because a full-partition total does not care about
+                row order.
+              </li>
+            </ol>
+            <p>
+              Compare the input and output: every completed sale remains present, but each row now carries
+              extra context from the rows around it.
+            </p>
+          </>
         ),
+        example: {
+          id: "windows-partition-totals",
+          files: SALES_FILES,
+          source: `load "sales.csv"
+  | filter "status" == "completed"
+  | mutate
       "customer_revenue" =
         sum("amount") over (
           partition_by "customer_id"
         ),
+      "region_revenue" =
+        sum("amount") over (
+          partition_by "region"
+        )
+  | select
+      "region",
+      "customer_id",
+      "amount",
+      "customer_revenue",
+      "region_revenue"
+  | sort "region", "customer_id", "amount" desc
+`,
+        },
+      },
+      {
+        id: "rank-derived-total",
+        title: "Step 4: use a window result in the next stage",
+        body: (
+          <>
+            <p>
+              Assignments inside one <Code>mutate</Code> stage are parallel. If a second window expression
+              needs a column you just created, put it in the next <Code>mutate</Code>.
+            </p>
+            <ol>
+              <li>
+                The first <Code>mutate</Code> creates <Code>region_revenue</Code> on every completed sale.
+              </li>
+              <li>
+                The second <Code>mutate</Code> ranks rows by that new <Code>region_revenue</Code> value.
+              </li>
+              <li>
+                <Code>dense_rank()</Code> gives tied rows the same rank and does not leave gaps after ties.
+              </li>
+            </ol>
+          </>
+        ),
+        example: {
+          id: "windows-rank-derived-total",
+          files: SALES_FILES,
+          source: `load "sales.csv"
+  | filter "status" == "completed"
+  | mutate
       "region_revenue" =
         sum("amount") over (
           partition_by "region"
@@ -296,10 +448,72 @@ load "daily_orders_2026_02_01.csv"
       "region",
       "customer_id",
       "amount",
-      "customer_sale_number",
-      "customer_revenue",
+      "region_revenue",
       "region_revenue_rank"
   | sort "region_revenue_rank", "customer_id", "amount" desc
+`,
+        },
+      },
+      {
+        id: "running-frames",
+        title: "Step 5: running frames and previous rows",
+        body: (
+          <>
+            <p>
+              Add a row frame when the calculation should see only part of the ordered partition. This is
+              how you get running totals, moving averages, and other row-by-row accumulations.
+            </p>
+            <ol>
+              <li>
+                <Code>partition_by "customer_id"</Code> keeps each customer's running total separate.
+              </li>
+              <li>
+                <Code>order_by "amount" desc</Code> gives each customer a stable sequence.
+              </li>
+              <li>
+                <Code>rows between unbounded_preceding and current_row</Code> means "from the first row in
+                this ordered customer partition through this row."
+              </li>
+              <li>
+                <Code>lag("amount")</Code> uses the same partition and order, then reads the previous row's
+                amount.
+              </li>
+            </ol>
+            <p>
+              A blank previous amount means the row is first in its customer partition, so there is no
+              earlier row to read.
+            </p>
+          </>
+        ),
+        example: {
+          id: "windows-running-frames",
+          files: SALES_FILES,
+          source: `load "sales.csv"
+  | filter "status" == "completed"
+  | mutate
+      "sale_rank" =
+        row_number() over (
+          partition_by "customer_id"
+          order_by "amount" desc
+        ),
+      "running_customer_revenue" =
+        sum("amount") over (
+          partition_by "customer_id"
+          order_by "amount" desc
+          rows between unbounded_preceding and current_row
+        ),
+      "previous_sale_amount" =
+        lag("amount") over (
+          partition_by "customer_id"
+          order_by "amount" desc
+        )
+  | select
+      "customer_id",
+      "amount",
+      "sale_rank",
+      "running_customer_revenue",
+      "previous_sale_amount"
+  | sort "customer_id", "sale_rank"
 `,
         },
       },

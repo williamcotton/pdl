@@ -314,6 +314,7 @@ button {
 }
 
 .mini-output-stage,
+.tutorial-input-stage,
 .tutorial-output-stage,
 .output-stage {
   min-height: 0;
@@ -560,6 +561,23 @@ button {
   line-height: 1.68;
 }
 
+.docs-prose ol,
+.docs-prose ul {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  padding-left: 22px;
+  color: #4d595f;
+  font-size: 0.95rem;
+  line-height: 1.62;
+}
+
+.docs-prose li::marker {
+  color: #215d68;
+  font-weight: 760;
+}
+
 .doc-inline-code {
   padding: 1px 5px;
   border: 1px solid #e0e6ea;
@@ -622,11 +640,16 @@ button {
   font-size: 0.96rem;
 }
 
-.tutorial-live-pair {
+.tutorial-live-grid {
   display: grid;
-  grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
+  grid-template-columns: minmax(360px, 1.05fr) minmax(300px, 0.95fr);
+  grid-template-rows: minmax(245px, 1fr) minmax(245px, 1fr);
   gap: 12px;
-  min-height: 430px;
+  min-height: 560px;
+}
+
+.tutorial-example-editor-panel {
+  grid-row: 1 / span 2;
 }
 
 .tutorial-example-panel {
@@ -649,6 +672,7 @@ button {
   height: 100%;
 }
 
+.tutorial-input-stage,
 .tutorial-output-stage {
   padding: 14px;
 }
@@ -1067,7 +1091,7 @@ button {
   }
 
   .hero-demo-tool,
-  .tutorial-live-pair,
+  .tutorial-live-grid,
   .language-highlights {
     grid-template-columns: 1fr;
   }
@@ -1101,13 +1125,23 @@ button {
     font-size: 1.85rem;
   }
 
-  .tutorial-live-pair {
+  .tutorial-live-grid {
+    grid-template-rows: auto;
     min-height: 0;
   }
 
+  .tutorial-example-editor-panel {
+    grid-row: auto;
+  }
+
   .tutorial-example-editor-panel,
+  .tutorial-example-input-panel,
   .tutorial-example-output-panel {
-    min-height: 420px;
+    min-height: 360px;
+  }
+
+  .tutorial-example-input-panel {
+    min-height: 260px;
   }
 
   .hero-demo-tool {
