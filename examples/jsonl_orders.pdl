@@ -1,0 +1,4 @@
+load "orders.jsonl"
+  | filter "status" == "completed"
+  | select "order_id", "region", "amount"
+  | sort "order_id"

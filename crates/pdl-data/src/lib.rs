@@ -4,6 +4,9 @@ pub mod csv;
 pub mod engine;
 pub mod format;
 pub mod frame;
+pub mod jsonl;
+#[cfg(feature = "parquet")]
+pub mod parquet;
 pub mod schema;
 pub mod value;
 

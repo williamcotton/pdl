@@ -431,6 +431,30 @@ mod tests {
     }
 
     #[test]
+    fn run_json_executes_against_in_memory_json_lines_bytes() {
+        let request = serde_json::json!({
+            "source": r#"load "sales.jsonl"
+  | filter "status" == "completed"
+  | select "region", "amount"
+  | sort "amount" desc"#,
+            "files": {
+                "sales.jsonl": "{\"region\":\"North\",\"status\":\"completed\",\"amount\":120}\n{\"region\":\"South\",\"status\":\"pending\",\"amount\":75}\n{\"region\":\"West\",\"status\":\"completed\",\"amount\":200}\n"
+            },
+            "stdout_format": "jsonl"
+        });
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&run_json(&request.to_string())).expect("json");
+
+        assert!(payload["error"].is_null(), "{payload}");
+        assert_eq!(
+            payload["stdout"],
+            "{\"region\":\"West\",\"amount\":200}\n{\"region\":\"North\",\"amount\":120}\n"
+        );
+        assert_eq!(payload["diagnostics"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
     fn run_json_rejects_arrow_stdout_with_registered_diagnostic() {
         let request = serde_json::json!({
             "source": r#"load "sales.csv""#,
@@ -446,9 +470,11 @@ mod tests {
         assert!(payload["error"].is_null(), "{payload}");
         assert!(payload["stdout"].is_null(), "{payload}");
         assert_eq!(payload["diagnostics"][0]["code"], "E1705");
-        assert_eq!(
-            payload["diagnostics"][0]["message"],
-            "Arrow IPC stream stdout is not supported by this host"
+        assert!(
+            payload["diagnostics"][0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("arrow-stream")),
+            "{payload}"
         );
     }
 

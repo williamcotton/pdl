@@ -4,10 +4,18 @@ use std::path::Path;
 
 #[cfg(feature = "arrow-ipc")]
 use crate::arrow::{
-    read_arrow_stream_from_bytes, read_arrow_stream_schema_from_bytes, write_arrow_stream_to_vec,
+    read_arrow_file_from_bytes, read_arrow_file_schema_from_bytes, read_arrow_stream_from_bytes,
+    read_arrow_stream_schema_from_bytes, write_arrow_file_to_vec, write_arrow_stream_to_vec,
 };
 use crate::csv::{read_csv_from_bytes, read_csv_schema_from_bytes};
 use crate::frame::Table;
+use crate::jsonl::{
+    read_json_lines_from_bytes, read_json_lines_schema_from_bytes, write_json_lines_to_vec,
+};
+#[cfg(feature = "parquet")]
+use crate::parquet::{
+    read_parquet_from_bytes, read_parquet_schema_from_bytes, write_parquet_to_vec,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DataFormat {
@@ -57,17 +65,26 @@ impl DataFormat {
     pub fn is_supported_input(self) -> bool {
         match self {
             DataFormat::Csv => true,
-            DataFormat::ArrowStream => cfg!(feature = "arrow-ipc"),
-            DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::JsonLines => false,
+            DataFormat::ArrowFile | DataFormat::ArrowStream => cfg!(feature = "arrow-ipc"),
+            DataFormat::Parquet => cfg!(feature = "parquet"),
+            DataFormat::JsonLines => true,
         }
     }
 
     pub fn is_supported_output(self) -> bool {
         match self {
             DataFormat::Csv => true,
-            DataFormat::ArrowStream => cfg!(feature = "arrow-ipc"),
-            DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::JsonLines => false,
+            DataFormat::ArrowFile | DataFormat::ArrowStream => cfg!(feature = "arrow-ipc"),
+            DataFormat::Parquet => cfg!(feature = "parquet"),
+            DataFormat::JsonLines => true,
         }
+    }
+
+    pub fn is_binary(self) -> bool {
+        matches!(
+            self,
+            DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::ArrowStream
+        )
     }
 }
 
@@ -103,9 +120,10 @@ pub fn read_schema_from_bytes(
 ) -> Result<Vec<String>, Diagnostic> {
     match format {
         DataFormat::Csv => read_csv_schema_from_bytes(path, bytes),
-        #[cfg(feature = "arrow-ipc")]
-        DataFormat::ArrowStream => read_arrow_stream_schema_from_bytes(path, bytes),
-        _ => Err(unsupported_input_format(format)),
+        DataFormat::Parquet => read_parquet_schema(path, format, bytes),
+        DataFormat::ArrowFile => read_arrow_file_schema(path, format, bytes),
+        DataFormat::ArrowStream => read_arrow_stream_schema(path, format, bytes),
+        DataFormat::JsonLines => read_json_lines_schema_from_bytes(path, bytes),
     }
 }
 
@@ -116,19 +134,158 @@ pub fn read_table_from_bytes(
 ) -> Result<Table, Diagnostic> {
     match format {
         DataFormat::Csv => read_csv_from_bytes(path, bytes),
-        #[cfg(feature = "arrow-ipc")]
-        DataFormat::ArrowStream => read_arrow_stream_from_bytes(path, bytes),
-        _ => Err(unsupported_input_format(format)),
+        DataFormat::Parquet => read_parquet_table(path, format, bytes),
+        DataFormat::ArrowFile => read_arrow_file_table(path, format, bytes),
+        DataFormat::ArrowStream => read_arrow_stream_table(path, format, bytes),
+        DataFormat::JsonLines => read_json_lines_from_bytes(path, bytes),
     }
 }
 
 pub fn write_table_to_bytes(format: DataFormat, table: &Table) -> Result<Vec<u8>, Diagnostic> {
     match format {
         DataFormat::Csv => crate::csv::write_csv_to_vec(table),
-        #[cfg(feature = "arrow-ipc")]
-        DataFormat::ArrowStream => write_arrow_stream_to_vec(table),
-        _ => Err(unsupported_output_format(format)),
+        DataFormat::Parquet => write_parquet_bytes(format, table),
+        DataFormat::ArrowFile => write_arrow_file_bytes(format, table),
+        DataFormat::ArrowStream => write_arrow_stream_bytes(format, table),
+        DataFormat::JsonLines => write_json_lines_to_vec(table),
     }
+}
+
+#[cfg(feature = "parquet")]
+fn read_parquet_schema(
+    path: &Path,
+    _format: DataFormat,
+    bytes: &[u8],
+) -> Result<Vec<String>, Diagnostic> {
+    read_parquet_schema_from_bytes(path, bytes)
+}
+
+#[cfg(not(feature = "parquet"))]
+fn read_parquet_schema(
+    _path: &Path,
+    format: DataFormat,
+    _bytes: &[u8],
+) -> Result<Vec<String>, Diagnostic> {
+    Err(unsupported_input_format(format))
+}
+
+#[cfg(feature = "parquet")]
+fn read_parquet_table(path: &Path, _format: DataFormat, bytes: &[u8]) -> Result<Table, Diagnostic> {
+    read_parquet_from_bytes(path, bytes)
+}
+
+#[cfg(not(feature = "parquet"))]
+fn read_parquet_table(
+    _path: &Path,
+    format: DataFormat,
+    _bytes: &[u8],
+) -> Result<Table, Diagnostic> {
+    Err(unsupported_input_format(format))
+}
+
+#[cfg(feature = "parquet")]
+fn write_parquet_bytes(format: DataFormat, table: &Table) -> Result<Vec<u8>, Diagnostic> {
+    let _ = format;
+    write_parquet_to_vec(table)
+}
+
+#[cfg(not(feature = "parquet"))]
+fn write_parquet_bytes(format: DataFormat, _table: &Table) -> Result<Vec<u8>, Diagnostic> {
+    Err(unsupported_output_format(format))
+}
+
+#[cfg(feature = "arrow-ipc")]
+fn read_arrow_file_schema(
+    path: &Path,
+    _format: DataFormat,
+    bytes: &[u8],
+) -> Result<Vec<String>, Diagnostic> {
+    read_arrow_file_schema_from_bytes(path, bytes)
+}
+
+#[cfg(not(feature = "arrow-ipc"))]
+fn read_arrow_file_schema(
+    _path: &Path,
+    format: DataFormat,
+    _bytes: &[u8],
+) -> Result<Vec<String>, Diagnostic> {
+    Err(unsupported_input_format(format))
+}
+
+#[cfg(feature = "arrow-ipc")]
+fn read_arrow_file_table(
+    path: &Path,
+    _format: DataFormat,
+    bytes: &[u8],
+) -> Result<Table, Diagnostic> {
+    read_arrow_file_from_bytes(path, bytes)
+}
+
+#[cfg(not(feature = "arrow-ipc"))]
+fn read_arrow_file_table(
+    _path: &Path,
+    format: DataFormat,
+    _bytes: &[u8],
+) -> Result<Table, Diagnostic> {
+    Err(unsupported_input_format(format))
+}
+
+#[cfg(feature = "arrow-ipc")]
+fn write_arrow_file_bytes(format: DataFormat, table: &Table) -> Result<Vec<u8>, Diagnostic> {
+    let _ = format;
+    write_arrow_file_to_vec(table)
+}
+
+#[cfg(not(feature = "arrow-ipc"))]
+fn write_arrow_file_bytes(format: DataFormat, _table: &Table) -> Result<Vec<u8>, Diagnostic> {
+    Err(unsupported_output_format(format))
+}
+
+#[cfg(feature = "arrow-ipc")]
+fn read_arrow_stream_schema(
+    path: &Path,
+    _format: DataFormat,
+    bytes: &[u8],
+) -> Result<Vec<String>, Diagnostic> {
+    read_arrow_stream_schema_from_bytes(path, bytes)
+}
+
+#[cfg(not(feature = "arrow-ipc"))]
+fn read_arrow_stream_schema(
+    _path: &Path,
+    format: DataFormat,
+    _bytes: &[u8],
+) -> Result<Vec<String>, Diagnostic> {
+    Err(unsupported_input_format(format))
+}
+
+#[cfg(feature = "arrow-ipc")]
+fn read_arrow_stream_table(
+    path: &Path,
+    _format: DataFormat,
+    bytes: &[u8],
+) -> Result<Table, Diagnostic> {
+    read_arrow_stream_from_bytes(path, bytes)
+}
+
+#[cfg(not(feature = "arrow-ipc"))]
+fn read_arrow_stream_table(
+    _path: &Path,
+    format: DataFormat,
+    _bytes: &[u8],
+) -> Result<Table, Diagnostic> {
+    Err(unsupported_input_format(format))
+}
+
+#[cfg(feature = "arrow-ipc")]
+fn write_arrow_stream_bytes(format: DataFormat, table: &Table) -> Result<Vec<u8>, Diagnostic> {
+    let _ = format;
+    write_arrow_stream_to_vec(table)
+}
+
+#[cfg(not(feature = "arrow-ipc"))]
+fn write_arrow_stream_bytes(format: DataFormat, _table: &Table) -> Result<Vec<u8>, Diagnostic> {
+    Err(unsupported_output_format(format))
 }
 
 pub fn write_table_to_path(
@@ -149,6 +306,7 @@ pub fn write_table_to_path(
     })
 }
 
+#[cfg(any(not(feature = "arrow-ipc"), not(feature = "parquet")))]
 fn unsupported_input_format(format: DataFormat) -> Diagnostic {
     Diagnostic::error(
         codes::E1215,
@@ -160,6 +318,7 @@ fn unsupported_input_format(format: DataFormat) -> Diagnostic {
     )
 }
 
+#[cfg(any(not(feature = "arrow-ipc"), not(feature = "parquet")))]
 fn unsupported_output_format(format: DataFormat) -> Diagnostic {
     Diagnostic::error(
         codes::E1705,

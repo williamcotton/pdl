@@ -111,9 +111,9 @@ pub fn plan_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> PlanOutput
 pub fn manifest_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> ManifestJson {
     let stdout_format = plan.stdout_format.map(|format| format.canonical_name());
     ManifestJson {
-        manifest_version: "0.14.0",
+        manifest_version: "0.15.0",
         implementation_version: env!("CARGO_PKG_VERSION"),
-        language_version: "0.14.0",
+        language_version: "0.15.0",
         source_path: prepared.path.display().to_string(),
         driver: driver_plan_json(&prepared.driver_plan),
         execution: execution_plan_json(plan),

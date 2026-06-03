@@ -282,17 +282,17 @@ pub const FORMATS: &[FormatInfo] = &[
     },
     FormatInfo {
         name: "parquet",
-        documentation: "Parquet support is deferred past 0.14.",
-        load_supported: false,
-        save_supported: false,
-        stream_supported: false,
+        documentation: "Parquet; supported for native load, save, stdin, and stdout where the host accepts binary data.",
+        load_supported: true,
+        save_supported: true,
+        stream_supported: true,
     },
     FormatInfo {
         name: "arrow-file",
-        documentation: "Arrow IPC file support is deferred past 0.14.",
-        load_supported: false,
-        save_supported: false,
-        stream_supported: false,
+        documentation: "Arrow IPC file; supported for native load, save, stdin, and stdout where the host accepts binary data.",
+        load_supported: true,
+        save_supported: true,
+        stream_supported: true,
     },
     FormatInfo {
         name: "arrow-stream",
@@ -303,10 +303,10 @@ pub const FORMATS: &[FormatInfo] = &[
     },
     FormatInfo {
         name: "jsonl",
-        documentation: "JSON Lines support is deferred past 0.14.",
-        load_supported: false,
-        save_supported: false,
-        stream_supported: false,
+        documentation: "JSON Lines with one object per non-empty line; supported for load, save, stdin, and stdout.",
+        load_supported: true,
+        save_supported: true,
+        stream_supported: true,
     },
 ];
 

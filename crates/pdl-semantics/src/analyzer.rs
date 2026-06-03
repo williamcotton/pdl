@@ -310,7 +310,7 @@ where
                 Stage::Unsupported { name, .. } => {
                     self.diagnostics.push(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{}` is deferred in 0.14.0", name.value),
+                        format!("stage `{}` is deferred in 0.15.0", name.value),
                         name.span,
                     ));
                 }
@@ -336,7 +336,7 @@ where
             if !format_info(&format.value).is_some_and(|info| info.save_supported) {
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1215,
-                    format!("format `{}` is not supported in 0.14.0", format.value),
+                    format!("format `{}` is not supported in 0.15.0", format.value),
                     format.span,
                 ));
             }

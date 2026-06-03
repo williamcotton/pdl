@@ -4,8 +4,8 @@ use arrow_array::types::{
     UInt64Type, UInt8Type,
 };
 use arrow_array::{Array, ArrayRef, BooleanArray, Float64Array, RecordBatch, StringArray};
-use arrow_ipc::reader::StreamReader;
-use arrow_ipc::writer::StreamWriter;
+use arrow_ipc::reader::{FileReader, StreamReader};
+use arrow_ipc::writer::{FileWriter, StreamWriter};
 use arrow_schema::{DataType, Field, Schema};
 use pdl_core::{codes, Diagnostic, Span};
 use std::io::Cursor;
@@ -39,7 +39,38 @@ pub fn read_arrow_stream_from_bytes(path: &Path, bytes: &[u8]) -> Result<Table, 
 
     for batch in &mut reader {
         let batch = batch.map_err(|error| arrow_read_error(path, error))?;
-        rows.extend(rows_from_batch(path, &batch)?);
+        rows.extend(rows_from_batch(path, "Arrow IPC stream", &batch)?);
+    }
+
+    Ok(Table { columns, rows })
+}
+
+pub fn read_arrow_file_schema_from_bytes(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<Vec<String>, Diagnostic> {
+    let reader = file_reader(path, bytes)?;
+    Ok(reader
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect())
+}
+
+pub fn read_arrow_file_from_bytes(path: &Path, bytes: &[u8]) -> Result<Table, Diagnostic> {
+    let mut reader = file_reader(path, bytes)?;
+    let schema = reader.schema();
+    let columns: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
+    let mut rows = Vec::new();
+
+    for batch in &mut reader {
+        let batch = batch.map_err(|error| arrow_file_read_error(path, error))?;
+        rows.extend(rows_from_batch(path, "Arrow IPC file", &batch)?);
     }
 
     Ok(Table { columns, rows })
@@ -75,6 +106,35 @@ pub fn write_arrow_stream_to_vec(table: &Table) -> Result<Vec<u8>, Diagnostic> {
     Ok(bytes)
 }
 
+pub fn write_arrow_file_to_vec(table: &Table) -> Result<Vec<u8>, Diagnostic> {
+    let batch = table_to_batch(table)?;
+    let mut bytes = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut bytes, batch.schema_ref()).map_err(|error| {
+            Diagnostic::error(
+                codes::E1704,
+                format!("Arrow IPC file header write failed: {error}"),
+                Span::zero(),
+            )
+        })?;
+        writer.write(&batch).map_err(|error| {
+            Diagnostic::error(
+                codes::E1704,
+                format!("Arrow IPC file batch write failed: {error}"),
+                Span::zero(),
+            )
+        })?;
+        writer.finish().map_err(|error| {
+            Diagnostic::error(
+                codes::E1704,
+                format!("Arrow IPC file finish failed: {error}"),
+                Span::zero(),
+            )
+        })?;
+    }
+    Ok(bytes)
+}
+
 fn stream_reader<'a>(
     path: &Path,
     bytes: &'a [u8],
@@ -82,7 +142,19 @@ fn stream_reader<'a>(
     StreamReader::try_new(Cursor::new(bytes), None).map_err(|error| arrow_read_error(path, error))
 }
 
-fn rows_from_batch(path: &Path, batch: &RecordBatch) -> Result<Vec<Row>, Diagnostic> {
+fn file_reader<'a>(
+    path: &Path,
+    bytes: &'a [u8],
+) -> Result<FileReader<Cursor<&'a [u8]>>, Diagnostic> {
+    FileReader::try_new(Cursor::new(bytes), None)
+        .map_err(|error| arrow_file_read_error(path, error))
+}
+
+pub(crate) fn rows_from_batch(
+    path: &Path,
+    format_label: &str,
+    batch: &RecordBatch,
+) -> Result<Vec<Row>, Diagnostic> {
     let mut rows = Vec::with_capacity(batch.num_rows());
     for row_index in 0..batch.num_rows() {
         let mut values = Vec::with_capacity(batch.num_columns());
@@ -90,6 +162,7 @@ fn rows_from_batch(path: &Path, batch: &RecordBatch) -> Result<Vec<Row>, Diagnos
             let field = batch.schema().field(column_index).clone();
             values.push(value_from_array(
                 path,
+                format_label,
                 field.name(),
                 batch.column(column_index).as_ref(),
                 row_index,
@@ -102,6 +175,7 @@ fn rows_from_batch(path: &Path, batch: &RecordBatch) -> Result<Vec<Row>, Diagnos
 
 fn value_from_array(
     path: &Path,
+    format_label: &str,
     column: &str,
     array: &dyn Array,
     row_index: usize,
@@ -115,9 +189,9 @@ fn value_from_array(
         DataType::Float64 => Ok(Value::Number(
             array.as_primitive::<Float64Type>().value(row_index),
         )),
-        DataType::Float32 => Ok(Value::Number(
-            f64::from(array.as_primitive::<Float32Type>().value(row_index)),
-        )),
+        DataType::Float32 => Ok(Value::Number(f64::from(
+            array.as_primitive::<Float32Type>().value(row_index),
+        ))),
         DataType::Int8 => Ok(Value::Number(
             array.as_primitive::<Int8Type>().value(row_index) as f64,
         )),
@@ -150,9 +224,13 @@ fn value_from_array(
         )),
         DataType::Null => Ok(Value::Null),
         data_type => Err(Diagnostic::error(
-            codes::E1215,
+            if format_label == "Parquet" {
+                codes::E1808
+            } else {
+                codes::E1215
+            },
             format!(
-                "Arrow IPC stream column `{column}` in `{}` has unsupported data type `{data_type}`",
+                "{format_label} column `{column}` in `{}` has unsupported data type `{data_type}`",
                 path.display()
             ),
             Span::zero(),
@@ -160,7 +238,7 @@ fn value_from_array(
     }
 }
 
-fn table_to_batch(table: &Table) -> Result<RecordBatch, Diagnostic> {
+pub(crate) fn table_to_batch(table: &Table) -> Result<RecordBatch, Diagnostic> {
     let column_types: Vec<ColumnArrowType> = (0..table.columns.len())
         .map(|column_index| infer_column_type(table, column_index))
         .collect();
@@ -186,7 +264,7 @@ fn table_to_batch(table: &Table) -> Result<RecordBatch, Diagnostic> {
     RecordBatch::try_new(schema, arrays).map_err(|error| {
         Diagnostic::error(
             codes::E1704,
-            format!("Arrow IPC stream record batch build failed: {error}"),
+            format!("Arrow record batch build failed: {error}"),
             Span::zero(),
         )
     })
@@ -277,6 +355,17 @@ fn arrow_read_error(path: &Path, error: arrow_schema::ArrowError) -> Diagnostic 
     )
 }
 
+fn arrow_file_read_error(path: &Path, error: arrow_schema::ArrowError) -> Diagnostic {
+    Diagnostic::error(
+        codes::E1804,
+        format!(
+            "Arrow IPC file parse failed for `{}`: {error}",
+            path.display()
+        ),
+        Span::zero(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +444,27 @@ mod tests {
         let second = write_arrow_stream_to_vec(&table).expect("second write");
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn arrow_file_round_trips_supported_values() {
+        let table = Table::new(
+            vec!["region".to_string(), "amount".to_string()],
+            vec![Row {
+                values: vec![Value::String("West".to_string()), Value::Number(350.0)],
+            }],
+        );
+
+        let bytes = write_arrow_file_to_vec(&table).expect("write arrow file");
+        assert!(bytes.starts_with(b"ARROW1"));
+        assert!(bytes.ends_with(b"ARROW1"));
+        assert_eq!(
+            read_arrow_file_schema_from_bytes(Path::new("memory.arrow"), &bytes).expect("schema"),
+            table.columns
+        );
+        assert_eq!(
+            read_arrow_file_from_bytes(Path::new("memory.arrow"), &bytes).expect("read table"),
+            table
+        );
     }
 }

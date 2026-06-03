@@ -40,7 +40,7 @@ pub fn plan_prepared(
         let Some(data_format) = DataFormat::from_name(format) else {
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
-                format!("stdout format `{format}` is not supported in 0.14.0"),
+                format!("stdout format `{format}` is not supported in 0.15.0"),
                 Span::zero(),
             ));
             return Err(diagnostics);
@@ -49,17 +49,20 @@ pub fn plan_prepared(
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
                 format!(
-                    "stdout format `{}` is not supported in 0.14.0",
+                    "stdout format `{}` is not supported in 0.15.0",
                     data_format.canonical_name()
                 ),
                 Span::zero(),
             ));
             return Err(diagnostics);
         }
-        if data_format == DataFormat::ArrowStream && !options.allow_binary_stdout {
+        if data_format.is_binary() && !options.allow_binary_stdout {
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
-                "Arrow IPC stream stdout is not supported by this host",
+                format!(
+                    "{} stdout is not supported by this host",
+                    data_format.canonical_name()
+                ),
                 Span::zero(),
             ));
             return Err(diagnostics);

@@ -1,0 +1,3 @@
+{"order_id":"J100","region":"North","amount":40,"status":"completed"}
+{"order_id":"J101","region":"South","amount":15,"status":"pending"}
+{"order_id":"J102","region":"West","amount":60,"status":"completed"}
