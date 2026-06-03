@@ -4,10 +4,23 @@ use pdl_core::Diagnostic;
 pub enum ReportPhase {
     Parse,
     SourceResolution,
-    Schema,
+    SchemaFacts,
     Semantic,
     Planning,
-    Execute,
+    Execution,
+    Output,
+}
+
+impl ReportPhase {
+    pub const ORDERED: [ReportPhase; 7] = [
+        ReportPhase::Parse,
+        ReportPhase::SourceResolution,
+        ReportPhase::SchemaFacts,
+        ReportPhase::Semantic,
+        ReportPhase::Planning,
+        ReportPhase::Execution,
+        ReportPhase::Output,
+    ];
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,6 +35,10 @@ pub struct PreparationReport {
 }
 
 impl PreparationReport {
+    pub fn phase_order(&self) -> &'static [ReportPhase] {
+        &ReportPhase::ORDERED
+    }
+
     pub fn push(&mut self, phase: ReportPhase, diagnostic: Diagnostic) {
         self.diagnostics.push(PhaseDiagnostic { phase, diagnostic });
     }

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::io::{DriverIo, OsDriverIo};
 use crate::path::resolve_input_path;
+use crate::plan::DriverPlan;
 use crate::report::{PreparationReport, ReportPhase};
 use crate::source::SourceOrigin;
 
@@ -16,6 +17,7 @@ pub struct PreparedProgram {
     pub source: String,
     pub parse: ParseResult,
     pub analysis: Analysis,
+    pub driver_plan: DriverPlan,
     pub report: PreparationReport,
 }
 
@@ -51,6 +53,8 @@ pub fn prepare_source_with_io(
     let parse = parse(&source);
     let mut report = PreparationReport::default();
     report.extend(ReportPhase::Parse, parse.diagnostics.clone());
+    let origin = SourceOrigin::path(path.clone());
+    let driver_plan = DriverPlan::build(&path, origin.clone(), &parse.program);
 
     let base_dir = path
         .parent()
@@ -59,18 +63,34 @@ pub fn prepare_source_with_io(
         Analysis::default()
     } else {
         let program = &parse.program;
-        analyze_program(program, |request| {
-            load_schema_for_request(request, &path, &base_dir, io)
-        })
+        let mut schema_diagnostics = Vec::new();
+        let analysis = analyze_program(program, |request| {
+            match load_schema_for_request(request, &path, &base_dir, io) {
+                Ok(schema) => Ok(schema),
+                Err(diagnostic) => {
+                    schema_diagnostics.push(diagnostic.clone());
+                    Err(diagnostic)
+                }
+            }
+        });
+        report.extend(ReportPhase::SchemaFacts, schema_diagnostics.clone());
+        report.extend(
+            ReportPhase::Semantic,
+            analysis
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| !schema_diagnostics.contains(diagnostic))
+                .cloned(),
+        );
+        analysis
     };
-    report.extend(ReportPhase::Semantic, analysis.diagnostics.clone());
-
     PreparedProgram {
-        origin: SourceOrigin::path(path.clone()),
+        origin,
         path,
         source,
         parse,
         analysis,
+        driver_plan,
         report,
     }
 }
@@ -91,7 +111,7 @@ fn load_schema_for_request(
                 if format.value != "csv" {
                     return Err(Diagnostic::error(
                         codes::E1215,
-                        format!("format `{}` is not supported in 0.4.0", format.value),
+                        format!("format `{}` is not supported in 0.5.0", format.value),
                         format.span,
                     ));
                 }
@@ -111,7 +131,7 @@ fn load_schema_for_request(
         }
         SourceRef::Stdin(span) => Err(Diagnostic::error(
             codes::E1211,
-            "stdin loading is deferred in 0.4.0",
+            "stdin loading is deferred in 0.5.0",
             *span,
         )),
     }
@@ -147,5 +167,34 @@ mod tests {
 
         assert_eq!(prepared.report.diagnostics[0].phase, ReportPhase::Parse);
         assert_eq!(prepared.report.diagnostics[0].diagnostic.code, "E0006");
+        assert_eq!(
+            prepared.report.phase_order(),
+            &[
+                ReportPhase::Parse,
+                ReportPhase::SourceResolution,
+                ReportPhase::SchemaFacts,
+                ReportPhase::Semantic,
+                ReportPhase::Planning,
+                ReportPhase::Execution,
+                ReportPhase::Output,
+            ]
+        );
+    }
+
+    #[test]
+    fn preparation_records_driver_plan_without_reading_stdin_bytes() {
+        let io = InMemoryDriverIo::default().with_stdin_bytes("status\ncompleted\n");
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load stdin format "csv" | save stdout format "csv""#,
+            &io,
+        );
+
+        assert_eq!(prepared.driver_plan.stdin_reads().len(), 1);
+        assert_eq!(prepared.driver_plan.stdout_writes().len(), 1);
+        assert!(prepared
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E1211"));
     }
 }

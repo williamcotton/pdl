@@ -1284,6 +1284,23 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_map_byte_spans_to_utf16_ranges_after_non_ascii_text() {
+        let source = "load \"😀.csv\"\n  | select \"missing\"";
+        let start = source.find("\"missing\"").expect("diagnostic span");
+        let diagnostics = diagnostics_for_editor(
+            source,
+            &[Diagnostic::error(
+                pdl_core::codes::E1005,
+                "unknown column `missing`",
+                Span::new(start, start + "\"missing\"".len()),
+            )],
+        );
+
+        assert_eq!(diagnostics[0].range.start.line, 1);
+        assert_eq!(diagnostics[0].range.start.character, 11);
+    }
+
+    #[test]
     fn formats_pipeline_style() {
         let source =
             r#"load "sales.csv"|filter "status"=="completed"|agg sum("amount") as "total""#;

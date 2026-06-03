@@ -13,7 +13,6 @@ pdl-core = { workspace = true }
 pdl-data = { workspace = true }
 pdl-driver = { workspace = true }
 pdl-semantics = { workspace = true }
-pdl-syntax = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -1,11 +1,15 @@
 use pdl_core::{codes, Diagnostic, Span};
-use pdl_data::{compare_values, read_csv, NullsOrder, Row, SortDirection, SortSpec, Table, Value};
-use pdl_driver::{program, resolve_input_path, resolve_output_path, PreparedProgram};
-use pdl_syntax::{
-    AggItem, BinaryOp, Expr, Pipeline, PipelineStart, SaveStage, SinkRef, SourceRef, Stage, UnaryOp,
+use pdl_data::{
+    compare_values, read_csv, NullsOrder as DataNullsOrder, Row,
+    SortDirection as DataSortDirection, SortSpec, Table, Value,
+};
+use pdl_driver::{PreparedProgram, SinkDescriptor, SourceDescriptor};
+use pdl_semantics::{
+    AggItemIr, BinaryOpIr, ExprIr, NullsOrderIr, PipelineIr, PipelineStartIr, SortDirectionIr,
+    StageIr, UnaryOpIr,
 };
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::output::{emit_csv_stdout, write_csv_output};
 use crate::planning::{plan_prepared, PlanningOptions};
@@ -46,7 +50,19 @@ pub fn run_prepared(prepared: &PreparedProgram, options: RunOptions) -> RunResul
         dry_run: plan.dry_run,
         stdout: None,
     };
-    let Some(main) = &program(prepared).main else {
+
+    let Some(ir) = prepared.analysis.ir.as_ref() else {
+        runtime.diagnostics.push(Diagnostic::error(
+            codes::E1505,
+            "semantic IR is unavailable for execution",
+            Span::zero(),
+        ));
+        return RunResult {
+            stdout: None,
+            diagnostics: runtime.diagnostics,
+        };
+    };
+    let Some(main) = &ir.main else {
         runtime.diagnostics.push(Diagnostic::error(
             codes::E1502,
             "no runnable main pipeline",
@@ -96,72 +112,67 @@ struct Runtime<'a> {
 }
 
 impl Runtime<'_> {
-    fn execute_pipeline(&mut self, pipeline: &Pipeline) -> Result<Table, Diagnostic> {
+    fn execute_pipeline(&mut self, pipeline: &PipelineIr) -> Result<Table, Diagnostic> {
         let mut table = match &pipeline.start {
-            PipelineStart::Load(load) => self.execute_load(load)?,
-            PipelineStart::Binding(name) => self.execute_binding(&name.value)?,
+            PipelineStartIr::Load { format, span, .. } => {
+                self.execute_load(*span, format.as_deref())?
+            }
+            PipelineStartIr::Binding { name, .. } => self.execute_binding(name)?,
         };
         let mut grouping: Option<Vec<String>> = None;
 
         for stage in &pipeline.stages {
             match stage {
-                Stage::Filter { expr, .. } => {
+                StageIr::Filter { expr, .. } => {
                     table = self.filter(table, expr)?;
                     grouping = None;
                 }
-                Stage::Select { items, .. } => {
+                StageIr::Select { items, .. } => {
                     let selection: Vec<(String, String)> = items
                         .iter()
-                        .map(|item| {
-                            (
-                                item.column.value.clone(),
-                                item.alias.as_ref().unwrap_or(&item.column).value.clone(),
-                            )
-                        })
+                        .map(|item| (item.source.clone(), item.output.clone()))
                         .collect();
                     table = table.select(&selection);
                     grouping = None;
                 }
-                Stage::Drop { columns, .. } => {
-                    let columns: Vec<String> =
-                        columns.iter().map(|column| column.value.clone()).collect();
-                    table = table.drop_columns(&columns);
+                StageIr::Drop { columns, .. } => {
+                    table = table.drop_columns(columns);
                     grouping = None;
                 }
-                Stage::Rename { items, .. } => {
+                StageIr::Rename { items, .. } => {
                     let renames: Vec<(String, String)> = items
                         .iter()
-                        .map(|item| (item.old.value.clone(), item.new.value.clone()))
+                        .map(|item| (item.old.clone(), item.new.clone()))
                         .collect();
                     table = table.rename_columns(&renames);
                     grouping = None;
                 }
-                Stage::GroupBy { columns, .. } => {
-                    grouping = Some(columns.iter().map(|column| column.value.clone()).collect());
+                StageIr::GroupBy { columns, .. } => {
+                    grouping = Some(columns.clone());
                 }
-                Stage::Agg { items, .. } => {
+                StageIr::Agg { items, .. } => {
                     table = self.aggregate(&table, grouping.take().unwrap_or_default(), items)?;
                 }
-                Stage::Sort { items, .. } => {
+                StageIr::Sort { items, .. } => {
                     let specs = items
                         .iter()
                         .map(|item| {
                             let direction = match item.direction {
-                                pdl_syntax::SortDirection::Asc => SortDirection::Asc,
-                                pdl_syntax::SortDirection::Desc => SortDirection::Desc,
+                                SortDirectionIr::Asc => DataSortDirection::Asc,
+                                SortDirectionIr::Desc => DataSortDirection::Desc,
                             };
                             let nulls = item
                                 .nulls
                                 .map(|nulls| match nulls {
-                                    pdl_syntax::NullsOrder::First => NullsOrder::First,
-                                    pdl_syntax::NullsOrder::Last => NullsOrder::Last,
+                                    NullsOrderIr::First => DataNullsOrder::First,
+                                    NullsOrderIr::Last => DataNullsOrder::Last,
                                 })
                                 .unwrap_or(match direction {
-                                    SortDirection::Asc => NullsOrder::Last,
-                                    SortDirection::Desc => NullsOrder::First,
+                                    DataSortDirection::Asc => DataNullsOrder::Last,
+                                    DataSortDirection::Desc => DataNullsOrder::First,
                                 });
                             SortSpec {
-                                column: item.column.value.clone(),
+                                column: item.column.clone(),
                                 direction,
                                 nulls,
                             }
@@ -169,17 +180,17 @@ impl Runtime<'_> {
                         .collect::<Vec<_>>();
                     table.stable_sort(&specs);
                 }
-                Stage::Limit { n, .. } => {
+                StageIr::Limit { n, .. } => {
                     table = table.limit(*n);
                 }
-                Stage::Save(save) => {
-                    self.execute_save(save, &table)?;
+                StageIr::Save { format, span, .. } => {
+                    self.execute_save(*span, format.as_deref(), &table)?;
                 }
-                Stage::Unsupported { name, .. } => {
+                StageIr::Unsupported { name, span } => {
                     return Err(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{}` is deferred in 0.4.0", name.value),
-                        name.span,
+                        format!("stage `{name}` is deferred in 0.5.0"),
+                        *span,
                     ));
                 }
             }
@@ -192,10 +203,12 @@ impl Runtime<'_> {
         if let Some(table) = self.cache.get(name) {
             return Ok(table.clone());
         }
-        let binding = program(self.prepared)
-            .bindings
-            .iter()
-            .find(|binding| binding.name.value == name)
+        let binding = self
+            .prepared
+            .analysis
+            .ir
+            .as_ref()
+            .and_then(|ir| ir.bindings.iter().find(|binding| binding.name == name))
             .ok_or_else(|| {
                 Diagnostic::error(
                     codes::E1007,
@@ -208,44 +221,65 @@ impl Runtime<'_> {
         Ok(table)
     }
 
-    fn execute_load(&self, load: &pdl_syntax::LoadStage) -> Result<Table, Diagnostic> {
-        match &load.source {
-            SourceRef::Path(path) => {
-                if let Some(format) = &load.format {
-                    if format.value != "csv" {
-                        return Err(Diagnostic::error(
-                            codes::E1215,
-                            format!("format `{}` is not supported in 0.4.0", format.value),
-                            format.span,
-                        ));
-                    }
-                }
-                read_csv(&resolve_input_path(&self.prepared.path, &path.value))
+    fn execute_load(
+        &self,
+        stage_span: Span,
+        explicit_format: Option<&str>,
+    ) -> Result<Table, Diagnostic> {
+        if let Some(format) = explicit_format {
+            if format != "csv" {
+                return Err(Diagnostic::error(
+                    codes::E1215,
+                    format!("format `{format}` is not supported in 0.5.0"),
+                    stage_span,
+                ));
             }
-            SourceRef::Stdin(span) => Err(Diagnostic::error(
+        }
+        let Some(input) = self.prepared.driver_plan.input_for_stage_span(stage_span) else {
+            return Err(Diagnostic::error(
+                codes::E1505,
+                "driver source facts are unavailable for execution",
+                stage_span,
+            ));
+        };
+        match &input.source {
+            SourceDescriptor::Path { resolved_path, .. } => read_csv(resolved_path),
+            SourceDescriptor::Stdin => Err(Diagnostic::error(
                 codes::E1211,
-                "stdin loading is deferred in 0.4.0",
-                *span,
+                "stdin loading is deferred in 0.5.0",
+                input.span,
             )),
         }
     }
 
-    fn execute_save(&mut self, save: &SaveStage, table: &Table) -> Result<(), Diagnostic> {
+    fn execute_save(
+        &mut self,
+        stage_span: Span,
+        explicit_format: Option<&str>,
+        table: &Table,
+    ) -> Result<(), Diagnostic> {
         if self.dry_run {
             return Ok(());
         }
-        if let Some(format) = &save.format {
-            if format.value != "csv" {
+        if let Some(format) = explicit_format {
+            if format != "csv" {
                 return Err(Diagnostic::error(
                     codes::E1705,
-                    format!("output format `{}` is not supported in 0.4.0", format.value),
-                    format.span,
+                    format!("output format `{format}` is not supported in 0.5.0"),
+                    stage_span,
                 ));
             }
         }
-        match &save.sink {
-            SinkRef::Path(path) => write_csv_output(&resolve_output_path(&path.value), table),
-            SinkRef::Stdout(_) => {
+        let Some(sink) = self.prepared.driver_plan.sink_for_stage_span(stage_span) else {
+            return Err(Diagnostic::error(
+                codes::E1505,
+                "driver sink facts are unavailable for execution",
+                stage_span,
+            ));
+        };
+        match &sink.sink {
+            SinkDescriptor::Path { resolved_path, .. } => write_csv_output(resolved_path, table),
+            SinkDescriptor::Stdout => {
                 let bytes = emit_csv_stdout(table)?;
                 self.stdout = Some(bytes);
                 Ok(())
@@ -253,7 +287,7 @@ impl Runtime<'_> {
         }
     }
 
-    fn filter(&self, table: Table, expr: &Expr) -> Result<Table, Diagnostic> {
+    fn filter(&self, table: Table, expr: &ExprIr) -> Result<Table, Diagnostic> {
         let rows = table
             .rows
             .iter()
@@ -275,7 +309,7 @@ impl Runtime<'_> {
         &self,
         table: &Table,
         group_keys: Vec<String>,
-        items: &[AggItem],
+        items: &[AggItemIr],
     ) -> Result<Table, Diagnostic> {
         let mut grouped: BTreeMap<Vec<String>, Vec<&Row>> = BTreeMap::new();
         if group_keys.is_empty() {
@@ -296,7 +330,7 @@ impl Runtime<'_> {
         }
 
         let mut columns = group_keys.clone();
-        columns.extend(items.iter().map(|item| item.alias.value.clone()));
+        columns.extend(items.iter().map(|item| item.alias.clone()));
         let mut rows = Vec::new();
 
         for (key, group_rows) in grouped {
@@ -320,36 +354,36 @@ enum ExprRole {
 }
 
 fn eval_row_expr(
-    expr: &Expr,
+    expr: &ExprIr,
     table: &Table,
     row: &Row,
     role: ExprRole,
 ) -> Result<Value, Diagnostic> {
     match expr {
-        Expr::Quoted(value) => match role {
-            ExprRole::ComparisonLeft => column_value(table, row, &value.value, value.span),
+        ExprIr::Quoted { value, span } => match role {
+            ExprRole::ComparisonLeft => column_value(table, row, value, *span),
             ExprRole::PredicateRoot | ExprRole::Default => {
-                if table.column_index(&value.value).is_some() {
-                    column_value(table, row, &value.value, value.span)
+                if table.column_index(value).is_some() {
+                    column_value(table, row, value, *span)
                 } else {
-                    Ok(Value::String(value.value.clone()))
+                    Ok(Value::String(value.clone()))
                 }
             }
-            ExprRole::ComparisonRight => Ok(Value::String(value.value.clone())),
+            ExprRole::ComparisonRight => Ok(Value::String(value.clone())),
         },
-        Expr::Number(value) => Ok(Value::Number(value.value)),
-        Expr::Bool(value) => Ok(Value::Bool(value.value)),
-        Expr::Null(_) => Ok(Value::Null),
-        Expr::Ident(value) => Err(Diagnostic::error(
+        ExprIr::Number { value, .. } => Ok(Value::Number(*value)),
+        ExprIr::Bool { value, .. } => Ok(Value::Bool(*value)),
+        ExprIr::Null { .. } => Ok(Value::Null),
+        ExprIr::Ident { value, span } => Err(Diagnostic::error(
             codes::E0008,
-            format!("unexpected bare identifier `{}` in expression", value.value),
-            value.span,
+            format!("unexpected bare identifier `{value}` in expression"),
+            *span,
         )),
-        Expr::Call { name, args, span } => eval_call(name.value.as_str(), args, table, row, *span),
-        Expr::Unary { op, expr, span } => {
+        ExprIr::Call { name, args, span } => eval_call(name, args, table, row, *span),
+        ExprIr::Unary { op, expr, span } => {
             let value = eval_row_expr(expr, table, row, ExprRole::Default)?;
             match op {
-                UnaryOp::Not => match value {
+                UnaryOpIr::Not => match value {
                     Value::Bool(value) => Ok(Value::Bool(!value)),
                     Value::Null => Ok(Value::Null),
                     _ => Err(Diagnostic::error(
@@ -358,7 +392,7 @@ fn eval_row_expr(
                         *span,
                     )),
                 },
-                UnaryOp::Neg => match value {
+                UnaryOpIr::Neg => match value {
                     Value::Number(value) => Ok(Value::Number(-value)),
                     _ => Err(Diagnostic::error(
                         codes::E1302,
@@ -368,7 +402,7 @@ fn eval_row_expr(
                 },
             }
         }
-        Expr::Binary {
+        ExprIr::Binary {
             left,
             op,
             right,
@@ -379,14 +413,17 @@ fn eval_row_expr(
 
 fn eval_call(
     name: &str,
-    args: &[Expr],
+    args: &[ExprIr],
     table: &Table,
     row: &Row,
     span: Span,
 ) -> Result<Value, Diagnostic> {
     match name {
         "col" => match args {
-            [Expr::Quoted(column)] => column_value(table, row, &column.value, column.span),
+            [ExprIr::Quoted {
+                value: column,
+                span,
+            }] => column_value(table, row, column, *span),
             _ => Err(Diagnostic::error(
                 codes::E1402,
                 "col() expects one quoted column name",
@@ -394,7 +431,7 @@ fn eval_call(
             )),
         },
         "lit" => match args {
-            [Expr::Quoted(value)] => Ok(Value::String(value.value.clone())),
+            [ExprIr::Quoted { value, .. }] => Ok(Value::String(value.clone())),
             [expr] => eval_row_expr(expr, table, row, ExprRole::Default),
             _ => Err(Diagnostic::error(
                 codes::E1402,
@@ -433,9 +470,9 @@ fn eval_call(
 }
 
 fn eval_binary(
-    op: BinaryOp,
-    left: &Expr,
-    right: &Expr,
+    op: BinaryOpIr,
+    left: &ExprIr,
+    right: &ExprIr,
     table: &Table,
     row: &Row,
     span: Span,
@@ -447,17 +484,17 @@ fn eval_binary(
     }
 
     match op {
-        BinaryOp::And => {
+        BinaryOpIr::And => {
             let left = eval_row_expr(left, table, row, ExprRole::Default)?;
             let right = eval_row_expr(right, table, row, ExprRole::Default)?;
             Ok(nullable_and(left, right))
         }
-        BinaryOp::Or => {
+        BinaryOpIr::Or => {
             let left = eval_row_expr(left, table, row, ExprRole::Default)?;
             let right = eval_row_expr(right, table, row, ExprRole::Default)?;
             Ok(nullable_or(left, right))
         }
-        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
+        BinaryOpIr::Add | BinaryOpIr::Sub | BinaryOpIr::Mul | BinaryOpIr::Div | BinaryOpIr::Rem => {
             let left = eval_row_expr(left, table, row, ExprRole::Default)?;
             let right = eval_row_expr(right, table, row, ExprRole::Default)?;
             let (Some(left), Some(right)) = (left.as_number(), right.as_number()) else {
@@ -468,14 +505,14 @@ fn eval_binary(
                 ));
             };
             match op {
-                BinaryOp::Add => Ok(Value::Number(left + right)),
-                BinaryOp::Sub => Ok(Value::Number(left - right)),
-                BinaryOp::Mul => Ok(Value::Number(left * right)),
-                BinaryOp::Div if right == 0.0 => {
+                BinaryOpIr::Add => Ok(Value::Number(left + right)),
+                BinaryOpIr::Sub => Ok(Value::Number(left - right)),
+                BinaryOpIr::Mul => Ok(Value::Number(left * right)),
+                BinaryOpIr::Div if right == 0.0 => {
                     Err(Diagnostic::error(codes::E1407, "division by zero", span))
                 }
-                BinaryOp::Div => Ok(Value::Number(left / right)),
-                BinaryOp::Rem => Ok(Value::Number(left % right)),
+                BinaryOpIr::Div => Ok(Value::Number(left / right)),
+                BinaryOpIr::Rem => Ok(Value::Number(left % right)),
                 _ => unreachable!(),
             }
         }
@@ -483,17 +520,17 @@ fn eval_binary(
     }
 }
 
-fn compare_for_op(left: &Value, op: BinaryOp, right: &Value) -> Value {
+fn compare_for_op(left: &Value, op: BinaryOpIr, right: &Value) -> Value {
     let Some(ordering) = compare_values(left, right) else {
         return Value::Null;
     };
     let result = match op {
-        BinaryOp::Eq => ordering == Ordering::Equal,
-        BinaryOp::Ne => ordering != Ordering::Equal,
-        BinaryOp::Lt => ordering == Ordering::Less,
-        BinaryOp::Lte => matches!(ordering, Ordering::Less | Ordering::Equal),
-        BinaryOp::Gt => ordering == Ordering::Greater,
-        BinaryOp::Gte => matches!(ordering, Ordering::Greater | Ordering::Equal),
+        BinaryOpIr::Eq => ordering == Ordering::Equal,
+        BinaryOpIr::Ne => ordering != Ordering::Equal,
+        BinaryOpIr::Lt => ordering == Ordering::Less,
+        BinaryOpIr::Lte => matches!(ordering, Ordering::Less | Ordering::Equal),
+        BinaryOpIr::Gt => ordering == Ordering::Greater,
+        BinaryOpIr::Gte => matches!(ordering, Ordering::Greater | Ordering::Equal),
         _ => unreachable!(),
     };
     Value::Bool(result)
@@ -524,8 +561,8 @@ fn column_value(table: &Table, row: &Row, column: &str, span: Span) -> Result<Va
         .ok_or_else(|| Diagnostic::error(codes::E1005, format!("unknown column `{column}`"), span))
 }
 
-fn eval_aggregate(item: &AggItem, table: &Table, rows: &[&Row]) -> Result<Value, Diagnostic> {
-    match item.function.value.as_str() {
+fn eval_aggregate(item: &AggItemIr, table: &Table, rows: &[&Row]) -> Result<Value, Diagnostic> {
+    match item.function.as_str() {
         "count" if item.args.is_empty() => Ok(Value::Number(rows.len() as f64)),
         "count" => {
             let values = aggregate_arg_values(&item.args[0], table, rows)?;
@@ -583,13 +620,13 @@ fn eval_aggregate(item: &AggItem, table: &Table, rows: &[&Row]) -> Result<Value,
         function => Err(Diagnostic::error(
             codes::E1401,
             format!("unknown aggregate function `{function}`"),
-            item.function.span,
+            item.span,
         )),
     }
 }
 
 fn aggregate_arg_values(
-    expr: &Expr,
+    expr: &ExprIr,
     table: &Table,
     rows: &[&Row],
 ) -> Result<Vec<Value>, Diagnostic> {
@@ -598,38 +635,40 @@ fn aggregate_arg_values(
         .collect()
 }
 
-fn eval_aggregate_expr(expr: &Expr, table: &Table, row: &Row) -> Result<Value, Diagnostic> {
+fn eval_aggregate_expr(expr: &ExprIr, table: &Table, row: &Row) -> Result<Value, Diagnostic> {
     match expr {
-        Expr::Quoted(value) => column_value(table, row, &value.value, value.span),
-        Expr::Call { name, args, span } if name.value == "lit" => match args.as_slice() {
-            [Expr::Quoted(value)] => Ok(Value::String(value.value.clone())),
+        ExprIr::Quoted { value, span } => column_value(table, row, value, *span),
+        ExprIr::Call { name, args, span } if name == "lit" => match args.as_slice() {
+            [ExprIr::Quoted { value, .. }] => Ok(Value::String(value.clone())),
             _ => Err(Diagnostic::error(
                 codes::E1402,
                 "lit() expects one quoted value",
                 *span,
             )),
         },
-        Expr::Call { name, args, .. } if name.value == "col" => match args.as_slice() {
-            [Expr::Quoted(value)] => column_value(table, row, &value.value, value.span),
+        ExprIr::Call { name, args, span } if name == "col" => match args.as_slice() {
+            [ExprIr::Quoted {
+                value: column,
+                span,
+            }] => column_value(table, row, column, *span),
             _ => Err(Diagnostic::error(
                 codes::E1402,
                 "col() expects one quoted column name",
-                name.span,
+                *span,
             )),
         },
         _ => eval_row_expr(expr, table, row, ExprRole::Default),
     }
 }
 
-fn is_comparison_op(op: BinaryOp) -> bool {
+fn is_comparison_op(op: BinaryOpIr) -> bool {
     matches!(
         op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Lte | BinaryOp::Gt | BinaryOp::Gte
+        BinaryOpIr::Eq
+            | BinaryOpIr::Ne
+            | BinaryOpIr::Lt
+            | BinaryOpIr::Lte
+            | BinaryOpIr::Gt
+            | BinaryOpIr::Gte
     )
-}
-
-#[allow(dead_code)]
-fn ensure_unique(values: impl IntoIterator<Item = String>) -> bool {
-    let mut seen = BTreeSet::new();
-    values.into_iter().all(|value| seen.insert(value))
 }

@@ -1,15 +1,15 @@
 # PDL Detailed Specification
 
-Status: Draft 0.4.0
+Status: Draft 0.5.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.4.0`.
+The current repository implementation is `0.5.0`.
 
 This release keeps the existing CSV-backed language and runtime slice stable
-while establishing durable implementation boundaries. It implements the `pdl`
+while hardening durable implementation boundaries. It implements the `pdl`
 CLI commands `run`, `check`, `lsp`, and `version`; CSV file loading with header
 rows; CSV file and stdout output; deterministic in-memory execution for `load`,
 `filter`, `select`, `drop`, `rename`, `group_by`, `agg`, `sort`, `limit`, and
@@ -18,18 +18,22 @@ It also implements registered lettered diagnostic codes in `pdl-core`, a
 `codes::*` registry, `related` spans and `help` diagnostic payload fields,
 diagnostic catalog drift tests, a lossless lexer with trivia and EOF, a rowan
 CST with typed AST views, a syntax-owned formatter boundary, driver I/O and
-phase-tagged preparation reports, semantic registries and IR, execution
-planning separated from output emission, `pdl lsp` with full-document sync,
-diagnostics, completion, hover, formatting, semantic tokens, document symbols,
-and same-document binding definition/reference/rename; and it ships a thin VS
-Code client under `editors/vscode/` plus browser-safe WASM ABI helpers.
+phase-tagged preparation reports, load-free driver source/stream/format plans,
+logical schema surfaces, schema-cache and preview boundary types, semantic
+registries and IR, execution planning from semantic IR plus driver facts,
+execution output emission separated from planning, crate-boundary drift tests,
+`pdl lsp` with full-document sync, diagnostics, completion, hover, formatting,
+semantic tokens, document symbols, and same-document binding
+definition/reference/rename; and it ships a thin VS Code client under
+`editors/vscode/` plus browser-safe WASM ABI helpers that use in-memory driver
+boundaries.
 
-Version 0.4.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
+Version 0.5.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
 loading, stream sniffing, configurable CSV dialect options, `mutate`, `join`,
 `union`, `distinct`, window expressions, schema/plan subcommands, CLI
 formatting, full LSP code actions or cross-document navigation, or browser demo
 support. Those features are tracked as deferred or planned work in successor
-release plans such as `docs/V0_5_PLAN.md`.
+release plans after `docs/V0_5_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -115,7 +119,7 @@ The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
 over a partition and order of rows. Window expressions are planned but not
-implemented in version 0.4.0.
+implemented in version 0.5.0.
 
 The keyword `column` means a named field with a static PDL type and nullability.
 
@@ -821,7 +825,7 @@ Planned window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are not reserved by the version 0.4.0 implementation until window
+These words are not reserved by the version 0.5.0 implementation until window
 syntax is implemented.
 
 ### 6.6 Quoted Tokens
@@ -1096,7 +1100,7 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are planned syntax and are not implemented in version 0.4.0.
+Window expressions are planned syntax and are not implemented in version 0.5.0.
 
 Until implemented, parsers MAY recover with `E1211` or ordinary parse diagnostics
 when they encounter `over`.
@@ -1732,7 +1736,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions (Planned)
 
-Window function syntax is planned and not implemented in version 0.4.0.
+Window function syntax is planned and not implemented in version 0.5.0.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
 
@@ -2141,7 +2145,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.4.0` LSP implementation provides diagnostics,
+The current `0.5.0` LSP implementation provides diagnostics,
 completion, hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
@@ -2396,7 +2400,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -2642,9 +2646,6 @@ thiserror = { workspace = true }
 [features]
 default = ["native-formats"]
 native-formats = ["pdl-data/native-formats", "pdl-semantics/native-formats", "pdl-driver/native-formats"]
-
-[dev-dependencies]
-pdl-syntax = { workspace = true }
 ```
 
 `crates/pdl-semantics/Cargo.toml` SHOULD start from:
@@ -3183,10 +3184,11 @@ The preparation report SHOULD collect entries in deterministic phase order:
 
 - parse
 - source resolution
-- schema and bounded metadata loading
+- schema facts and bounded metadata loading
 - semantic analysis
 - planning
-- execution preview where requested
+- execution
+- output
 
 The report SHOULD be shaped like:
 
@@ -3252,6 +3254,162 @@ Tests SHOULD snapshot:
 
 Parser, analyzer, driver, and LSP tests MUST include non-ASCII source text when
 asserting spans or UTF-16 LSP ranges.
+
+### 19.7 v0.5 Architecture Audit
+
+This section records the v0.5 architecture audit and boundary decisions.
+
+#### 19.7.1 Dependency Direction
+
+Allowed internal dependency direction:
+
+```text
+pdl-core
+  <- pdl-syntax
+  <- pdl-data
+  <- pdl-semantics
+  <- pdl-driver
+  <- pdl-exec
+  <- pdl-editor-services
+  <- pdl-lsp
+  <- pdl-cli
+  <- pdl-wasm
+```
+
+Practical rules:
+
+- `pdl-syntax` depends only on syntax concerns plus `pdl-core`.
+- `pdl-semantics` may depend on `pdl-syntax`, `pdl-data`, and `pdl-core`, but
+  only through stable logical schema/type facts, never concrete engine types.
+- `pdl-driver` owns source, path, stream, format, schema facts, and preparation
+  boundaries.
+- `pdl-exec` owns executable planning, table execution, output emission, and
+  manifest/preview surfaces.
+- `pdl-editor-services`, `pdl-lsp`, `pdl-cli`, and `pdl-wasm` are adapters.
+
+The reference implementation includes boundary tests that read workspace
+manifests and selected source files so dependency-direction drift and concrete
+engine leakage fail during `cargo test --workspace`.
+
+#### 19.7.2 Public API Audit
+
+No public API above `pdl-data` may mention Polars `DataFrame`, `LazyFrame`,
+Polars expressions, Arrow reader internals, Parquet reader internals, or native
+format engine details.
+
+Stable data-facing surfaces are:
+
+- `pdl_data::Table`
+- `pdl_data::Row`
+- `pdl_data::Value`
+- `pdl_data::TableSchema`
+- `pdl_data::ColumnSchema`
+- `pdl_data::LogicalType`
+- `pdl_data::DataFormat`
+
+`pdl-exec` may call `pdl-data` facade methods and plain table operations. It
+must not construct concrete Polars or Arrow engine objects directly.
+
+#### 19.7.3 Driver Plan
+
+`pdl-driver` builds a load-free `DriverPlan` during preparation. It records:
+
+- source origin and source path;
+- base directory;
+- pipeline input descriptors;
+- output sink descriptors;
+- explicit format names;
+- inferred path formats;
+- deferred sniffing decisions;
+- stdin/stdout stream uses;
+- source spans;
+- dependency inventory.
+
+Plan construction does not read full data files and does not consume stdin. The
+`DriverIo` trait is limited to local source bytes, data bytes, stdin bytes,
+path metadata, and in-memory host-provided files. It intentionally has no
+network, environment, shell, async, or cache policy methods.
+
+#### 19.7.4 Semantic IR Handoff
+
+`pdl-semantics` lowers parsed programs into `ProgramIr`, `PipelineIr`, and
+`StageIr`. `pdl-exec` builds execution plans and executes the implemented CSV
+slice from semantic IR plus `DriverPlan` facts rather than inspecting source
+AST stages.
+
+#### 19.7.5 Phase Reports
+
+Preparation reports use the fixed phase order:
+
+```text
+parse -> source-resolution -> schema-facts -> semantic -> planning -> execution -> output
+```
+
+Schema-loading diagnostics are attributed to `schema-facts`. Semantic
+diagnostics remain core diagnostic values and are not duplicated into the
+report when schema facts already own the failure.
+
+#### 19.7.6 Algraf Template Audit
+
+PDL copies these Algraf implementation lessons:
+
+- lossless syntax and typed AST views;
+- diagnostics as values;
+- phase-tagged preparation reports;
+- local driver I/O seam;
+- editor/LSP thinness;
+- browser-safe WASM host boundaries;
+- deterministic outputs;
+- planning before emission.
+
+PDL intentionally diverges here:
+
+- tabular execution replaces graphics rendering;
+- `pdl-data` owns dataframe and native format privacy;
+- source/sink descriptors prepare for Arrow stdout discipline;
+- `.pdl` and `.ag` source languages remain separate;
+- render-level asset loading and graphics-specific dependencies are not copied.
+
+#### 19.7.7 Arrow Source And Sink Sketch
+
+The driver/exec boundary can describe these formats without claiming runtime
+support:
+
+- `csv`
+- `arrow-stream`
+- `arrow-file`
+- `parquet`
+- `jsonl`
+
+Descriptors record explicit format names, inferred path formats, and unresolved
+sniffing decisions. Real Arrow IPC parsing/writing, Parquet loading, JSON Lines
+loading, and stdin sniffing remain deferred past v0.5.0 unless a future plan
+promotes them with spec, examples, and tests.
+
+#### 19.7.8 Schema Cache And Preview Boundary
+
+Schema cache keys must use resolved source identity plus a fingerprint or
+host-provided version. Path strings alone are not valid cache keys.
+
+The v0.5 code exposes:
+
+- `SchemaCacheKey`
+- `SourceIdentity`
+- `SchemaCacheEntry`
+- `PreviewRequest`
+
+The cache boundary stores schemas and load errors, not full frames. Runtime
+frame caching remains deferred. LSP/editor flows may opt out of runtime cache
+use or rely on host-provided schemas when source data is not available locally.
+
+#### 19.7.9 Adapter Thinness
+
+CLI owns argument parsing, exit codes, stdout/stderr policy, and OS-backed file
+writes. LSP owns protocol conversion and document lifecycle. Editor services
+own protocol-neutral language features. VS Code only spawns/configures `pdl
+lsp`. WASM uses in-memory driver/exec boundaries and does not read arbitrary
+host files, process stdin, environment variables, network resources, or
+external processes.
 
 ## 20. Diagnostics Catalog
 
@@ -3781,7 +3939,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.4.0.
+PDL source does not require an explicit version declaration in draft 0.5.0.
 
 The implementation SHOULD report supported language version.
 
