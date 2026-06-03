@@ -16,6 +16,10 @@ pub use plan::{
     SniffingDecision, SniffingReason, SourceDependency, SourceDescriptor, StreamDirection,
     StreamKind, StreamUse,
 };
-pub use prepare::{prepare_file, prepare_source, prepare_source_with_io, program, PreparedProgram};
+pub use prepare::{
+    prepare_file, prepare_file_for_run, prepare_source, prepare_source_for_run_with_io,
+    prepare_source_with_io, prepare_source_with_options_and_io, program, PrepareOptions,
+    PreparedProgram,
+};
 pub use report::{PhaseDiagnostic, PreparationReport, ReportPhase};
 pub use source::{SourceInput, SourceOrigin};

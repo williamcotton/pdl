@@ -133,6 +133,7 @@ fn run_browser_json(input: &[u8]) -> String {
         pdl_exec::RunOptions {
             stdout_format: Some(request.stdout_format),
             dry_run: false,
+            allow_binary_stdout: false,
         },
         &io,
     );
@@ -427,6 +428,28 @@ mod tests {
             "region,total_revenue\nWest,200\nNorth,120\n"
         );
         assert_eq!(payload["diagnostics"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn run_json_rejects_arrow_stdout_with_registered_diagnostic() {
+        let request = serde_json::json!({
+            "source": r#"load "sales.csv""#,
+            "files": {
+                "sales.csv": "region,status,amount\nNorth,completed,120\n"
+            },
+            "stdout_format": "arrow-stream"
+        });
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&run_json(&request.to_string())).expect("json");
+
+        assert!(payload["error"].is_null(), "{payload}");
+        assert!(payload["stdout"].is_null(), "{payload}");
+        assert_eq!(payload["diagnostics"][0]["code"], "E1705");
+        assert_eq!(
+            payload["diagnostics"][0]["message"],
+            "Arrow IPC stream stdout is not supported by this host"
+        );
     }
 
     #[test]

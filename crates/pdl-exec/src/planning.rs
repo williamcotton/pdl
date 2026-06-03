@@ -1,4 +1,5 @@
 use pdl_core::{codes, has_errors, Diagnostic, Span};
+use pdl_data::DataFormat;
 use pdl_driver::{PreparedProgram, SinkDescriptor, SourceDescriptor};
 use pdl_semantics::{PipelineIr, PipelineStartIr, ProgramIr, StageIr};
 use std::collections::BTreeSet;
@@ -7,12 +8,13 @@ use std::collections::BTreeSet;
 pub struct PlanningOptions {
     pub stdout_format: Option<String>,
     pub dry_run: bool,
+    pub allow_binary_stdout: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutionPlan {
     pub steps: Vec<ExecutionPlanStep>,
-    pub stdout_format: Option<String>,
+    pub stdout_format: Option<DataFormat>,
     pub dry_run: bool,
 }
 
@@ -34,16 +36,38 @@ pub fn plan_prepared(
         return Err(diagnostics);
     }
 
-    if let Some(format) = &options.stdout_format {
-        if format != "csv" {
+    let stdout_format = if let Some(format) = &options.stdout_format {
+        let Some(data_format) = DataFormat::from_name(format) else {
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
-                format!("stdout format `{format}` is not supported in 0.12.0"),
+                format!("stdout format `{format}` is not supported in 0.13.0"),
+                Span::zero(),
+            ));
+            return Err(diagnostics);
+        };
+        if !data_format.is_supported_output() {
+            diagnostics.push(Diagnostic::error(
+                codes::E1705,
+                format!(
+                    "stdout format `{}` is not supported in 0.13.0",
+                    data_format.canonical_name()
+                ),
                 Span::zero(),
             ));
             return Err(diagnostics);
         }
-    }
+        if data_format == DataFormat::ArrowStream && !options.allow_binary_stdout {
+            diagnostics.push(Diagnostic::error(
+                codes::E1705,
+                "Arrow IPC stream stdout is not supported by this host",
+                Span::zero(),
+            ));
+            return Err(diagnostics);
+        }
+        Some(data_format)
+    } else {
+        None
+    };
 
     let Some(ir) = prepared.analysis.ir.as_ref() else {
         diagnostics.push(Diagnostic::error(
@@ -72,15 +96,15 @@ pub fn plan_prepared(
         return Err(diagnostics);
     }
 
-    if let Some(format) = &options.stdout_format {
+    if let Some(format) = stdout_format {
         steps.push(ExecutionPlanStep::Stdout {
-            format: format.clone(),
+            format: format.canonical_name().to_string(),
         });
     }
 
     Ok(ExecutionPlan {
         steps,
-        stdout_format: options.stdout_format,
+        stdout_format,
         dry_run: options.dry_run,
     })
 }
@@ -232,6 +256,7 @@ mod tests {
             PlanningOptions {
                 stdout_format: Some("csv".to_string()),
                 dry_run: true,
+                allow_binary_stdout: true,
             },
         )
         .expect("execution plan");
@@ -277,6 +302,7 @@ load "sales.csv"
             PlanningOptions {
                 stdout_format: Some("csv".to_string()),
                 dry_run: true,
+                allow_binary_stdout: true,
             },
         )
         .expect("execution plan");

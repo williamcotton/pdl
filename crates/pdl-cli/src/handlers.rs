@@ -1,6 +1,6 @@
 use clap::Parser;
 use pdl_core::has_errors;
-use pdl_driver::prepare_file;
+use pdl_driver::{prepare_file, prepare_file_for_run};
 use pdl_exec::{run_prepared, RunOptions};
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -13,10 +13,11 @@ pub fn run_cli() -> Result<ExitCode, String> {
     match cli.command {
         Command::Run {
             file,
+            stdin_format,
             stdout_format,
             dry_run,
         } => {
-            let prepared = match prepare_file(&file) {
+            let prepared = match prepare_file_for_run(&file, stdin_format) {
                 Ok(prepared) => prepared,
                 Err(diagnostic) => {
                     eprintln!("{}", diagnostic.message);
@@ -28,6 +29,7 @@ pub fn run_cli() -> Result<ExitCode, String> {
                 RunOptions {
                     stdout_format,
                     dry_run,
+                    allow_binary_stdout: true,
                 },
             );
             print_diagnostics(
@@ -75,7 +77,7 @@ pub fn run_cli() -> Result<ExitCode, String> {
         }
         Command::Version => {
             println!(
-                "pdl {} (language draft 0.12.0, data engine {})",
+                "pdl {} (language draft 0.13.0, data engine {})",
                 env!("CARGO_PKG_VERSION"),
                 pdl_data::native_engine_name()
             );

@@ -1,9 +1,12 @@
 use pdl_core::{codes, Diagnostic, Span};
 use pdl_data::{
-    compare_values, read_table_from_bytes, DataFormat, NullsOrder as DataNullsOrder, Row,
-    SortDirection as DataSortDirection, SortSpec, Table, Value,
+    compare_values, read_table_from_bytes, sniff_format_from_bytes, DataFormat,
+    NullsOrder as DataNullsOrder, Row, SortDirection as DataSortDirection, SortSpec, Table, Value,
 };
-use pdl_driver::{DriverIo, OsDriverIo, PreparedProgram, SinkDescriptor, SourceDescriptor};
+use pdl_driver::{
+    DriverIo, FormatDecision, OsDriverIo, PlanInputSource, PlanOutputSink, PreparedProgram,
+    SinkDescriptor, SourceDescriptor,
+};
 use pdl_semantics::{
     AggItemIr, BinaryOpIr, ExprIr, JoinKindIr, MutateItemIr, NullsOrderIr, PipelineIr,
     PipelineStartIr, SortDirectionIr, StageIr, UnaryOpIr,
@@ -11,13 +14,24 @@ use pdl_semantics::{
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::output::{emit_csv_stdout, write_csv_output};
+use crate::output::{emit_stdout, write_output};
 use crate::planning::{plan_prepared, PlanningOptions};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct RunOptions {
     pub stdout_format: Option<String>,
     pub dry_run: bool,
+    pub allow_binary_stdout: bool,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            stdout_format: None,
+            dry_run: false,
+            allow_binary_stdout: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -41,6 +55,7 @@ pub fn run_prepared_with_io(
         PlanningOptions {
             stdout_format: options.stdout_format.clone(),
             dry_run: options.dry_run,
+            allow_binary_stdout: options.allow_binary_stdout,
         },
     ) {
         Ok(plan) => plan,
@@ -96,8 +111,8 @@ pub fn run_prepared_with_io(
         }
     };
 
-    let stdout = if plan.stdout_format.as_deref() == Some("csv") {
-        match emit_csv_stdout(&table) {
+    let stdout = if let Some(format) = plan.stdout_format {
+        match emit_stdout(format, &table) {
             Ok(bytes) => Some(bytes),
             Err(diagnostic) => {
                 runtime.diagnostics.push(diagnostic);
@@ -233,7 +248,7 @@ impl Runtime<'_> {
                 StageIr::Unsupported { name, span } => {
                     return Err(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{name}` is deferred in 0.12.0"),
+                        format!("stage `{name}` is deferred in 0.13.0"),
                         *span,
                     ));
                 }
@@ -285,15 +300,6 @@ impl Runtime<'_> {
         stage_span: Span,
         explicit_format: Option<&str>,
     ) -> Result<Table, Diagnostic> {
-        if let Some(format) = explicit_format {
-            if format != "csv" {
-                return Err(Diagnostic::error(
-                    codes::E1215,
-                    format!("format `{format}` is not supported in 0.12.0"),
-                    stage_span,
-                ));
-            }
-        }
         let Some(input) = self.prepared.driver_plan.input_for_stage_span(stage_span) else {
             return Err(Diagnostic::error(
                 codes::E1505,
@@ -301,23 +307,30 @@ impl Runtime<'_> {
                 stage_span,
             ));
         };
-        let format = DataFormat::from_name(&input.format.effective_name()).ok_or_else(|| {
-            Diagnostic::error(
-                codes::E1216,
-                "could not infer supported format for load",
-                input.span,
-            )
-        })?;
         match &input.source {
             SourceDescriptor::Path { resolved_path, .. } => {
                 let bytes = self.io.read_path_bytes(resolved_path)?;
+                let format =
+                    resolve_input_format(input, explicit_format, None, Some(&bytes), stage_span)?;
                 read_table_from_bytes(resolved_path, format, &bytes)
             }
-            SourceDescriptor::Stdin => Err(Diagnostic::error(
-                codes::E1211,
-                "stdin loading is deferred in 0.12.0",
-                input.span,
-            )),
+            SourceDescriptor::Stdin => {
+                let owned_bytes;
+                let bytes = if let Some(bytes) = self.prepared.stdin_bytes.as_deref() {
+                    bytes
+                } else {
+                    owned_bytes = self.io.read_stdin_bytes()?;
+                    &owned_bytes
+                };
+                let format = resolve_input_format(
+                    input,
+                    explicit_format,
+                    self.prepared.stdin_format.as_deref(),
+                    Some(bytes),
+                    stage_span,
+                )?;
+                read_table_from_bytes(std::path::Path::new("stdin"), format, bytes)
+            }
         }
     }
 
@@ -330,15 +343,6 @@ impl Runtime<'_> {
         if self.dry_run {
             return Ok(());
         }
-        if let Some(format) = explicit_format {
-            if format != "csv" {
-                return Err(Diagnostic::error(
-                    codes::E1705,
-                    format!("output format `{format}` is not supported in 0.12.0"),
-                    stage_span,
-                ));
-            }
-        }
         let Some(sink) = self.prepared.driver_plan.sink_for_stage_span(stage_span) else {
             return Err(Diagnostic::error(
                 codes::E1505,
@@ -346,10 +350,13 @@ impl Runtime<'_> {
                 stage_span,
             ));
         };
+        let format = resolve_output_format(sink, explicit_format, stage_span)?;
         match &sink.sink {
-            SinkDescriptor::Path { resolved_path, .. } => write_csv_output(resolved_path, table),
+            SinkDescriptor::Path { resolved_path, .. } => {
+                write_output(resolved_path, format, table)
+            }
             SinkDescriptor::Stdout => {
-                let bytes = emit_csv_stdout(table)?;
+                let bytes = emit_stdout(format, table)?;
                 self.stdout = Some(bytes);
                 Ok(())
             }
@@ -591,6 +598,74 @@ impl Runtime<'_> {
         let table = Table { columns, rows };
         Ok(if distinct { table.distinct(&[]) } else { table })
     }
+}
+
+fn resolve_input_format(
+    input: &PlanInputSource,
+    explicit_format: Option<&str>,
+    stdin_format: Option<&str>,
+    bytes: Option<&[u8]>,
+    span: Span,
+) -> Result<DataFormat, Diagnostic> {
+    if let Some(format) = explicit_format {
+        return DataFormat::from_name(format).ok_or_else(|| {
+            Diagnostic::error(
+                codes::E1215,
+                format!("format `{format}` is not supported in 0.13.0"),
+                span,
+            )
+        });
+    }
+    if matches!(&input.source, SourceDescriptor::Stdin) {
+        if let Some(format) = stdin_format {
+            return DataFormat::from_name(format).ok_or_else(|| {
+                Diagnostic::error(
+                    codes::E1215,
+                    format!("stdin format `{format}` is not supported in 0.13.0"),
+                    input.span,
+                )
+            });
+        }
+    }
+    if let Some(format) = input.format.inferred_from_path {
+        return Ok(format);
+    }
+    if let Some(bytes) = bytes {
+        return sniff_format_from_bytes(bytes);
+    }
+    Ok(DataFormat::Csv)
+}
+
+fn resolve_output_format(
+    sink: &PlanOutputSink,
+    explicit_format: Option<&str>,
+    span: Span,
+) -> Result<DataFormat, Diagnostic> {
+    if let Some(format) = explicit_format {
+        return DataFormat::from_name(format).ok_or_else(|| {
+            Diagnostic::error(
+                codes::E1705,
+                format!("output format `{format}` is not supported in 0.13.0"),
+                span,
+            )
+        });
+    }
+    format_from_decision(&sink.format).ok_or_else(|| {
+        Diagnostic::error(
+            codes::E1705,
+            "could not infer supported output format",
+            sink.span,
+        )
+    })
+}
+
+fn format_from_decision(decision: &FormatDecision) -> Option<DataFormat> {
+    decision
+        .explicit
+        .as_deref()
+        .and_then(DataFormat::from_name)
+        .or(decision.inferred_from_path)
+        .or(Some(DataFormat::Csv))
 }
 
 fn join_columns(
@@ -1264,7 +1339,187 @@ fn is_comparison_op(op: BinaryOpIr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pdl_driver::{prepare_source_with_io, InMemoryDriverIo};
+    use pdl_driver::{prepare_source_for_run_with_io, prepare_source_with_io, InMemoryDriverIo};
+    use std::path::Path;
+
+    #[test]
+    fn runs_csv_stdin_with_explicit_format() {
+        let io = InMemoryDriverIo::default()
+            .with_stdin_bytes("status,amount\ncompleted,10\npending,20\n");
+        let prepared = prepare_source_for_run_with_io(
+            "memory/main.pdl",
+            r#"load stdin format "csv"
+  | filter "status" == "completed"
+  | select "amount""#,
+            None,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "amount\n10\n"
+        );
+    }
+
+    #[test]
+    fn sniffs_arrow_stream_stdin_and_preserves_bytes_for_execution() {
+        let input_table = Table::new(
+            vec!["region".to_string(), "amount".to_string()],
+            vec![
+                Row {
+                    values: vec![Value::String("West".to_string()), Value::Number(30.0)],
+                },
+                Row {
+                    values: vec![Value::String("East".to_string()), Value::Number(10.0)],
+                },
+            ],
+        );
+        let stdin = pdl_data::write_table_to_bytes(DataFormat::ArrowStream, &input_table)
+            .expect("arrow stdin");
+        let io = InMemoryDriverIo::default().with_stdin_bytes(stdin);
+        let prepared = prepare_source_for_run_with_io(
+            "memory/main.pdl",
+            r#"load stdin
+  | sort "amount" desc"#,
+            None,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "region,amount\nWest,30\nEast,10\n"
+        );
+    }
+
+    #[test]
+    fn stdin_format_conflict_reports_e1217_before_reading_stdin() {
+        let io = InMemoryDriverIo::default();
+        let prepared = prepare_source_for_run_with_io(
+            "memory/main.pdl",
+            r#"load stdin format "csv""#,
+            Some("arrow-stream".to_string()),
+            &io,
+        );
+        let diagnostics = prepared.diagnostics();
+
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E1217"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E1806"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn emits_deterministic_arrow_stream_stdout() {
+        let io = InMemoryDriverIo::default()
+            .with_file_bytes("memory/sales.csv", "region,amount\nWest,30\nEast,10\n");
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "sales.csv"
+  | sort "amount" desc"#,
+            &io,
+        );
+
+        let first = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("arrow-stream".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+        let second = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("arrow-stream".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
+        assert!(second.diagnostics.is_empty(), "{:?}", second.diagnostics);
+        let first_stdout = first.stdout.expect("arrow stdout");
+        let second_stdout = second.stdout.expect("arrow stdout");
+        assert_eq!(first_stdout, second_stdout);
+        assert!(first_stdout.starts_with(&[0xff, 0xff, 0xff, 0xff]));
+        assert_eq!(
+            pdl_data::read_table_from_bytes(
+                Path::new("stdout.arrow"),
+                DataFormat::ArrowStream,
+                &first_stdout,
+            )
+            .expect("read arrow stdout"),
+            Table::new(
+                vec!["region".to_string(), "amount".to_string()],
+                vec![
+                    Row {
+                        values: vec![Value::String("West".to_string()), Value::Number(30.0)],
+                    },
+                    Row {
+                        values: vec![Value::String("East".to_string()), Value::Number(10.0)],
+                    },
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn save_stdout_writes_arrow_stream_bytes() {
+        let io = InMemoryDriverIo::default()
+            .with_file_bytes("memory/sales.csv", "region,amount\nWest,30\n");
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "sales.csv"
+  | save stdout format "arrow-stream""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: None,
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let stdout = result.stdout.expect("arrow stdout");
+        assert!(stdout.starts_with(&[0xff, 0xff, 0xff, 0xff]));
+    }
 
     #[test]
     fn executes_mutate_distinct_and_scalar_functions() {
@@ -1288,6 +1543,7 @@ mod tests {
             RunOptions {
                 stdout_format: Some("csv".to_string()),
                 dry_run: true,
+                allow_binary_stdout: true,
             },
             &io,
         );
@@ -1327,6 +1583,7 @@ load "sales.csv"
             RunOptions {
                 stdout_format: Some("csv".to_string()),
                 dry_run: true,
+                allow_binary_stdout: true,
             },
             &io,
         );
@@ -1361,6 +1618,7 @@ load "left.csv"
             RunOptions {
                 stdout_format: Some("csv".to_string()),
                 dry_run: true,
+                allow_binary_stdout: true,
             },
             &io,
         );
@@ -1399,6 +1657,7 @@ load "day1.csv"
             RunOptions {
                 stdout_format: Some("csv".to_string()),
                 dry_run: true,
+                allow_binary_stdout: true,
             },
             &io,
         );
@@ -1430,6 +1689,7 @@ load "left.csv"
             RunOptions {
                 stdout_format: Some("csv".to_string()),
                 dry_run: true,
+                allow_binary_stdout: true,
             },
             &io,
         );

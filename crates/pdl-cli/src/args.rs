@@ -13,6 +13,8 @@ pub enum Command {
     Run {
         file: PathBuf,
         #[arg(long)]
+        stdin_format: Option<String>,
+        #[arg(long)]
         stdout_format: Option<String>,
         #[arg(long)]
         dry_run: bool,
