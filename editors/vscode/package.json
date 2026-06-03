@@ -2,7 +2,7 @@
   "name": "pdl-vscode",
   "displayName": "PDL",
   "description": "Language support for the Pipeline Data Language.",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "publisher": "pdl",
   "license": "MIT OR Apache-2.0",
   "repository": {
