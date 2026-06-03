@@ -2,4 +2,4 @@ pub mod abi;
 pub mod editor;
 pub mod runtime;
 
-pub use abi::{check_json, format_json};
+pub use abi::{check_json, check_json_with_schemas, format_json};

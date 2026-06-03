@@ -5,7 +5,7 @@ use pdl_editor_services::{
     TextRange,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
@@ -60,7 +60,7 @@ impl Backend {
         source: &str,
         path: Option<&std::path::Path>,
     ) {
-        let document = pdl_editor_services::analyze_document(source, path);
+        let document = analyze_document_for_lsp(source, path);
         let diagnostics = document
             .diagnostics
             .into_iter()
@@ -393,6 +393,13 @@ fn from_lsp_position(position: Position) -> TextPosition {
     }
 }
 
+fn analyze_document_for_lsp(
+    source: &str,
+    path: Option<&Path>,
+) -> pdl_editor_services::EditorDocument {
+    pdl_editor_services::analyze_document(source, path)
+}
+
 fn semantic_tokens_legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
         token_types: vec![
@@ -486,5 +493,63 @@ mod tests {
         assert_eq!(lsp.range.start.line, 1);
         assert_eq!(lsp.range.start.character, 2);
         assert_eq!(lsp.range.end.character, 7);
+    }
+
+    #[test]
+    fn lsp_diagnostics_reuse_editor_schema_diagnostics() {
+        let source = r#"load "sales.csv"
+  | filter "sttus" == "completed"
+  | group_by "region"
+  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age", count() as "orders"
+  | sort "total_revenue" desc
+  | limit 3"#;
+
+        let document = pdl_editor_services::analyze_document_with_schemas(
+            source,
+            Path::new("memory/top_regions.pdl"),
+            [(
+                PathBuf::from("memory/sales.csv"),
+                vec![
+                    "region".to_string(),
+                    "status".to_string(),
+                    "amount".to_string(),
+                    "customer_age".to_string(),
+                ],
+            )],
+        );
+
+        let diagnostic = document
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "E1005")
+            .expect("unknown column diagnostic");
+        assert_eq!(diagnostic.message, "unknown column `sttus`");
+        assert_eq!(diagnostic.range.start.line, 1);
+        assert_eq!(diagnostic.range.start.character, 11);
+        let lsp = lsp_diagnostic(diagnostic.clone());
+        assert_eq!(lsp.code, Some(NumberOrString::String("E1005".to_string())));
+
+        let corrected = source.replace("\"sttus\"", "\"status\"");
+        let corrected_document = pdl_editor_services::analyze_document_with_schemas(
+            &corrected,
+            Path::new("memory/top_regions.pdl"),
+            [(
+                PathBuf::from("memory/sales.csv"),
+                vec![
+                    "region".to_string(),
+                    "status".to_string(),
+                    "amount".to_string(),
+                    "customer_age".to_string(),
+                ],
+            )],
+        );
+        assert!(
+            !corrected_document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E1005"),
+            "{:?}",
+            corrected_document.diagnostics
+        );
     }
 }

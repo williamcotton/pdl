@@ -37,7 +37,7 @@ pub fn plan_prepared(
         if format != "csv" {
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
-                format!("stdout format `{format}` is not supported in 0.5.0"),
+                format!("stdout format `{format}` is not supported in 0.6.0"),
                 Span::zero(),
             ));
             return Err(diagnostics);

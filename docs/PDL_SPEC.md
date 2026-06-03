@@ -1,15 +1,16 @@
 # PDL Detailed Specification
 
-Status: Draft 0.5.0
+Status: Draft 0.6.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.5.0`.
+The current repository implementation is `0.6.0`.
 
 This release keeps the existing CSV-backed language and runtime slice stable
-while hardening durable implementation boundaries. It implements the `pdl`
+while hardening durable implementation boundaries and restoring schema-aware
+editor, LSP, and WASM diagnostics. It implements the `pdl`
 CLI commands `run`, `check`, `lsp`, and `version`; CSV file loading with header
 rows; CSV file and stdout output; deterministic in-memory execution for `load`,
 `filter`, `select`, `drop`, `rename`, `group_by`, `agg`, `sort`, `limit`, and
@@ -26,14 +27,14 @@ execution output emission separated from planning, crate-boundary drift tests,
 semantic tokens, document symbols, and same-document binding
 definition/reference/rename; and it ships a thin VS Code client under
 `editors/vscode/` plus browser-safe WASM ABI helpers that use in-memory driver
-boundaries.
+boundaries, including host-schema-backed checks for embedded editors.
 
-Version 0.5.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
+Version 0.6.0 does not yet implement Arrow IPC, Parquet, JSON Lines, stdin
 loading, stream sniffing, configurable CSV dialect options, `mutate`, `join`,
 `union`, `distinct`, window expressions, schema/plan subcommands, CLI
 formatting, full LSP code actions or cross-document navigation, or browser demo
 support. Those features are tracked as deferred or planned work in successor
-release plans after `docs/V0_5_PLAN.md`.
+release plans after `docs/V0_6_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -119,7 +120,7 @@ The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
 over a partition and order of rows. Window expressions are planned but not
-implemented in version 0.5.0.
+implemented in version 0.6.0.
 
 The keyword `column` means a named field with a static PDL type and nullability.
 
@@ -825,7 +826,7 @@ Planned window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are not reserved by the version 0.5.0 implementation until window
+These words are not reserved by the version 0.6.0 implementation until window
 syntax is implemented.
 
 ### 6.6 Quoted Tokens
@@ -1100,7 +1101,7 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are planned syntax and are not implemented in version 0.5.0.
+Window expressions are planned syntax and are not implemented in version 0.6.0.
 
 Until implemented, parsers MAY recover with `E1211` or ordinary parse diagnostics
 when they encounter `over`.
@@ -1736,7 +1737,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions (Planned)
 
-Window function syntax is planned and not implemented in version 0.5.0.
+Window function syntax is planned and not implemented in version 0.6.0.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
 
@@ -2145,7 +2146,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.5.0` LSP implementation provides diagnostics,
+The current `0.6.0` LSP implementation provides diagnostics,
 completion, hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
@@ -2287,12 +2288,17 @@ It MUST NOT invoke external processes.
 The WASM runtime SHOULD expose JSON ABI calls for:
 
 - parse/check diagnostics
+- parse/check diagnostics with host-supplied schemas
 - formatting
 - schema inspection
 - plan inspection
 - bounded in-memory execution
 - Arrow IPC byte output
 - editor-service requests for Monaco
+
+Schema-aware WASM check calls MUST use host-supplied in-memory schemas or files
+through the shared driver/editor-service path. They MUST NOT read arbitrary host
+files or reimplement semantic validation in JavaScript or TypeScript.
 
 Editor-service requests SHOULD use LSP-shaped positions and results.
 
@@ -2400,7 +2406,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -2824,6 +2830,7 @@ PDL SHOULD use `pdl-exec` for this crate because the language executes data pipe
 - rename
 - document symbols
 - editor-neutral diagnostics helpers
+- schema-aware diagnostics over driver preparation reports
 - conversion between byte spans and editor-neutral UTF-16 text ranges
 
 `pdl-lsp` owns:
@@ -3383,7 +3390,7 @@ support:
 
 Descriptors record explicit format names, inferred path formats, and unresolved
 sniffing decisions. Real Arrow IPC parsing/writing, Parquet loading, JSON Lines
-loading, and stdin sniffing remain deferred past v0.5.0 unless a future plan
+loading, and stdin sniffing remain deferred past v0.6.0 unless a future plan
 promotes them with spec, examples, and tests.
 
 #### 19.7.8 Schema Cache And Preview Boundary
@@ -3939,7 +3946,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.5.0.
+PDL source does not require an explicit version declaration in draft 0.6.0.
 
 The implementation SHOULD report supported language version.
 

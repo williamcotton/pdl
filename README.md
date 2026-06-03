@@ -2,10 +2,10 @@
 
 PDL is a Unix-pipeline-style tabular data transformation DSL.
 
-The current `0.5.0` implementation supports a CSV-backed first slice with
+The current `0.6.0` implementation supports a CSV-backed first slice with
 registered lettered diagnostics, load-free driver data plans, phase-tagged
-preparation reports, semantic-IR execution planning, and the v0.5 architecture
-boundary checks:
+preparation reports, semantic-IR execution planning, schema-aware editor/LSP/WASM
+diagnostics, and the v0.6 maintenance boundary checks:
 
 ```bash
 cargo run -p pdl-cli -- run examples/top_regions.pdl

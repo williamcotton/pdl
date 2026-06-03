@@ -71,6 +71,16 @@ Three artifacts govern behavior, and they must stay in sync:
 If the spec, plan, and code disagree, treat it as drift to fix. Reconcile all
 three rather than picking one.
 
+### Numbered plan version bumps
+
+Whenever a numbered plan is implemented, bump the repository to that plan's
+target version in the same change. Update every related version stamp: Cargo
+workspace and lockfile package versions, CLI/version output, `docs/PDL_SPEC.md`,
+README or generated docs, VS Code package manifests, browser demo manifests if
+present, and user-facing release strings in diagnostics, hovers, or help text.
+Mark the implemented plan's `Status:` complete/shipped and start the next minor
+plan if the release is now closed.
+
 ## Workspace layout
 
 PDL follows the same general architecture shape as Algraf, with `pdl-exec`

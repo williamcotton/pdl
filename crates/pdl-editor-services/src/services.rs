@@ -2,12 +2,12 @@ use pdl_core::{Diagnostic, Severity, Span};
 use pdl_semantics::registry::{AGGREGATE_FUNCTIONS, FORMATS, KEYWORDS, STAGES};
 use pdl_semantics::{
     aggregate_function, analyze_program, format_info, stage_info, FormatInfo, FunctionInfo,
-    StageInfo,
+    LoadRequest, StageInfo,
 };
-use pdl_syntax::{Expr, Pipeline, PipelineStart, Program, SaveStage, Stage};
+use pdl_syntax::{Expr, ParseResult, Pipeline, PipelineStart, Program, SaveStage, Stage};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TextPosition {
@@ -102,14 +102,55 @@ pub struct EditorLocation {
     pub range: TextRange,
 }
 
-pub fn analyze_document(source: &str, _path: Option<&Path>) -> EditorDocument {
+pub fn analyze_document(source: &str, path: Option<&Path>) -> EditorDocument {
+    if let Some(path) = path {
+        return analyze_document_with_driver_io(source, path, &pdl_driver::OsDriverIo);
+    }
     let parse = pdl_syntax::parse(source);
-    let mut diagnostics = parse.diagnostics.clone();
     let optimistic_schema = optimistic_columns(&parse.program);
-    let analysis = analyze_program(&parse.program, |request| {
+    analyze_parsed_document(source, parse, |request| {
         let _ = request;
         Ok(optimistic_schema.clone())
-    });
+    })
+}
+
+pub fn analyze_document_with_driver_io(
+    source: &str,
+    path: &Path,
+    io: &dyn pdl_driver::DriverIo,
+) -> EditorDocument {
+    let prepared = pdl_driver::prepare_source_with_io(path, source, io);
+    EditorDocument {
+        diagnostics: diagnostics_for_editor(source, &prepared.diagnostics()),
+    }
+}
+
+pub fn analyze_document_with_schemas<I, P>(source: &str, path: &Path, schemas: I) -> EditorDocument
+where
+    I: IntoIterator<Item = (P, Vec<String>)>,
+    P: Into<PathBuf>,
+{
+    let mut io = pdl_driver::InMemoryDriverIo::default();
+    for (path, columns) in schemas {
+        io = io.with_schema(path, columns);
+    }
+    analyze_document_with_driver_io(source, path, &io)
+}
+
+pub fn analyze_document_with_load_schema<F>(source: &str, load_schema: F) -> EditorDocument
+where
+    F: FnMut(LoadRequest<'_>) -> Result<Vec<String>, Diagnostic>,
+{
+    let parse = pdl_syntax::parse(source);
+    analyze_parsed_document(source, parse, load_schema)
+}
+
+fn analyze_parsed_document<F>(source: &str, parse: ParseResult, load_schema: F) -> EditorDocument
+where
+    F: FnMut(LoadRequest<'_>) -> Result<Vec<String>, Diagnostic>,
+{
+    let mut diagnostics = parse.diagnostics.clone();
+    let analysis = analyze_program(&parse.program, load_schema);
     diagnostics.extend(analysis.diagnostics);
     EditorDocument {
         diagnostics: diagnostics_for_editor(source, &diagnostics),
@@ -1298,6 +1339,59 @@ mod tests {
 
         assert_eq!(diagnostics[0].range.start.line, 1);
         assert_eq!(diagnostics[0].range.start.character, 11);
+    }
+
+    #[test]
+    fn host_schema_diagnostics_report_unknown_filter_columns() {
+        let source = r#"load "sales.csv"
+  | filter "sttus" == "completed"
+  | group_by "region"
+  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age", count() as "orders"
+  | sort "total_revenue" desc
+  | limit 3"#;
+
+        let schemas = [(
+            PathBuf::from("memory/sales.csv"),
+            vec![
+                "region".to_string(),
+                "status".to_string(),
+                "amount".to_string(),
+                "customer_age".to_string(),
+            ],
+        )];
+        let document = analyze_document_with_schemas(source, Path::new("memory/main.pdl"), schemas);
+
+        let diagnostic = document
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "E1005")
+            .expect("unknown column diagnostic");
+        assert_eq!(diagnostic.message, "unknown column `sttus`");
+        assert_eq!(diagnostic.range.start.line, 1);
+        assert_eq!(diagnostic.range.start.character, 11);
+
+        let corrected = source.replace("\"sttus\"", "\"status\"");
+        let corrected_document = analyze_document_with_schemas(
+            &corrected,
+            Path::new("memory/main.pdl"),
+            [(
+                PathBuf::from("memory/sales.csv"),
+                vec![
+                    "region".to_string(),
+                    "status".to_string(),
+                    "amount".to_string(),
+                    "customer_age".to_string(),
+                ],
+            )],
+        );
+        assert!(
+            !corrected_document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E1005"),
+            "{:?}",
+            corrected_document.diagnostics
+        );
     }
 
     #[test]

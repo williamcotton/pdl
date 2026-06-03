@@ -111,7 +111,7 @@ fn load_schema_for_request(
                 if format.value != "csv" {
                     return Err(Diagnostic::error(
                         codes::E1215,
-                        format!("format `{}` is not supported in 0.5.0", format.value),
+                        format!("format `{}` is not supported in 0.6.0", format.value),
                         format.span,
                     ));
                 }
@@ -131,7 +131,7 @@ fn load_schema_for_request(
         }
         SourceRef::Stdin(span) => Err(Diagnostic::error(
             codes::E1211,
-            "stdin loading is deferred in 0.5.0",
+            "stdin loading is deferred in 0.6.0",
             *span,
         )),
     }
