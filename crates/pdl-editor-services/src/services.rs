@@ -1,5 +1,7 @@
 use pdl_core::{Diagnostic, Severity, Span};
-use pdl_semantics::registry::{AGGREGATE_FUNCTIONS, FORMATS, KEYWORDS, SCALAR_FUNCTIONS, STAGES};
+use pdl_semantics::registry::{
+    AGGREGATE_FUNCTIONS, FORMATS, KEYWORDS, SCALAR_FUNCTIONS, STAGES, WINDOW_FUNCTIONS,
+};
 use pdl_semantics::{analyze_program, FormatInfo, FunctionInfo, LoadRequest, StageInfo};
 use pdl_syntax::{Expr, JoinKind, ParseResult, Pipeline, PipelineStart, Program, Stage};
 use serde::{Deserialize, Serialize};
@@ -216,6 +218,9 @@ pub fn completions(
         completions.extend(AGGREGATE_FUNCTIONS.iter().map(function_completion));
     } else if context.in_scalar_function_context {
         completions.extend(SCALAR_FUNCTIONS.iter().map(function_completion));
+        if context.in_mutate_context {
+            completions.extend(WINDOW_FUNCTIONS.iter().map(function_completion));
+        }
     } else if context.in_sort_direction_context {
         completions.extend([
             keyword_completion("asc", "Sort ascending"),
@@ -282,6 +287,7 @@ pub fn semantic_tokens(source: &str) -> Vec<EditorSemanticToken> {
                 SemanticTokenKind::Keyword
             } else if AGGREGATE_FUNCTIONS.iter().any(|info| info.name == text)
                 || SCALAR_FUNCTIONS.iter().any(|info| info.name == text)
+                || WINDOW_FUNCTIONS.iter().any(|info| info.name == text)
             {
                 SemanticTokenKind::Function
             } else {
@@ -435,6 +441,7 @@ struct CompletionContext {
     in_join_kind_name_context: bool,
     in_agg_function_context: bool,
     in_scalar_function_context: bool,
+    in_mutate_context: bool,
     in_sort_direction_context: bool,
     in_column_context: bool,
     inside_string: bool,
@@ -485,6 +492,7 @@ impl CompletionContext {
         let in_agg_function_context = stage.as_deref() == Some("agg")
             && !inside_string
             && after_keyword.is_some_and(|suffix| !suffix.contains('(') || suffix.ends_with(','));
+        let in_mutate_context = stage.as_deref() == Some("mutate");
         let in_scalar_function_context = matches!(stage.as_deref(), Some("filter" | "mutate"))
             && !inside_string
             && word.chars().all(is_ident_char);
@@ -517,6 +525,7 @@ impl CompletionContext {
             in_join_kind_name_context,
             in_agg_function_context,
             in_scalar_function_context,
+            in_mutate_context,
             in_sort_direction_context,
             in_column_context,
             inside_string,
@@ -608,6 +617,17 @@ fn collect_expr_columns(expr: &Expr, columns: &mut BTreeSet<String>) {
         Expr::Call { args, .. } => {
             for arg in args {
                 collect_expr_columns(arg, columns);
+            }
+        }
+        Expr::Window { args, spec, .. } => {
+            for arg in args {
+                collect_expr_columns(arg, columns);
+            }
+            for column in &spec.partition_by {
+                columns.insert(column.value.clone());
+            }
+            for item in &spec.order_by {
+                columns.insert(item.column.value.clone());
             }
         }
         Expr::Unary { expr, .. } => collect_expr_columns(expr, columns),

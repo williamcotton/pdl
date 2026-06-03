@@ -1,7 +1,7 @@
 use pdl_core::Span;
 use pdl_syntax::{
-    AggItem, BinaryOp, Expr, Pipeline, PipelineStart, Program, SinkRef, SortItem, SourceRef, Stage,
-    UnaryOp, UnionOptionKind,
+    AggItem, BinaryOp, Expr, FrameBound, Pipeline, PipelineStart, Program, SinkRef, SortItem,
+    SourceRef, Stage, UnaryOp, UnionOptionKind, WindowSpec,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -202,6 +202,12 @@ pub enum ExprIr {
         args: Vec<ExprIr>,
         span: Span,
     },
+    Window {
+        function: String,
+        args: Vec<ExprIr>,
+        spec: WindowSpecIr,
+        span: Span,
+    },
     Unary {
         op: UnaryOpIr,
         expr: Box<ExprIr>,
@@ -224,10 +230,35 @@ impl ExprIr {
             | ExprIr::Null { span }
             | ExprIr::Ident { span, .. }
             | ExprIr::Call { span, .. }
+            | ExprIr::Window { span, .. }
             | ExprIr::Unary { span, .. }
             | ExprIr::Binary { span, .. } => *span,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowSpecIr {
+    pub partition_by: Vec<String>,
+    pub order_by: Vec<SortItemIr>,
+    pub frame: Option<WindowFrameIr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowFrameIr {
+    pub start: FrameBoundIr,
+    pub end: FrameBoundIr,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FrameBoundIr {
+    UnboundedPreceding { span: Span },
+    Preceding { rows: usize, span: Span },
+    CurrentRow { span: Span },
+    Following { rows: usize, span: Span },
+    UnboundedFollowing { span: Span },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -457,6 +488,17 @@ fn lower_expr(expr: &Expr) -> ExprIr {
             args: args.iter().map(lower_expr).collect(),
             span: *span,
         },
+        Expr::Window {
+            function,
+            args,
+            spec,
+            span,
+        } => ExprIr::Window {
+            function: function.value.clone(),
+            args: args.iter().map(lower_expr).collect(),
+            spec: lower_window_spec(spec),
+            span: *span,
+        },
         Expr::Unary { op, expr, span } => ExprIr::Unary {
             op: lower_unary_op(*op),
             expr: Box::new(lower_expr(expr)),
@@ -473,6 +515,39 @@ fn lower_expr(expr: &Expr) -> ExprIr {
             right: Box::new(lower_expr(right)),
             span: *span,
         },
+    }
+}
+
+fn lower_window_spec(spec: &WindowSpec) -> WindowSpecIr {
+    WindowSpecIr {
+        partition_by: spec
+            .partition_by
+            .iter()
+            .map(|column| column.value.clone())
+            .collect(),
+        order_by: spec.order_by.iter().map(lower_sort_item).collect(),
+        frame: spec.frame.as_ref().map(|frame| WindowFrameIr {
+            start: lower_frame_bound(&frame.start),
+            end: lower_frame_bound(&frame.end),
+            span: frame.span,
+        }),
+        span: spec.span,
+    }
+}
+
+fn lower_frame_bound(bound: &FrameBound) -> FrameBoundIr {
+    match bound {
+        FrameBound::UnboundedPreceding { span } => FrameBoundIr::UnboundedPreceding { span: *span },
+        FrameBound::Preceding { rows, span } => FrameBoundIr::Preceding {
+            rows: *rows,
+            span: *span,
+        },
+        FrameBound::CurrentRow { span } => FrameBoundIr::CurrentRow { span: *span },
+        FrameBound::Following { rows, span } => FrameBoundIr::Following {
+            rows: *rows,
+            span: *span,
+        },
+        FrameBound::UnboundedFollowing { span } => FrameBoundIr::UnboundedFollowing { span: *span },
     }
 }
 

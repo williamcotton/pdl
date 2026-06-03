@@ -2,7 +2,7 @@
 
 PDL is a Unix-pipeline-style tabular data transformation DSL.
 
-The current `0.15.0` implementation supports a native tabular-format slice with
+The current `0.16.0` implementation supports a native tabular-format slice with
 registered lettered diagnostics, load-free driver data plans, phase-tagged
 preparation reports, semantic-IR execution planning, schema-aware editor/LSP/WASM
 diagnostics, recoverable syntax diagnostics for malformed filter/sort/aggregate
@@ -10,9 +10,9 @@ stages and missing stage pipes, a minimal React/Vite/Monaco browser demo, and
 WASM in-memory CSV execution. Native CLI execution supports CSV, JSON Lines,
 Parquet, Arrow IPC file, and Arrow IPC stream loading/saving, stdin sniffing,
 and deterministic stdout interop. It includes row-preserving data manipulation
-with `mutate`, `distinct`, scalar cleanup functions, multi-input `join`/`union`,
-and native CLI inspection through `fmt`, `schema`, `plan`, `ast`, `ir`, and
-`manifest`:
+with `mutate`, `distinct`, scalar cleanup functions, window expressions,
+multi-input `join`/`union`, and native CLI inspection through `fmt`, `schema`,
+`plan`, `ast`, `ir`, and `manifest`:
 
 ```bash
 cargo run -p pdl-cli -- run examples/top_regions.pdl --stdout-format csv
@@ -32,6 +32,12 @@ Multi-input examples use named bindings:
 ```bash
 cargo run -p pdl-cli -- run examples/segment_revenue.pdl --stdout-format csv
 cargo run -p pdl-cli -- run examples/daily_orders_union.pdl --stdout-format csv
+```
+
+Window examples compute row-preserving analytics:
+
+```bash
+cargo run -p pdl-cli -- run examples/customer_window_metrics.pdl --stdout-format csv
 ```
 
 Stream interop examples cover stdin and Arrow IPC stream output:

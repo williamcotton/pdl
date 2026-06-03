@@ -754,6 +754,11 @@ fn expr_function_spans(expr: &Expr) -> Vec<(String, Span)> {
             spans.extend(args.iter().flat_map(expr_function_spans));
             spans
         }
+        Expr::Window { function, args, .. } => {
+            let mut spans = vec![(function.value.clone(), function.span)];
+            spans.extend(args.iter().flat_map(expr_function_spans));
+            spans
+        }
         Expr::Unary { expr, .. } => expr_function_spans(expr),
         Expr::Binary { left, right, .. } => {
             let mut spans = expr_function_spans(left);
@@ -770,6 +775,12 @@ fn expr_column_spans(expr: &Expr) -> Vec<Span> {
     match expr {
         Expr::Quoted(value) => vec![value.span],
         Expr::Call { args, .. } => args.iter().flat_map(expr_column_spans).collect(),
+        Expr::Window { args, spec, .. } => {
+            let mut spans = args.iter().flat_map(expr_column_spans).collect::<Vec<_>>();
+            spans.extend(spec.partition_by.iter().map(|column| column.span));
+            spans.extend(spec.order_by.iter().map(|item| item.column.span));
+            spans
+        }
         Expr::Unary { expr, .. } => expr_column_spans(expr),
         Expr::Binary { left, right, .. } => {
             let mut spans = expr_column_spans(left);

@@ -79,7 +79,7 @@
       "patterns": [
         {
           "name": "keyword.control.pdl",
-          "match": "\\b(?:let|load|filter|select|drop|rename|mutate|group_by|agg|sort|limit|join|union|distinct|save|as|on|kind|by_name|format|stdin|stdout|and|or|not|asc|desc|inner|left|right|full|semi|anti|nulls_first|nulls_last)\\b"
+          "match": "\\b(?:let|load|filter|select|drop|rename|mutate|group_by|agg|sort|limit|join|union|distinct|save|as|on|kind|by_name|format|over|partition_by|order_by|rows|between|unbounded_preceding|current_row|unbounded_following|preceding|following|stdin|stdout|and|or|not|asc|desc|inner|left|right|full|semi|anti|nulls_first|nulls_last)\\b"
         },
         {
           "name": "constant.language.pdl",
@@ -96,6 +96,10 @@
         {
           "name": "support.function.scalar.pdl",
           "match": "\\b(?:col|lit|is_null|not_null|coalesce|concat|lower|upper|trim|to_number|abs|round|if_else)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.window.pdl",
+          "match": "\\b(?:row_number|rank|dense_rank|percent_rank|cume_dist|lag|lead|first_value|last_value)\\b(?=\\s*\\()"
         }
       ]
     }

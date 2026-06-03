@@ -46,6 +46,14 @@ fn daily_orders_union_example_runs_to_csv_stdout() {
 }
 
 #[test]
+fn customer_window_metrics_example_runs_to_csv_stdout() {
+    assert_example_stdout(
+        "examples/customer_window_metrics.pdl",
+        "region,customer_id,amount,customer_sale_number,customer_revenue,region_revenue_rank\nWest,C003,200,1,350,1\nWest,C003,150,2,350,1\nNorth,C001,120,1,200,2\nNorth,C001,80,2,200,2\nEast,C005,90,1,90,3\nSouth,C004,50,1,50,4\n",
+    );
+}
+
+#[test]
 fn jsonl_orders_example_runs_to_csv_stdout() {
     assert_example_stdout(
         "examples/jsonl_orders.pdl",
@@ -439,7 +447,7 @@ fn ast_ir_and_manifest_commands_emit_json() {
         String::from_utf8_lossy(&manifest.stderr)
     );
     let manifest_stdout = String::from_utf8(manifest.stdout).expect("manifest stdout is UTF-8");
-    assert!(manifest_stdout.contains("\"manifest_version\": \"0.15.0\""));
+    assert!(manifest_stdout.contains("\"manifest_version\": \"0.16.0\""));
     assert!(manifest_stdout.contains("\"algraf_interop\""));
     assert!(manifest_stdout.contains("\"arrow-stream\""));
 }

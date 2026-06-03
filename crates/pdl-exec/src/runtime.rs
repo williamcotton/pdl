@@ -8,8 +8,8 @@ use pdl_driver::{
     SinkDescriptor, SourceDescriptor,
 };
 use pdl_semantics::{
-    AggItemIr, BinaryOpIr, ExprIr, JoinKindIr, MutateItemIr, NullsOrderIr, PipelineIr,
-    PipelineStartIr, SortDirectionIr, StageIr, UnaryOpIr,
+    AggItemIr, BinaryOpIr, ExprIr, FrameBoundIr, JoinKindIr, MutateItemIr, NullsOrderIr,
+    PipelineIr, PipelineStartIr, SortDirectionIr, StageIr, UnaryOpIr, WindowFrameIr, WindowSpecIr,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -248,7 +248,7 @@ impl Runtime<'_> {
                 StageIr::Unsupported { name, span } => {
                     return Err(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{name}` is deferred in 0.15.0"),
+                        format!("stage `{name}` is deferred in 0.16.0"),
                         *span,
                     ));
                 }
@@ -367,13 +367,13 @@ impl Runtime<'_> {
         let rows = table
             .rows
             .iter()
-            .filter_map(
-                |row| match eval_row_expr(expr, &table, row, ExprRole::PredicateRoot) {
+            .filter_map(|row| {
+                match eval_row_expr(expr, &table, row, ExprRole::PredicateRoot, None) {
                     Ok(value) if value.is_truthy_true() => Some(Ok(row.clone())),
                     Ok(_) => None,
                     Err(diagnostic) => Some(Err(diagnostic)),
-                },
-            )
+                }
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Table {
             columns: table.columns,
@@ -432,10 +432,12 @@ impl Runtime<'_> {
         let rows = table
             .rows
             .iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(row_index, row)| {
                 let mut values = row.values.clone();
                 for item in items {
-                    let value = eval_row_expr(&item.expr, &table, row, ExprRole::Default)?;
+                    let value =
+                        eval_row_expr(&item.expr, &table, row, ExprRole::Default, Some(row_index))?;
                     if let Some(index) = input_columns
                         .iter()
                         .position(|column| column == &item.column)
@@ -611,7 +613,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.15.0"),
+                format!("format `{format}` is not supported in 0.16.0"),
                 span,
             )
         });
@@ -621,7 +623,7 @@ fn resolve_input_format(
             return DataFormat::from_name(format).ok_or_else(|| {
                 Diagnostic::error(
                     codes::E1215,
-                    format!("stdin format `{format}` is not supported in 0.15.0"),
+                    format!("stdin format `{format}` is not supported in 0.16.0"),
                     input.span,
                 )
             });
@@ -645,7 +647,7 @@ fn resolve_output_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1705,
-                format!("output format `{format}` is not supported in 0.15.0"),
+                format!("output format `{format}` is not supported in 0.16.0"),
                 span,
             )
         });
@@ -915,6 +917,7 @@ fn eval_row_expr(
     table: &Table,
     row: &Row,
     role: ExprRole,
+    window_row_index: Option<usize>,
 ) -> Result<Value, Diagnostic> {
     match expr {
         ExprIr::Quoted { value, span } => match role {
@@ -936,9 +939,24 @@ fn eval_row_expr(
             format!("unexpected bare identifier `{value}` in expression"),
             *span,
         )),
-        ExprIr::Call { name, args, span } => eval_call(name, args, table, row, *span),
+        ExprIr::Call { name, args, span } => {
+            eval_call(name, args, table, row, *span, window_row_index)
+        }
+        ExprIr::Window {
+            function,
+            args,
+            spec,
+            span,
+        } => match window_row_index {
+            Some(row_index) => eval_window_expr(function, args, spec, table, row_index, *span),
+            None => Err(Diagnostic::error(
+                codes::E1226,
+                "window expressions are supported only in `mutate` assignments",
+                *span,
+            )),
+        },
         ExprIr::Unary { op, expr, span } => {
-            let value = eval_row_expr(expr, table, row, ExprRole::Default)?;
+            let value = eval_row_expr(expr, table, row, ExprRole::Default, window_row_index)?;
             match op {
                 UnaryOpIr::Not => match value {
                     Value::Bool(value) => Ok(Value::Bool(!value)),
@@ -964,7 +982,7 @@ fn eval_row_expr(
             op,
             right,
             span,
-        } => eval_binary(*op, left, right, table, row, *span),
+        } => eval_binary(*op, left, right, table, row, *span, window_row_index),
     }
 }
 
@@ -974,6 +992,7 @@ fn eval_call(
     table: &Table,
     row: &Row,
     span: Span,
+    window_row_index: Option<usize>,
 ) -> Result<Value, Diagnostic> {
     match name {
         "col" => match args {
@@ -989,7 +1008,7 @@ fn eval_call(
         },
         "lit" => match args {
             [ExprIr::Quoted { value, .. }] => Ok(Value::String(value.clone())),
-            [expr] => eval_row_expr(expr, table, row, ExprRole::Default),
+            [expr] => eval_row_expr(expr, table, row, ExprRole::Default, window_row_index),
             _ => Err(Diagnostic::error(
                 codes::E1402,
                 "lit() expects one argument",
@@ -998,7 +1017,7 @@ fn eval_call(
         },
         "is_null" => match args {
             [expr] => Ok(Value::Bool(matches!(
-                eval_row_expr(expr, table, row, ExprRole::Default)?,
+                eval_row_expr(expr, table, row, ExprRole::Default, window_row_index)?,
                 Value::Null
             ))),
             _ => Err(Diagnostic::error(
@@ -1009,7 +1028,7 @@ fn eval_call(
         },
         "not_null" => match args {
             [expr] => Ok(Value::Bool(!matches!(
-                eval_row_expr(expr, table, row, ExprRole::Default)?,
+                eval_row_expr(expr, table, row, ExprRole::Default, window_row_index)?,
                 Value::Null
             ))),
             _ => Err(Diagnostic::error(
@@ -1020,7 +1039,7 @@ fn eval_call(
         },
         "coalesce" => {
             for arg in args {
-                let value = eval_row_expr(arg, table, row, ExprRole::Default)?;
+                let value = eval_row_expr(arg, table, row, ExprRole::Default, window_row_index)?;
                 if !matches!(value, Value::Null) {
                     return Ok(value);
                 }
@@ -1030,23 +1049,23 @@ fn eval_call(
         "concat" => {
             let mut text = String::new();
             for arg in args {
-                let value = eval_row_expr(arg, table, row, ExprRole::Default)?;
+                let value = eval_row_expr(arg, table, row, ExprRole::Default, window_row_index)?;
                 if !matches!(value, Value::Null) {
                     text.push_str(&value.to_csv_cell());
                 }
             }
             Ok(Value::String(text))
         }
-        "lower" => eval_single_arg(args, table, row, span, |value| {
+        "lower" => eval_single_arg(args, table, row, span, window_row_index, |value| {
             Ok(map_text(value, |text| text.to_ascii_lowercase()))
         }),
-        "upper" => eval_single_arg(args, table, row, span, |value| {
+        "upper" => eval_single_arg(args, table, row, span, window_row_index, |value| {
             Ok(map_text(value, |text| text.to_ascii_uppercase()))
         }),
-        "trim" => eval_single_arg(args, table, row, span, |value| {
+        "trim" => eval_single_arg(args, table, row, span, window_row_index, |value| {
             Ok(map_text(value, |text| text.trim().to_string()))
         }),
-        "to_number" => eval_single_arg(args, table, row, span, |value| {
+        "to_number" => eval_single_arg(args, table, row, span, window_row_index, |value| {
             Ok(match value {
                 Value::Null => Value::Null,
                 Value::Number(_) => value,
@@ -1058,30 +1077,49 @@ fn eval_call(
                     .unwrap_or(Value::Null),
             })
         }),
-        "abs" => eval_single_arg(args, table, row, span, |value| match value {
-            Value::Null => Ok(Value::Null),
-            Value::Number(value) => Ok(Value::Number(value.abs())),
-            _ => Err(Diagnostic::error(
-                codes::E1302,
-                "abs() requires a number",
-                span,
-            )),
-        }),
-        "round" => eval_single_arg(args, table, row, span, |value| match value {
-            Value::Null => Ok(Value::Null),
-            Value::Number(value) => Ok(Value::Number(value.round())),
-            _ => Err(Diagnostic::error(
-                codes::E1302,
-                "round() requires a number",
-                span,
-            )),
-        }),
+        "abs" => eval_single_arg(
+            args,
+            table,
+            row,
+            span,
+            window_row_index,
+            |value| match value {
+                Value::Null => Ok(Value::Null),
+                Value::Number(value) => Ok(Value::Number(value.abs())),
+                _ => Err(Diagnostic::error(
+                    codes::E1302,
+                    "abs() requires a number",
+                    span,
+                )),
+            },
+        ),
+        "round" => eval_single_arg(
+            args,
+            table,
+            row,
+            span,
+            window_row_index,
+            |value| match value {
+                Value::Null => Ok(Value::Null),
+                Value::Number(value) => Ok(Value::Number(value.round())),
+                _ => Err(Diagnostic::error(
+                    codes::E1302,
+                    "round() requires a number",
+                    span,
+                )),
+            },
+        ),
         "if_else" => match args {
             [condition, when_true, when_false] => {
-                let condition = eval_row_expr(condition, table, row, ExprRole::Default)?;
+                let condition =
+                    eval_row_expr(condition, table, row, ExprRole::Default, window_row_index)?;
                 match condition {
-                    Value::Bool(true) => eval_row_expr(when_true, table, row, ExprRole::Default),
-                    Value::Bool(false) => eval_row_expr(when_false, table, row, ExprRole::Default),
+                    Value::Bool(true) => {
+                        eval_row_expr(when_true, table, row, ExprRole::Default, window_row_index)
+                    }
+                    Value::Bool(false) => {
+                        eval_row_expr(when_false, table, row, ExprRole::Default, window_row_index)
+                    }
                     Value::Null => Ok(Value::Null),
                     _ => Err(Diagnostic::error(
                         codes::E1302,
@@ -1104,16 +1142,444 @@ fn eval_call(
     }
 }
 
+fn eval_window_expr(
+    function: &str,
+    args: &[ExprIr],
+    spec: &WindowSpecIr,
+    table: &Table,
+    current_index: usize,
+    span: Span,
+) -> Result<Value, Diagnostic> {
+    let partition = ordered_partition_indices(table, spec, current_index);
+    let Some(position) = partition.iter().position(|index| *index == current_index) else {
+        return Ok(Value::Null);
+    };
+
+    match function {
+        "row_number" => Ok(Value::Number((position + 1) as f64)),
+        "rank" => Ok(Value::Number(
+            rank_value(table, spec, &partition, position) as f64
+        )),
+        "dense_rank" => Ok(Value::Number(
+            dense_rank_value(table, spec, &partition, position) as f64,
+        )),
+        "percent_rank" => {
+            if partition.len() <= 1 {
+                Ok(Value::Number(0.0))
+            } else {
+                let rank = rank_value(table, spec, &partition, position);
+                Ok(Value::Number(
+                    (rank.saturating_sub(1)) as f64 / (partition.len() - 1) as f64,
+                ))
+            }
+        }
+        "cume_dist" => {
+            if partition.is_empty() {
+                Ok(Value::Null)
+            } else {
+                let last_peer = last_peer_position(table, spec, &partition, position);
+                Ok(Value::Number(
+                    (last_peer + 1) as f64 / partition.len() as f64,
+                ))
+            }
+        }
+        "lag" => eval_offset_window(args, table, &partition, position, -1, span),
+        "lead" => eval_offset_window(args, table, &partition, position, 1, span),
+        "first_value" => {
+            let Some(arg) = args.first() else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "first_value() expects one argument",
+                    span,
+                ));
+            };
+            let frame = frame_indices(spec.frame.as_ref(), &partition, position);
+            let Some(row_index) = frame.first() else {
+                return Ok(Value::Null);
+            };
+            eval_row_expr(arg, table, &table.rows[*row_index], ExprRole::Default, None)
+        }
+        "last_value" => {
+            let Some(arg) = args.first() else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "last_value() expects one argument",
+                    span,
+                ));
+            };
+            let frame = frame_indices(spec.frame.as_ref(), &partition, position);
+            let Some(row_index) = frame.last() else {
+                return Ok(Value::Null);
+            };
+            eval_row_expr(arg, table, &table.rows[*row_index], ExprRole::Default, None)
+        }
+        "count" | "sum" | "mean" | "min" | "max" => {
+            let frame = frame_indices(spec.frame.as_ref(), &partition, position);
+            let rows = frame
+                .iter()
+                .map(|index| &table.rows[*index])
+                .collect::<Vec<_>>();
+            eval_window_aggregate(function, args, table, &rows, span)
+        }
+        _ => Err(Diagnostic::error(
+            codes::E1401,
+            format!("unknown window function `{function}`"),
+            span,
+        )),
+    }
+}
+
+fn ordered_partition_indices(
+    table: &Table,
+    spec: &WindowSpecIr,
+    current_index: usize,
+) -> Vec<usize> {
+    let current_key = partition_key(table, spec, current_index);
+    let mut indices = table
+        .rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, _)| {
+            (partition_key(table, spec, index) == current_key).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if !spec.order_by.is_empty() {
+        indices.sort_by(|left, right| compare_rows_for_window_order(table, spec, *left, *right));
+    }
+    indices
+}
+
+fn partition_key(table: &Table, spec: &WindowSpecIr, row_index: usize) -> Vec<Value> {
+    let row = &table.rows[row_index];
+    spec.partition_by
+        .iter()
+        .map(|column| table.value(row, column).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+fn compare_rows_for_window_order(
+    table: &Table,
+    spec: &WindowSpecIr,
+    left_index: usize,
+    right_index: usize,
+) -> Ordering {
+    let left = &table.rows[left_index];
+    let right = &table.rows[right_index];
+    for item in &spec.order_by {
+        let Some(column_index) = table.column_index(&item.column) else {
+            continue;
+        };
+        let nulls = item
+            .nulls
+            .map(|nulls| match nulls {
+                NullsOrderIr::First => DataNullsOrder::First,
+                NullsOrderIr::Last => DataNullsOrder::Last,
+            })
+            .unwrap_or(match item.direction {
+                SortDirectionIr::Asc => DataNullsOrder::Last,
+                SortDirectionIr::Desc => DataNullsOrder::First,
+            });
+        let ordering = compare_values_for_window_sort(
+            left.values.get(column_index).unwrap_or(&Value::Null),
+            right.values.get(column_index).unwrap_or(&Value::Null),
+            nulls,
+        );
+        let ordering = match item.direction {
+            SortDirectionIr::Asc => ordering,
+            SortDirectionIr::Desc => ordering.reverse(),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
+fn compare_values_for_window_sort(left: &Value, right: &Value, nulls: DataNullsOrder) -> Ordering {
+    match (left, right) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => match nulls {
+            DataNullsOrder::First => Ordering::Less,
+            DataNullsOrder::Last => Ordering::Greater,
+        },
+        (_, Value::Null) => match nulls {
+            DataNullsOrder::First => Ordering::Greater,
+            DataNullsOrder::Last => Ordering::Less,
+        },
+        _ => compare_values(left, right).unwrap_or(Ordering::Equal),
+    }
+}
+
+fn rank_value(table: &Table, spec: &WindowSpecIr, partition: &[usize], position: usize) -> usize {
+    let current_key = order_key(table, spec, partition[position]);
+    partition
+        .iter()
+        .position(|index| order_key(table, spec, *index) == current_key)
+        .map_or(position + 1, |index| index + 1)
+}
+
+fn dense_rank_value(
+    table: &Table,
+    spec: &WindowSpecIr,
+    partition: &[usize],
+    position: usize,
+) -> usize {
+    let current_key = order_key(table, spec, partition[position]);
+    let mut previous = None;
+    let mut rank = 0usize;
+    for index in partition.iter().take(position + 1) {
+        let key = order_key(table, spec, *index);
+        if previous.as_ref() != Some(&key) {
+            rank += 1;
+            previous = Some(key.clone());
+        }
+        if key == current_key {
+            return rank;
+        }
+    }
+    rank
+}
+
+fn last_peer_position(
+    table: &Table,
+    spec: &WindowSpecIr,
+    partition: &[usize],
+    position: usize,
+) -> usize {
+    let current_key = order_key(table, spec, partition[position]);
+    partition
+        .iter()
+        .rposition(|index| order_key(table, spec, *index) == current_key)
+        .unwrap_or(position)
+}
+
+fn order_key(table: &Table, spec: &WindowSpecIr, row_index: usize) -> Vec<Value> {
+    let row = &table.rows[row_index];
+    spec.order_by
+        .iter()
+        .map(|item| {
+            table
+                .value(row, &item.column)
+                .cloned()
+                .unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+fn eval_offset_window(
+    args: &[ExprIr],
+    table: &Table,
+    partition: &[usize],
+    position: usize,
+    direction: isize,
+    span: Span,
+) -> Result<Value, Diagnostic> {
+    let Some(value_expr) = args.first() else {
+        return Err(Diagnostic::error(
+            codes::E1402,
+            "lag/lead expects at least one argument",
+            span,
+        ));
+    };
+    let offset = window_offset(args.get(1), span)? as isize;
+    let target = position as isize + direction * offset;
+    if target < 0 || target >= partition.len() as isize {
+        return match args.get(2) {
+            Some(default) => eval_row_expr(
+                default,
+                table,
+                &table.rows[partition[position]],
+                ExprRole::Default,
+                None,
+            ),
+            None => Ok(Value::Null),
+        };
+    }
+    let row_index = partition[target as usize];
+    eval_row_expr(
+        value_expr,
+        table,
+        &table.rows[row_index],
+        ExprRole::Default,
+        None,
+    )
+}
+
+fn window_offset(offset: Option<&ExprIr>, span: Span) -> Result<usize, Diagnostic> {
+    match offset {
+        None => Ok(1),
+        Some(ExprIr::Number { value, .. }) if *value >= 0.0 && value.fract() == 0.0 => {
+            Ok(*value as usize)
+        }
+        Some(expr) => Err(Diagnostic::error(
+            codes::E1206,
+            "lag/lead offset must be a non-negative integer literal",
+            expr.span(),
+        )),
+    }
+    .map_err(|mut diagnostic| {
+        if diagnostic.span == Span::zero() {
+            diagnostic.span = span;
+        }
+        diagnostic
+    })
+}
+
+fn frame_indices(
+    frame: Option<&WindowFrameIr>,
+    partition: &[usize],
+    position: usize,
+) -> Vec<usize> {
+    let Some(frame) = frame else {
+        return partition.to_vec();
+    };
+    if partition.is_empty() {
+        return Vec::new();
+    }
+    let last = partition.len() as isize - 1;
+    let start = frame_bound_position(&frame.start, position as isize, last);
+    let end = frame_bound_position(&frame.end, position as isize, last);
+    if start > end {
+        return Vec::new();
+    }
+    let start = start.clamp(0, last) as usize;
+    let end = end.clamp(0, last) as usize;
+    if start > end {
+        return Vec::new();
+    }
+    partition[start..=end].to_vec()
+}
+
+fn frame_bound_position(bound: &FrameBoundIr, position: isize, last: isize) -> isize {
+    match bound {
+        FrameBoundIr::UnboundedPreceding { .. } => 0,
+        FrameBoundIr::Preceding { rows, .. } => position - *rows as isize,
+        FrameBoundIr::CurrentRow { .. } => position,
+        FrameBoundIr::Following { rows, .. } => position + *rows as isize,
+        FrameBoundIr::UnboundedFollowing { .. } => last,
+    }
+}
+
+fn eval_window_aggregate(
+    function: &str,
+    args: &[ExprIr],
+    table: &Table,
+    rows: &[&Row],
+    span: Span,
+) -> Result<Value, Diagnostic> {
+    match function {
+        "count" if args.is_empty() => Ok(Value::Number(rows.len() as f64)),
+        "count" => {
+            let Some(arg) = args.first() else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "count() expects zero or one argument",
+                    span,
+                ));
+            };
+            let values = aggregate_arg_values(arg, table, rows)?;
+            Ok(Value::Number(
+                values
+                    .iter()
+                    .filter(|value| !matches!(value, Value::Null))
+                    .count() as f64,
+            ))
+        }
+        "sum" => {
+            let Some(arg) = args.first() else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "sum() expects one argument",
+                    span,
+                ));
+            };
+            let values = aggregate_arg_values(arg, table, rows)?;
+            let mut found = false;
+            let mut sum = 0.0;
+            for value in values {
+                if let Value::Number(number) = value {
+                    found = true;
+                    sum += number;
+                }
+            }
+            Ok(if found {
+                Value::Number(sum)
+            } else {
+                Value::Null
+            })
+        }
+        "mean" => {
+            let Some(arg) = args.first() else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "mean() expects one argument",
+                    span,
+                ));
+            };
+            let values = aggregate_arg_values(arg, table, rows)?;
+            let numbers = values
+                .into_iter()
+                .filter_map(|value| value.as_number())
+                .collect::<Vec<_>>();
+            if numbers.is_empty() {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::Number(
+                    numbers.iter().sum::<f64>() / numbers.len() as f64,
+                ))
+            }
+        }
+        "min" => {
+            let Some(arg) = args.first() else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "min() expects one argument",
+                    span,
+                ));
+            };
+            aggregate_arg_values(arg, table, rows).map(|values| {
+                values
+                    .into_iter()
+                    .filter(|value| !matches!(value, Value::Null))
+                    .min_by(|left, right| compare_values(left, right).unwrap_or(Ordering::Equal))
+                    .unwrap_or(Value::Null)
+            })
+        }
+        "max" => {
+            let Some(arg) = args.first() else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "max() expects one argument",
+                    span,
+                ));
+            };
+            aggregate_arg_values(arg, table, rows).map(|values| {
+                values
+                    .into_iter()
+                    .filter(|value| !matches!(value, Value::Null))
+                    .max_by(|left, right| compare_values(left, right).unwrap_or(Ordering::Equal))
+                    .unwrap_or(Value::Null)
+            })
+        }
+        _ => Err(Diagnostic::error(
+            codes::E1401,
+            format!("unknown window aggregate `{function}`"),
+            span,
+        )),
+    }
+}
+
 fn eval_single_arg(
     args: &[ExprIr],
     table: &Table,
     row: &Row,
     span: Span,
+    window_row_index: Option<usize>,
     apply: impl FnOnce(Value) -> Result<Value, Diagnostic>,
 ) -> Result<Value, Diagnostic> {
     match args {
         [expr] => {
-            let value = eval_row_expr(expr, table, row, ExprRole::Default)?;
+            let value = eval_row_expr(expr, table, row, ExprRole::Default, window_row_index)?;
             apply(value)
         }
         _ => Err(Diagnostic::error(
@@ -1139,27 +1605,34 @@ fn eval_binary(
     table: &Table,
     row: &Row,
     span: Span,
+    window_row_index: Option<usize>,
 ) -> Result<Value, Diagnostic> {
     if is_comparison_op(op) {
-        let left = eval_row_expr(left, table, row, ExprRole::ComparisonLeft)?;
-        let right = eval_row_expr(right, table, row, ExprRole::ComparisonRight)?;
+        let left = eval_row_expr(left, table, row, ExprRole::ComparisonLeft, window_row_index)?;
+        let right = eval_row_expr(
+            right,
+            table,
+            row,
+            ExprRole::ComparisonRight,
+            window_row_index,
+        )?;
         return Ok(compare_for_op(&left, op, &right));
     }
 
     match op {
         BinaryOpIr::And => {
-            let left = eval_row_expr(left, table, row, ExprRole::Default)?;
-            let right = eval_row_expr(right, table, row, ExprRole::Default)?;
+            let left = eval_row_expr(left, table, row, ExprRole::Default, window_row_index)?;
+            let right = eval_row_expr(right, table, row, ExprRole::Default, window_row_index)?;
             Ok(nullable_and(left, right))
         }
         BinaryOpIr::Or => {
-            let left = eval_row_expr(left, table, row, ExprRole::Default)?;
-            let right = eval_row_expr(right, table, row, ExprRole::Default)?;
+            let left = eval_row_expr(left, table, row, ExprRole::Default, window_row_index)?;
+            let right = eval_row_expr(right, table, row, ExprRole::Default, window_row_index)?;
             Ok(nullable_or(left, right))
         }
         BinaryOpIr::Add | BinaryOpIr::Sub | BinaryOpIr::Mul | BinaryOpIr::Div | BinaryOpIr::Rem => {
-            let left = eval_row_expr(left, table, row, ExprRole::Default)?;
-            let right = eval_row_expr(right, table, row, ExprRole::Default)?;
+            let left = eval_row_expr(left, table, row, ExprRole::Default, window_row_index)?;
+            let right = eval_row_expr(right, table, row, ExprRole::Default, window_row_index)?;
             let (Some(left), Some(right)) = (left.as_number(), right.as_number()) else {
                 return Err(Diagnostic::error(
                     codes::E1302,
@@ -1320,7 +1793,7 @@ fn eval_aggregate_expr(expr: &ExprIr, table: &Table, row: &Row) -> Result<Value,
                 *span,
             )),
         },
-        _ => eval_row_expr(expr, table, row, ExprRole::Default),
+        _ => eval_row_expr(expr, table, row, ExprRole::Default, None),
     }
 }
 
@@ -1552,6 +2025,68 @@ mod tests {
         assert_eq!(
             String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
             "order_id,region_channel,net_amount,priority\nA1,NORTH:web,100,standard\nA3,WEST:web,150,high\n"
+        );
+    }
+
+    #[test]
+    fn executes_window_mutations_with_rank_offsets_and_frames() {
+        let io = InMemoryDriverIo::default().with_file_bytes(
+            "memory/orders.csv",
+            "order_id,customer_id,region,order_date,amount\nA1,C1,North,2026-02-01,10\nA2,C1,North,2026-02-03,25\nA3,C2,North,2026-02-02,15\nA4,C2,South,2026-02-01,40\nA5,C1,North,2026-02-04,5\n",
+        );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "orders.csv"
+  | mutate "customer_row" = row_number() over (partition_by "customer_id" order_by "order_date"), "customer_running_amount" = sum("amount") over (partition_by "customer_id" order_by "order_date" rows between unbounded_preceding and current_row), "previous_amount" = lag("amount") over (partition_by "customer_id" order_by "order_date"), "region_amount_rank" = dense_rank() over (partition_by "region" order_by "amount" desc)
+  | select "order_id", "customer_id", "amount", "customer_row", "customer_running_amount", "previous_amount", "region_amount_rank""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "order_id,customer_id,amount,customer_row,customer_running_amount,previous_amount,region_amount_rank\nA1,C1,10,1,10,,3\nA2,C1,25,2,35,10,1\nA3,C2,15,2,55,40,2\nA4,C2,40,1,40,,1\nA5,C1,5,3,40,25,4\n"
+        );
+    }
+
+    #[test]
+    fn executes_window_distribution_value_and_lead_functions() {
+        let io = InMemoryDriverIo::default().with_file_bytes(
+            "memory/orders.csv",
+            "order_id,customer_id,region,order_date,amount\nA1,C1,North,2026-02-01,10\nA2,C1,North,2026-02-03,25\nA3,C2,North,2026-02-02,15\nA4,C2,South,2026-02-01,40\nA5,C1,North,2026-02-04,5\n",
+        );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "orders.csv"
+  | mutate "region_count" = count() over (partition_by "region"), "region_top_order" = first_value("order_id") over (partition_by "region" order_by "amount" desc), "region_low_order" = last_value("order_id") over (partition_by "region" order_by "amount" desc rows between unbounded_preceding and unbounded_following), "next_amount" = lead("amount", 1, lit("none")) over (partition_by "customer_id" order_by "order_date"), "region_percent_rank" = percent_rank() over (partition_by "region" order_by "amount" desc)
+  | select "order_id", "region_count", "region_top_order", "region_low_order", "next_amount", "region_percent_rank""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "order_id,region_count,region_top_order,region_low_order,next_amount,region_percent_rank\nA1,4,A2,A5,25,0.6666666666666666\nA2,4,A2,A5,5,0\nA3,4,A2,A5,none,0.3333333333333333\nA4,1,A4,A4,15,0\nA5,4,A2,A5,none,1\n"
         );
     }
 

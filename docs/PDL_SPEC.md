@@ -1,16 +1,16 @@
 # PDL Detailed Specification
 
-Status: Draft 0.15.0
+Status: Draft 0.16.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and Algraf users
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.15.0`.
+The current repository implementation is `0.16.0`.
 
-This release keeps the existing language, runtime, editor, LSP, WASM, browser
-demo, and native CLI introspection slice stable while promoting native Parquet,
-Arrow IPC file, and JSON Lines support through the existing format boundary.
+This release keeps the existing format, runtime, editor, LSP, WASM, browser
+demo, and native CLI introspection slice stable while promoting window
+expressions for row-preserving analytics in `mutate` assignments.
 It retains the recoverable syntax diagnostics for malformed filter, aggregate,
 sort, missing-pipe, and trailing-token cases. It implements the `pdl` CLI commands
 `run`, `check`, `fmt`, `schema`, `plan`, `ast`, `ir`, `manifest`, `lsp`, and
@@ -25,7 +25,11 @@ in-memory execution for `load`, `filter`,
 dependency resolution and cycle diagnostics; the scalar functions `col`, `lit`,
 `is_null`, `not_null`, `coalesce`, `concat`, `lower`, `upper`, `trim`,
 `to_number`, `abs`, `round`, and `if_else`; and the aggregate functions
-`count`, `sum`, `mean`, `min`, and `max`. It also
+`count`, `sum`, `mean`, `min`, and `max`. It implements window expressions
+with `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `lag`,
+`lead`, `first_value`, `last_value`, `count`, `sum`, `mean`, `min`, and `max`
+over explicit `partition_by`, `order_by`, and `rows between ... and ...`
+clauses in `mutate`. It also
 implements registered lettered diagnostic codes in `pdl-core`, a `codes::*`
 registry, `related` spans and `help` diagnostic payload fields, diagnostic
 catalog drift tests, a lossless lexer with trivia and EOF, a rowan CST with
@@ -46,12 +50,11 @@ It also ships a minimal React/Vite/Monaco demo under `demo/` with one PDL
 editor, multiple editable host-supplied CSV inputs, diagnostics and hover from
 the WASM editor-service ABI, and CSV stdout output from WASM execution.
 
-Version 0.15.0 does not yet implement configurable CSV dialect options, window
-expressions, full LSP code actions or cross-document navigation, Arrow IPC
-browser output, virtual browser output sinks, or full multi-output browser
-controls.
+Version 0.16.0 does not yet implement configurable CSV dialect options, full
+LSP code actions or cross-document navigation, Arrow IPC browser output,
+virtual browser output sinks, or full multi-output browser controls.
 Those features are tracked as deferred or planned work in successor release
-plans starting with `docs/V0_16_PLAN.md`.
+plans after `docs/V0_16_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -136,8 +139,8 @@ The keyword `table` means an ordered, typed, rectangular relation with named col
 The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
-over a partition and order of rows. Window expressions are planned but not
-implemented in version 0.15.0.
+over a partition and order of rows. Version 0.16.0 implements window
+expressions in `mutate` assignments.
 
 The keyword `column` means a named field with a static PDL type and nullability.
 
@@ -644,10 +647,10 @@ Assignments in one `mutate` stage are evaluated against the input schema in para
 
 Later stages see newly created columns.
 
-The version 0.15.0 implementation supports row expressions in `mutate`
-assignments. New columns append in assignment order. Replacing an existing
-column preserves that column's position. Duplicate assignment targets in one
-stage MUST produce `E1207`.
+The version 0.16.0 implementation supports scalar row expressions and window
+expressions in `mutate` assignments. New columns append in assignment order.
+Replacing an existing column preserves that column's position. Duplicate
+assignment targets in one stage MUST produce `E1207`.
 
 ### 5.5 Join
 
@@ -836,7 +839,7 @@ Reserved words MUST NOT be used as binding identifiers.
 
 Column names may match reserved words because quoted column references are strings.
 
-Planned window expression syntax uses additional clause words:
+Window expression syntax uses additional clause words:
 
 - `over`
 - `partition_by`
@@ -849,8 +852,7 @@ Planned window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are not reserved by the version 0.15.0 implementation until window
-syntax is implemented.
+These words are reserved by the version 0.16.0 implementation.
 
 ### 6.6 Quoted Tokens
 
@@ -1153,10 +1155,10 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are planned syntax and are not implemented in version 0.15.0.
-
-Until implemented, parsers MAY recover with `E1211` or ordinary parse diagnostics
-when they encounter `over`.
+Window expressions are implemented in version 0.16.0 for `mutate`
+assignments. Using a window expression outside `mutate`, nesting one window
+expression inside another, or using a window function without `over (...)` MUST
+produce `E1226`.
 
 ### 7.13 Error Recovery
 
@@ -1359,9 +1361,10 @@ CSV loading MUST support:
 - UTF-8 input
 - header rows
 - comma delimiter by default
-- configurable delimiter
-- configurable quote character
-- configurable null tokens
+
+Configurable CSV delimiters, quote characters, and null tokens remain deferred
+in version 0.16.0. A future release MAY promote them with source or CLI option
+syntax, diagnostics, examples, and tests.
 
 CSV output MUST be deterministic.
 
@@ -1416,7 +1419,7 @@ Arrow streams begin with a continuation marker and schema message.
 
 The v0.15.0 native implementation supports `arrow-stream` for `--stdout-format`,
 `--stdin-format`, `load stdin`, `save stdout`, and explicit-format file
-loads/saves. The v0.15.0 WASM browser run ABI continues to reject binary stdout
+loads/saves. The v0.16.0 WASM browser run ABI continues to reject binary stdout
 formats because its current stdout field is UTF-8 text.
 
 The runtime SHOULD read and write record batches without unnecessary conversion.
@@ -1589,8 +1592,8 @@ New columns append in assignment order.
 
 Duplicate assignment targets in one `mutate` stage MUST produce `E1207`.
 
-The version 0.15.0 implementation supports scalar row expressions in `mutate`
-and does not yet support window expressions.
+The version 0.16.0 implementation supports scalar row expressions and window
+expressions in `mutate`.
 
 ### 11.7 Group By
 
@@ -1717,12 +1720,12 @@ Output order follows retained row order.
 
 Unknown distinct key columns MUST produce `E1005`.
 
-### 11.14 Window Expressions (Planned)
+### 11.14 Window Expressions
 
-Window expressions are planned row expressions that add or replace columns
-without changing row count.
+Window expressions are row expressions that add or replace columns without
+changing row count.
 
-They are intended primarily for `mutate`:
+They are valid in `mutate` assignments:
 
 ```pdl
 load "sales.parquet"
@@ -1743,13 +1746,18 @@ Window expressions preserve the current row order.
 
 If `partition_by` is omitted, the whole input table is one partition.
 
-If `order_by` is omitted, aggregate window functions operate over the current
-partition order.
+If `order_by` is omitted, aggregate, offset, and value window functions operate
+over the current partition order.
 
-Ranking and offset window functions require `order_by`.
+`rank`, `dense_rank`, `percent_rank`, and `cume_dist` require `order_by`.
+`row_number` without `order_by` uses the current partition order.
 
 Assignments in a `mutate` stage containing window expressions remain parallel:
 one assignment MUST NOT see another assignment from the same stage.
+
+The default frame for aggregate-style and value window functions is the whole
+partition. Running calculations require an explicit frame such as
+`rows between unbounded_preceding and current_row`.
 
 Window execution MAY require materializing the current table or partition.
 
@@ -1763,8 +1771,9 @@ Row expressions can reference columns.
 
 Aggregate expressions can reference aggregate functions and group keys.
 
-Window expressions are a planned row-expression form. They do not introduce
-aggregate context, and they are not valid inside `agg`.
+Window expressions are a row-expression form valid in `mutate` assignments.
+They do not introduce aggregate context, and they are not valid inside `agg`,
+`filter`, `sort`, or other non-`mutate` expression positions in version 0.16.0.
 
 Path context accepts string literals and future path functions.
 
@@ -1787,7 +1796,7 @@ Implementations SHOULD emit helpful diagnostics when a quoted token could plausi
 
 ### 12.3 Scalar Functions
 
-The version 0.15.0 implementation supports these scalar functions in row
+The version 0.16.0 implementation supports these scalar functions in row
 expressions:
 
 - `col(name)`: resolves a quoted value as a column reference.
@@ -1859,9 +1868,10 @@ Recommended aggregate functions:
 
 Aggregating an empty group returns null except for `count`, which returns zero.
 
-### 12.5 Window Functions (Planned)
+### 12.5 Window Functions
 
-Window function syntax is planned and not implemented in version 0.15.0.
+Window function syntax is implemented in version 0.16.0 for `mutate`
+assignments.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
 
@@ -1888,36 +1898,46 @@ load "orders.csv"
   | filter "rn" == 1
 ```
 
-Planned ranking and offset functions:
+Implemented ranking and distribution functions:
 
 - `row_number()`
 - `rank()`
 - `dense_rank()`
-- `lag(column)`
-- `lead(column)`
+- `percent_rank()`
+- `cume_dist()`
 
-Planned aggregate-style window functions:
+Implemented offset and value functions:
+
+- `lag(value)`
+- `lag(value, offset)`
+- `lag(value, offset, default)`
+- `lead(value)`
+- `lead(value, offset)`
+- `lead(value, offset, default)`
+- `first_value(value)`
+- `last_value(value)`
+
+Implemented aggregate-style window functions:
 
 - `count()`
-- `count(column)`
-- `sum(column)`
-- `mean(column)`
-- `min(column)`
-- `max(column)`
-- `first(column)`
-- `last(column)`
+- `count(value)`
+- `sum(value)`
+- `mean(value)`
+- `min(value)`
+- `max(value)`
 
-Aggregate-style window functions without `order_by` default to the whole
-partition.
+`offset` must be a non-negative integer literal. If `lag` or `lead` moves
+outside the partition, the function returns the `default` expression when
+provided and `null` otherwise.
 
-Aggregate-style window functions with `order_by` default to:
+Aggregate-style and value window functions default to the whole partition, even
+when `order_by` is present. Running calculations require an explicit frame:
 
 ```pdl
 rows between unbounded_preceding and current_row
 ```
 
-Ranking and offset functions ignore frames and SHOULD reject explicit frames
-unless a future version gives them frame semantics.
+Ranking, distribution, and offset functions ignore frames in version 0.16.0.
 
 For `rank` and `dense_rank`, peer rows are rows with equal `order_by` values.
 
@@ -1925,8 +1945,9 @@ For `row_number`, rows with equal `order_by` values use the current stable row
 order as the deterministic tie-breaker. Users SHOULD add explicit tie-breaker
 columns when they need durable rankings independent of input order.
 
-Invalid window specifications MUST produce `E1409` once window syntax is
-implemented.
+Invalid window specifications MUST produce a stable diagnostic such as `E1203`,
+`E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1401`, or `E1402`, depending on
+the malformed clause.
 
 ### 12.6 Determinism
 
@@ -1948,8 +1969,9 @@ Non-deterministic function not allowed MUST produce `E1405`.
 
 Divide by zero detected statically MUST produce `E1407`.
 
-Invalid window specification MUST produce `E1409` once window syntax is
-implemented.
+Invalid window specifications MUST produce stable diagnostics; version 0.16.0
+uses `E1203`, `E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1401`, or
+`E1402` depending on the malformed clause.
 
 ## 13. Row Ordering And Determinism
 
@@ -2070,7 +2092,7 @@ It MUST exit non-zero on errors.
 
 `pdl schema file.pdl --json` prints deterministic JSON.
 
-The version 0.15.0 implementation emits column names, unknown logical types,
+The version 0.16.0 implementation emits column names, unknown logical types,
 nullability, stage traces, and diagnostics in JSON mode.
 
 `--binding name` MUST inspect the requested binding without changing normal
@@ -2086,7 +2108,7 @@ It SHOULD show source reads, transform stages, format decisions, and sinks.
 
 `pdl plan file.pdl --json` prints deterministic JSON.
 
-The version 0.15.0 implementation accepts `--stdin-format <format>` and
+The version 0.16.0 implementation accepts `--stdin-format <format>` and
 `--stdout-format <format>` so stream choices are reflected in the plan. It MUST
 NOT read stdin or execute transforms while planning.
 
@@ -2098,7 +2120,7 @@ NOT read stdin or execute transforms while planning.
 
 The formatter MUST preserve semantics.
 
-The version 0.15.0 implementation rewrites files in place in the stable
+The version 0.16.0 implementation rewrites files in place in the stable
 leading-pipe style when formatting is available. It returns a non-zero exit code
 without writing when parse errors are present or when comments make safe
 rewriting unavailable.
@@ -2109,7 +2131,7 @@ rewriting unavailable.
 
 It MUST NOT execute data pipelines or read table data.
 
-The version 0.15.0 implementation exits non-zero on parse errors. When parsing
+The version 0.16.0 implementation exits non-zero on parse errors. When parsing
 succeeds, its JSON payload includes the parsed program and parse diagnostics.
 
 ### 14.8 pdl ir
@@ -2118,7 +2140,7 @@ succeeds, its JSON payload includes the parsed program and parse diagnostics.
 
 It MUST NOT execute data pipelines or write output artifacts.
 
-The version 0.15.0 implementation exits non-zero when syntax, schema, or
+The version 0.16.0 implementation exits non-zero when syntax, schema, or
 semantic errors prevent IR construction.
 
 ### 14.9 pdl manifest
@@ -2127,7 +2149,7 @@ semantic errors prevent IR construction.
 
 It MUST NOT execute transforms or write output artifacts.
 
-The version 0.15.0 implementation accepts `--stdin-format <format>` and
+The version 0.16.0 implementation accepts `--stdin-format <format>` and
 `--stdout-format <format>`, includes source, driver, stream, execution-plan,
 final-schema, diagnostics, and Algraf Arrow-stdout hint fields, and exits
 non-zero when planning fails.
@@ -2223,7 +2245,7 @@ Strict mode MUST fail on row-level parse errors.
 
 The runtime SHOULD emit a run manifest when requested.
 
-The version 0.15.0 native CLI implements `pdl manifest file.pdl` as a
+The version 0.16.0 native CLI implements `pdl manifest file.pdl` as a
 deterministic dry-run manifest inspection command. It plans but does not execute
 the pipeline, and it does not write output artifacts.
 
@@ -2341,7 +2363,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.15.0` LSP implementation provides diagnostics,
+The current `0.16.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, semantic tokens, document symbols, and
 same-document binding go-to-definition, references, and rename. Code actions and
 cross-document navigation remain deferred.
@@ -2520,16 +2542,16 @@ The v0.15 WASM implementation MUST expose packed JSON calls for:
 
 The browser run request's host file map is format-neutral and MAY contain
 multiple files: keys are logical file paths and values are host-supplied file
-contents. Version 0.15.0 requires CSV and JSON Lines host file contents to
+contents. Version 0.16.0 requires CSV and JSON Lines host file contents to
 execute successfully through this JSON ABI because host files are supplied as
 UTF-8 strings. Binary host-file contents remain deferred until the ABI accepts
 byte payloads. The ABI MUST NOT special-case CSV at the TypeScript editor layer.
 
-`pdl_run_json` in version 0.15.0 MUST support CSV and JSON Lines stdout for the
+`pdl_run_json` in version 0.16.0 MUST support CSV and JSON Lines stdout for the
 resulting table. Virtual path-backed output sinks, Arrow IPC byte output, and
 binary dataframe decoders remain deferred until a later plan promotes them.
 
-For hover requests, `pdl_editor_service_json` in version 0.15.0 MUST use the
+For hover requests, `pdl_editor_service_json` in version 0.16.0 MUST use the
 same host file map through in-memory driver I/O so Monaco/WASM hover previews
 match native LSP hover behavior for text-backed paths and columns.
 
@@ -2644,7 +2666,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3825,7 +3847,7 @@ stage-argument error.
 
 `E1225` unsupported format alias.
 
-`E1226` window syntax is not enabled.
+`E1226` window expression is not valid in this context.
 
 ### 20.5 Type Diagnostics
 
@@ -4190,7 +4212,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.15.0.
+PDL source does not require an explicit version declaration in draft 0.16.0.
 
 The implementation SHOULD report supported language version.
 

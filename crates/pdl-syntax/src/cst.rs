@@ -174,6 +174,11 @@ impl CstBuilder<'_> {
                     builder.expr(arg);
                 }
             }
+            Expr::Window { args, .. } => {
+                for arg in args {
+                    builder.expr(arg);
+                }
+            }
             Expr::Unary { expr, .. } => builder.expr(expr),
             Expr::Binary { left, right, .. } => {
                 builder.expr(left);

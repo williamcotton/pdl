@@ -1,8 +1,9 @@
 use pdl_core::Severity;
 
 use crate::{
-    parse, AggItem, BinaryOp, Expr, JoinOn, MutateItem, NullsOrder, Pipeline, PipelineStart,
-    SinkRef, SortDirection, SourceRef, Spanned, Stage, UnaryOp, UnionOptionKind,
+    parse, AggItem, BinaryOp, Expr, FrameBound, JoinOn, MutateItem, NullsOrder, Pipeline,
+    PipelineStart, SinkRef, SortDirection, SortItem, SourceRef, Spanned, Stage, UnaryOp,
+    UnionOptionKind, WindowFrame, WindowSpec,
 };
 
 pub type FormatResult = Option<String>;
@@ -217,6 +218,17 @@ fn format_expr(expr: &Expr) -> String {
             name.value,
             args.iter().map(format_expr).collect::<Vec<_>>().join(", ")
         ),
+        Expr::Window {
+            function,
+            args,
+            spec,
+            ..
+        } => format!(
+            "{}({}) over ({})",
+            function.value,
+            args.iter().map(format_expr).collect::<Vec<_>>().join(", "),
+            format_window_spec(spec)
+        ),
         Expr::Unary {
             op: UnaryOp::Not,
             expr,
@@ -235,6 +247,62 @@ fn format_expr(expr: &Expr) -> String {
             binary_op_text(*op),
             format_expr(right)
         ),
+    }
+}
+
+fn format_window_spec(spec: &WindowSpec) -> String {
+    let mut parts = Vec::new();
+    if !spec.partition_by.is_empty() {
+        parts.push(format!(
+            "partition_by {}",
+            format_columns(&spec.partition_by)
+        ));
+    }
+    if !spec.order_by.is_empty() {
+        parts.push(format!(
+            "order_by {}",
+            spec.order_by
+                .iter()
+                .map(format_window_sort_item)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(frame) = &spec.frame {
+        parts.push(format_window_frame(frame));
+    }
+    parts.join(" ")
+}
+
+fn format_window_sort_item(item: &SortItem) -> String {
+    let mut text = quote(&item.column.value);
+    if item.direction == SortDirection::Desc {
+        text.push_str(" desc");
+    }
+    if let Some(nulls) = item.nulls {
+        text.push_str(match nulls {
+            NullsOrder::First => " nulls_first",
+            NullsOrder::Last => " nulls_last",
+        });
+    }
+    text
+}
+
+fn format_window_frame(frame: &WindowFrame) -> String {
+    format!(
+        "rows between {} and {}",
+        format_frame_bound(&frame.start),
+        format_frame_bound(&frame.end)
+    )
+}
+
+fn format_frame_bound(bound: &FrameBound) -> String {
+    match bound {
+        FrameBound::UnboundedPreceding { .. } => "unbounded_preceding".to_string(),
+        FrameBound::Preceding { rows, .. } => format!("{rows} preceding"),
+        FrameBound::CurrentRow { .. } => "current_row".to_string(),
+        FrameBound::Following { rows, .. } => format!("{rows} following"),
+        FrameBound::UnboundedFollowing { .. } => "unbounded_following".to_string(),
     }
 }
 

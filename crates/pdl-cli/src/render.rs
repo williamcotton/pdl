@@ -5,12 +5,13 @@ use pdl_driver::{
 };
 use pdl_exec::{ExecutionPlan, ExecutionPlanStep};
 use pdl_semantics::{
-    BinaryOpIr, ExprIr, JoinKindIr, PipelineSchemaLabel, PipelineStartIr, ProgramIr, SinkIr,
-    SortDirectionIr, StageIr, UnaryOpIr,
+    BinaryOpIr, ExprIr, FrameBoundIr, JoinKindIr, PipelineSchemaLabel, PipelineStartIr, ProgramIr,
+    SinkIr, SortDirectionIr, StageIr, UnaryOpIr, WindowFrameIr, WindowSpecIr,
 };
 use pdl_syntax::{
-    AggItem, BinaryOp, Binding, Expr, JoinOn, MutateItem, Pipeline, PipelineStart, Program,
-    SaveStage, SinkRef, SortDirection, SourceRef, Spanned, Stage, UnaryOp, UnionOptionKind,
+    AggItem, BinaryOp, Binding, Expr, FrameBound, JoinOn, MutateItem, Pipeline, PipelineStart,
+    Program, SaveStage, SinkRef, SortDirection, SourceRef, Spanned, Stage, UnaryOp,
+    UnionOptionKind, WindowFrame, WindowSpec,
 };
 use serde::Serialize;
 
@@ -111,9 +112,9 @@ pub fn plan_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> PlanOutput
 pub fn manifest_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> ManifestJson {
     let stdout_format = plan.stdout_format.map(|format| format.canonical_name());
     ManifestJson {
-        manifest_version: "0.15.0",
+        manifest_version: "0.16.0",
         implementation_version: env!("CARGO_PKG_VERSION"),
-        language_version: "0.15.0",
+        language_version: "0.16.0",
         source_path: prepared.path.display().to_string(),
         driver: driver_plan_json(&prepared.driver_plan),
         execution: execution_plan_json(plan),
@@ -666,6 +667,12 @@ enum ExprJson {
         args: Vec<ExprJson>,
         span: Span,
     },
+    Window {
+        function: SpannedJson<String>,
+        args: Vec<ExprJson>,
+        spec: WindowSpecJson,
+        span: Span,
+    },
     Unary {
         op: &'static str,
         expr: Box<ExprJson>,
@@ -677,6 +684,32 @@ enum ExprJson {
         right: Box<ExprJson>,
         span: Span,
     },
+}
+
+#[derive(Serialize)]
+struct WindowSpecJson {
+    partition_by: Vec<SpannedJson<String>>,
+    order_by: Vec<SortItemJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame: Option<WindowFrameJson>,
+    span: Span,
+}
+
+#[derive(Serialize)]
+struct WindowFrameJson {
+    start: FrameBoundJson,
+    end: FrameBoundJson,
+    span: Span,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum FrameBoundJson {
+    UnboundedPreceding { span: Span },
+    Preceding { rows: usize, span: Span },
+    CurrentRow { span: Span },
+    Following { rows: usize, span: Span },
+    UnboundedFollowing { span: Span },
 }
 
 #[derive(Serialize)]
@@ -910,6 +943,17 @@ fn expr_json(expr: &Expr) -> ExprJson {
             args: args.iter().map(expr_json).collect(),
             span: *span,
         },
+        Expr::Window {
+            function,
+            args,
+            spec,
+            span,
+        } => ExprJson::Window {
+            function: spanned_json(function),
+            args: args.iter().map(expr_json).collect(),
+            spec: window_spec_json(spec),
+            span: *span,
+        },
         Expr::Unary { op, expr, span } => ExprJson::Unary {
             op: unary_op_text(*op),
             expr: Box::new(expr_json(expr)),
@@ -926,6 +970,54 @@ fn expr_json(expr: &Expr) -> ExprJson {
             right: Box::new(expr_json(right)),
             span: *span,
         },
+    }
+}
+
+fn window_spec_json(spec: &WindowSpec) -> WindowSpecJson {
+    WindowSpecJson {
+        partition_by: spec.partition_by.iter().map(spanned_json).collect(),
+        order_by: spec
+            .order_by
+            .iter()
+            .map(|item| SortItemJson {
+                column: spanned_json(&item.column),
+                direction: sort_direction_text(item.direction),
+                nulls: item.nulls.map(|nulls| match nulls {
+                    pdl_syntax::NullsOrder::First => "first",
+                    pdl_syntax::NullsOrder::Last => "last",
+                }),
+            })
+            .collect(),
+        frame: spec.frame.as_ref().map(window_frame_json),
+        span: spec.span,
+    }
+}
+
+fn window_frame_json(frame: &WindowFrame) -> WindowFrameJson {
+    WindowFrameJson {
+        start: frame_bound_json(&frame.start),
+        end: frame_bound_json(&frame.end),
+        span: frame.span,
+    }
+}
+
+fn frame_bound_json(bound: &FrameBound) -> FrameBoundJson {
+    match bound {
+        FrameBound::UnboundedPreceding { span } => {
+            FrameBoundJson::UnboundedPreceding { span: *span }
+        }
+        FrameBound::Preceding { rows, span } => FrameBoundJson::Preceding {
+            rows: *rows,
+            span: *span,
+        },
+        FrameBound::CurrentRow { span } => FrameBoundJson::CurrentRow { span: *span },
+        FrameBound::Following { rows, span } => FrameBoundJson::Following {
+            rows: *rows,
+            span: *span,
+        },
+        FrameBound::UnboundedFollowing { span } => {
+            FrameBoundJson::UnboundedFollowing { span: *span }
+        }
     }
 }
 
@@ -1132,6 +1224,12 @@ enum ExprIrJson {
         args: Vec<ExprIrJson>,
         span: Span,
     },
+    Window {
+        function: String,
+        args: Vec<ExprIrJson>,
+        spec: WindowSpecIrJson,
+        span: Span,
+    },
     Unary {
         op: &'static str,
         expr: Box<ExprIrJson>,
@@ -1143,6 +1241,32 @@ enum ExprIrJson {
         right: Box<ExprIrJson>,
         span: Span,
     },
+}
+
+#[derive(Serialize)]
+struct WindowSpecIrJson {
+    partition_by: Vec<String>,
+    order_by: Vec<SortItemIrJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame: Option<WindowFrameIrJson>,
+    span: Span,
+}
+
+#[derive(Serialize)]
+struct WindowFrameIrJson {
+    start: FrameBoundIrJson,
+    end: FrameBoundIrJson,
+    span: Span,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum FrameBoundIrJson {
+    UnboundedPreceding { span: Span },
+    Preceding { rows: usize, span: Span },
+    CurrentRow { span: Span },
+    Following { rows: usize, span: Span },
+    UnboundedFollowing { span: Span },
 }
 
 fn program_ir_json(ir: &ProgramIr) -> ProgramIrJson {
@@ -1338,6 +1462,17 @@ fn expr_ir_json(expr: &ExprIr) -> ExprIrJson {
             args: args.iter().map(expr_ir_json).collect(),
             span: *span,
         },
+        ExprIr::Window {
+            function,
+            args,
+            spec,
+            span,
+        } => ExprIrJson::Window {
+            function: function.clone(),
+            args: args.iter().map(expr_ir_json).collect(),
+            spec: window_spec_ir_json(spec),
+            span: *span,
+        },
         ExprIr::Unary { op, expr, span } => ExprIrJson::Unary {
             op: unary_op_ir_text(*op),
             expr: Box::new(expr_ir_json(expr)),
@@ -1354,6 +1489,58 @@ fn expr_ir_json(expr: &ExprIr) -> ExprIrJson {
             right: Box::new(expr_ir_json(right)),
             span: *span,
         },
+    }
+}
+
+fn window_spec_ir_json(spec: &WindowSpecIr) -> WindowSpecIrJson {
+    WindowSpecIrJson {
+        partition_by: spec.partition_by.clone(),
+        order_by: spec
+            .order_by
+            .iter()
+            .map(|item| SortItemIrJson {
+                column: item.column.clone(),
+                direction: match item.direction {
+                    SortDirectionIr::Asc => "asc",
+                    SortDirectionIr::Desc => "desc",
+                },
+                nulls: item.nulls.map(|nulls| match nulls {
+                    pdl_semantics::NullsOrderIr::First => "first",
+                    pdl_semantics::NullsOrderIr::Last => "last",
+                }),
+                span: item.span,
+            })
+            .collect(),
+        frame: spec.frame.as_ref().map(window_frame_ir_json),
+        span: spec.span,
+    }
+}
+
+fn window_frame_ir_json(frame: &WindowFrameIr) -> WindowFrameIrJson {
+    WindowFrameIrJson {
+        start: frame_bound_ir_json(&frame.start),
+        end: frame_bound_ir_json(&frame.end),
+        span: frame.span,
+    }
+}
+
+fn frame_bound_ir_json(bound: &FrameBoundIr) -> FrameBoundIrJson {
+    match bound {
+        FrameBoundIr::UnboundedPreceding { span } => {
+            FrameBoundIrJson::UnboundedPreceding { span: *span }
+        }
+        FrameBoundIr::Preceding { rows, span } => FrameBoundIrJson::Preceding {
+            rows: *rows,
+            span: *span,
+        },
+        FrameBoundIr::CurrentRow { span } => FrameBoundIrJson::CurrentRow { span: *span },
+        FrameBoundIr::Following { rows, span } => FrameBoundIrJson::Following {
+            rows: *rows,
+            span: *span,
+        },
+        FrameBoundIr::UnboundedFollowing { span } => {
+            FrameBoundIrJson::UnboundedFollowing { span: *span }
+        }
     }
 }
 

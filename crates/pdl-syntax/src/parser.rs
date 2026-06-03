@@ -373,6 +373,42 @@ pub enum NullsOrder {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct WindowSpec {
+    pub partition_by: Vec<Spanned<String>>,
+    pub order_by: Vec<SortItem>,
+    pub frame: Option<WindowFrame>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowFrame {
+    pub start: FrameBound,
+    pub end: FrameBound,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FrameBound {
+    UnboundedPreceding { span: Span },
+    Preceding { rows: usize, span: Span },
+    CurrentRow { span: Span },
+    Following { rows: usize, span: Span },
+    UnboundedFollowing { span: Span },
+}
+
+impl FrameBound {
+    pub fn span(&self) -> Span {
+        match self {
+            FrameBound::UnboundedPreceding { span }
+            | FrameBound::Preceding { span, .. }
+            | FrameBound::CurrentRow { span }
+            | FrameBound::Following { span, .. }
+            | FrameBound::UnboundedFollowing { span } => *span,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Quoted(Spanned<String>),
     Number(Spanned<f64>),
@@ -382,6 +418,12 @@ pub enum Expr {
     Call {
         name: Spanned<String>,
         args: Vec<Expr>,
+        span: Span,
+    },
+    Window {
+        function: Spanned<String>,
+        args: Vec<Expr>,
+        spec: WindowSpec,
         span: Span,
     },
     Unary {
@@ -405,7 +447,10 @@ impl Expr {
             Expr::Bool(value) => value.span,
             Expr::Null(span) => *span,
             Expr::Ident(value) => value.span,
-            Expr::Call { span, .. } | Expr::Unary { span, .. } | Expr::Binary { span, .. } => *span,
+            Expr::Call { span, .. }
+            | Expr::Window { span, .. }
+            | Expr::Unary { span, .. }
+            | Expr::Binary { span, .. } => *span,
         }
     }
 }
@@ -1173,6 +1218,257 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_window_spec(&mut self, over_span: Span) -> Option<WindowSpec> {
+        let start = if self.consume_lparen() {
+            self.previous_span().start
+        } else {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1203,
+                "window expression requires `(` after `over`",
+                self.current().span,
+            ));
+            over_span.end
+        };
+
+        let mut partition_by = Vec::new();
+        let mut order_by = Vec::new();
+        let mut frame = None;
+        let mut seen_partition = false;
+        let mut seen_order = false;
+        let mut seen_frame = false;
+
+        while !self.at_rparen() && !self.at_stage_boundary() {
+            if self.consume_ident("partition_by") {
+                let option_span = self.previous_span();
+                if seen_partition {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E1205,
+                        "duplicate window option `partition_by`",
+                        option_span,
+                    ));
+                }
+                seen_partition = true;
+                partition_by = self.parse_window_partition_columns()?;
+            } else if self.consume_ident("order_by") {
+                let option_span = self.previous_span();
+                if seen_order {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E1205,
+                        "duplicate window option `order_by`",
+                        option_span,
+                    ));
+                }
+                seen_order = true;
+                order_by = self.parse_window_order_items()?;
+            } else if self.consume_ident("rows") {
+                let rows_span = self.previous_span();
+                if seen_frame {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E1205,
+                        "duplicate window option `rows`",
+                        rows_span,
+                    ));
+                }
+                seen_frame = true;
+                frame = self.parse_window_frame(rows_span);
+            } else {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1204,
+                    "unknown window option",
+                    self.current().span,
+                ));
+                self.advance();
+            }
+        }
+
+        let close = self.expect_rparen();
+        let end = close.map_or_else(|| self.previous_span().end, |token| token.span.end);
+        Some(WindowSpec {
+            partition_by,
+            order_by,
+            frame,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_window_partition_columns(&mut self) -> Option<Vec<Spanned<String>>> {
+        let mut columns = Vec::new();
+        loop {
+            columns.push(self.expect_column_name()?);
+            if !self.consume_comma() {
+                break;
+            }
+        }
+        Some(columns)
+    }
+
+    fn parse_window_order_items(&mut self) -> Option<Vec<SortItem>> {
+        let mut items = Vec::new();
+        loop {
+            items.push(self.parse_window_order_item()?);
+            if !self.consume_comma() {
+                break;
+            }
+        }
+        Some(items)
+    }
+
+    fn parse_window_order_item(&mut self) -> Option<SortItem> {
+        let column = self.expect_column_name()?;
+        let mut item_end = column.span.end;
+        let direction = self.parse_window_sort_direction(&mut item_end);
+        let nulls = self.parse_window_sort_nulls(&mut item_end);
+        if !self.at_window_sort_item_boundary() {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1214,
+                "malformed window order item",
+                self.current().span,
+            ));
+            while !self.at_window_sort_item_boundary() {
+                item_end = self.advance().span.end;
+            }
+        }
+        let _ = item_end;
+        Some(SortItem {
+            column,
+            direction,
+            nulls,
+        })
+    }
+
+    fn parse_window_sort_direction(&mut self, item_end: &mut usize) -> SortDirection {
+        let token = self.current().clone();
+        match token.kind {
+            TokenKind::Ident(value) if value == "desc" => {
+                self.advance();
+                *item_end = token.span.end;
+                SortDirection::Desc
+            }
+            TokenKind::Ident(value) if value == "asc" => {
+                self.advance();
+                *item_end = token.span.end;
+                SortDirection::Asc
+            }
+            TokenKind::Ident(value)
+                if value.starts_with("nulls") || value == "rows" || value == "between" =>
+            {
+                SortDirection::Asc
+            }
+            _ => SortDirection::Asc,
+        }
+    }
+
+    fn parse_window_sort_nulls(&mut self, item_end: &mut usize) -> Option<NullsOrder> {
+        let token = self.current().clone();
+        match token.kind {
+            TokenKind::Ident(value) if value == "nulls_first" => {
+                self.advance();
+                *item_end = token.span.end;
+                Some(NullsOrder::First)
+            }
+            TokenKind::Ident(value) if value == "nulls_last" => {
+                self.advance();
+                *item_end = token.span.end;
+                Some(NullsOrder::Last)
+            }
+            TokenKind::Ident(value) if value.starts_with("nulls") => {
+                self.advance();
+                *item_end = token.span.end;
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1210,
+                    format!(
+                        "invalid window null order `{value}`; expected `nulls_first` or `nulls_last`"
+                    ),
+                    token.span,
+                ));
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn parse_window_frame(&mut self, rows_span: Span) -> Option<WindowFrame> {
+        if !self.consume_ident("between") {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1203,
+                "window frame requires `between`",
+                self.current().span,
+            ));
+        }
+        let start = self.parse_frame_bound()?;
+        if !self.consume_ident("and") {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1203,
+                "window frame requires `and`",
+                self.current().span,
+            ));
+        }
+        let end = self.parse_frame_bound()?;
+        let span = rows_span.join(end.span());
+        Some(WindowFrame { start, end, span })
+    }
+
+    fn parse_frame_bound(&mut self) -> Option<FrameBound> {
+        let token = self.advance().clone();
+        match token.kind {
+            TokenKind::Ident(value) if value == "unbounded_preceding" => {
+                Some(FrameBound::UnboundedPreceding { span: token.span })
+            }
+            TokenKind::Ident(value) if value == "current_row" => {
+                Some(FrameBound::CurrentRow { span: token.span })
+            }
+            TokenKind::Ident(value) if value == "unbounded_following" => {
+                Some(FrameBound::UnboundedFollowing { span: token.span })
+            }
+            TokenKind::Number(raw) => {
+                let rows = match raw.parse::<usize>() {
+                    Ok(rows) => rows,
+                    Err(_) => {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1206,
+                            "window frame offset requires a non-negative integer",
+                            token.span,
+                        ));
+                        0
+                    }
+                };
+                let direction = self.advance().clone();
+                match direction.kind {
+                    TokenKind::Ident(value) if value == "preceding" => {
+                        Some(FrameBound::Preceding {
+                            rows,
+                            span: token.span.join(direction.span),
+                        })
+                    }
+                    TokenKind::Ident(value) if value == "following" => {
+                        Some(FrameBound::Following {
+                            rows,
+                            span: token.span.join(direction.span),
+                        })
+                    }
+                    _ => {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1210,
+                            "window frame offset requires `preceding` or `following`",
+                            direction.span,
+                        ));
+                        Some(FrameBound::CurrentRow {
+                            span: token.span.join(direction.span),
+                        })
+                    }
+                }
+            }
+            _ => {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1203,
+                    "window frame requires a frame bound",
+                    token.span,
+                ));
+                None
+            }
+        }
+    }
+
     fn parse_expr(&mut self, min_bp: u8) -> Option<Expr> {
         let mut lhs = self.parse_prefix()?;
 
@@ -1264,7 +1560,18 @@ impl<'a> Parser<'a> {
                     }
                     let close = self.expect_rparen().map_or(name.span, |token| token.span);
                     let span = name.span.join(close);
-                    Some(Expr::Call { name, args, span })
+                    if self.consume_ident("over") {
+                        let spec = self.parse_window_spec(self.previous_span())?;
+                        let span = name.span.join(spec.span);
+                        Some(Expr::Window {
+                            function: name,
+                            args,
+                            spec,
+                            span,
+                        })
+                    } else {
+                        Some(Expr::Call { name, args, span })
+                    }
                 } else {
                     Some(Expr::Ident(name))
                 }
@@ -1486,6 +1793,13 @@ impl<'a> Parser<'a> {
         )
     }
 
+    fn at_window_sort_item_boundary(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Comma | TokenKind::RParen | TokenKind::Pipe | TokenKind::Eof
+        ) || self.at_ident("rows")
+    }
+
     fn at_recoverable_stage_start(&self) -> bool {
         matches!(&self.current().kind, TokenKind::Ident(value) if is_recoverable_stage_name(value))
     }
@@ -1589,6 +1903,16 @@ fn is_reserved_keyword(value: &str) -> bool {
             | "kind"
             | "by_name"
             | "format"
+            | "over"
+            | "partition_by"
+            | "order_by"
+            | "rows"
+            | "between"
+            | "unbounded_preceding"
+            | "current_row"
+            | "unbounded_following"
+            | "preceding"
+            | "following"
             | "stdin"
             | "stdout"
             | "true"
@@ -1726,6 +2050,30 @@ mod tests {
             panic!("distinct stage");
         };
         assert_eq!(columns[0].value, "order_id");
+    }
+
+    #[test]
+    fn parses_window_expressions() {
+        let result = parse(
+            r#"load "orders.csv"
+  | mutate "running_amount" = sum("amount") over (partition_by "customer_id" order_by "order_date" asc rows between unbounded_preceding and current_row), "rank" = dense_rank() over (partition_by "region" order_by "amount" desc nulls_last)"#,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let main = result.program.main.expect("main pipeline");
+        let Stage::Mutate { items, .. } = &main.stages[0] else {
+            panic!("mutate stage");
+        };
+        let Expr::Window { function, spec, .. } = &items[0].expr else {
+            panic!("window expression");
+        };
+        assert_eq!(function.value, "sum");
+        assert_eq!(spec.partition_by[0].value, "customer_id");
+        assert_eq!(spec.order_by[0].column.value, "order_date");
+        assert!(matches!(
+            spec.frame.as_ref().map(|frame| &frame.end),
+            Some(FrameBound::CurrentRow { .. })
+        ));
     }
 
     #[test]

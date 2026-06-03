@@ -10,6 +10,7 @@ pub struct StageInfo {
 pub enum FunctionKind {
     Scalar,
     Aggregate,
+    Window,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -272,6 +273,121 @@ pub const AGGREGATE_FUNCTIONS: &[AggregateFunctionInfo] = &[
     },
 ];
 
+pub const WINDOW_FUNCTIONS: &[FunctionInfo] = &[
+    FunctionInfo {
+        name: "row_number",
+        documentation: "`row_number() over (...)`: 1-based row position in the window partition.",
+        kind: FunctionKind::Window,
+        min_args: 0,
+        max_args: Some(0),
+        expected_arity: "zero arguments",
+    },
+    FunctionInfo {
+        name: "rank",
+        documentation: "`rank() over (...)`: sparse rank of the current row within ordered peers.",
+        kind: FunctionKind::Window,
+        min_args: 0,
+        max_args: Some(0),
+        expected_arity: "zero arguments",
+    },
+    FunctionInfo {
+        name: "dense_rank",
+        documentation: "`dense_rank() over (...)`: dense rank of the current row within ordered peers.",
+        kind: FunctionKind::Window,
+        min_args: 0,
+        max_args: Some(0),
+        expected_arity: "zero arguments",
+    },
+    FunctionInfo {
+        name: "percent_rank",
+        documentation: "`percent_rank() over (...)`: `(rank - 1) / (partition_rows - 1)`.",
+        kind: FunctionKind::Window,
+        min_args: 0,
+        max_args: Some(0),
+        expected_arity: "zero arguments",
+    },
+    FunctionInfo {
+        name: "cume_dist",
+        documentation: "`cume_dist() over (...)`: fraction of partition rows at or before the current peer group.",
+        kind: FunctionKind::Window,
+        min_args: 0,
+        max_args: Some(0),
+        expected_arity: "zero arguments",
+    },
+    FunctionInfo {
+        name: "lag",
+        documentation: "`lag(value[, offset[, default]]) over (...)`: previous row value in the ordered partition.",
+        kind: FunctionKind::Window,
+        min_args: 1,
+        max_args: Some(3),
+        expected_arity: "one to three arguments",
+    },
+    FunctionInfo {
+        name: "lead",
+        documentation: "`lead(value[, offset[, default]]) over (...)`: following row value in the ordered partition.",
+        kind: FunctionKind::Window,
+        min_args: 1,
+        max_args: Some(3),
+        expected_arity: "one to three arguments",
+    },
+    FunctionInfo {
+        name: "first_value",
+        documentation: "`first_value(value) over (...)`: first value in the current window frame.",
+        kind: FunctionKind::Window,
+        min_args: 1,
+        max_args: Some(1),
+        expected_arity: "one argument",
+    },
+    FunctionInfo {
+        name: "last_value",
+        documentation: "`last_value(value) over (...)`: last value in the current window frame.",
+        kind: FunctionKind::Window,
+        min_args: 1,
+        max_args: Some(1),
+        expected_arity: "one argument",
+    },
+    FunctionInfo {
+        name: "count",
+        documentation: "`count()` or `count(value) over (...)`: window row or non-null count.",
+        kind: FunctionKind::Window,
+        min_args: 0,
+        max_args: Some(1),
+        expected_arity: "zero or one argument",
+    },
+    FunctionInfo {
+        name: "sum",
+        documentation: "`sum(value) over (...)`: sum numeric values in the current frame.",
+        kind: FunctionKind::Window,
+        min_args: 1,
+        max_args: Some(1),
+        expected_arity: "one argument",
+    },
+    FunctionInfo {
+        name: "mean",
+        documentation: "`mean(value) over (...)`: average numeric values in the current frame.",
+        kind: FunctionKind::Window,
+        min_args: 1,
+        max_args: Some(1),
+        expected_arity: "one argument",
+    },
+    FunctionInfo {
+        name: "min",
+        documentation: "`min(value) over (...)`: minimum non-null value in the current frame.",
+        kind: FunctionKind::Window,
+        min_args: 1,
+        max_args: Some(1),
+        expected_arity: "one argument",
+    },
+    FunctionInfo {
+        name: "max",
+        documentation: "`max(value) over (...)`: maximum non-null value in the current frame.",
+        kind: FunctionKind::Window,
+        min_args: 1,
+        max_args: Some(1),
+        expected_arity: "one argument",
+    },
+];
+
 pub const FORMATS: &[FormatInfo] = &[
     FormatInfo {
         name: "csv",
@@ -331,6 +447,16 @@ pub const KEYWORDS: &[&str] = &[
     "kind",
     "by_name",
     "format",
+    "over",
+    "partition_by",
+    "order_by",
+    "rows",
+    "between",
+    "unbounded_preceding",
+    "current_row",
+    "unbounded_following",
+    "preceding",
+    "following",
     "stdin",
     "stdout",
     "true",
@@ -364,6 +490,10 @@ pub fn scalar_function(name: &str) -> Option<&'static FunctionInfo> {
 
 pub fn aggregate_function(name: &str) -> Option<&'static AggregateFunctionInfo> {
     AGGREGATE_FUNCTIONS.iter().find(|info| info.name == name)
+}
+
+pub fn window_function(name: &str) -> Option<&'static FunctionInfo> {
+    WINDOW_FUNCTIONS.iter().find(|info| info.name == name)
 }
 
 pub fn format_info(name: &str) -> Option<&'static FormatInfo> {

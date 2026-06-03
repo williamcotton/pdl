@@ -7,7 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::ir::{lower_program, ProgramIr};
-use crate::registry::{accepts_arity, aggregate_function, format_info, scalar_function};
+use crate::registry::{
+    accepts_arity, aggregate_function, format_info, scalar_function, window_function,
+};
 use crate::schema::{GroupingState, PipelineSchema, PipelineSchemaLabel, StageTrace};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -221,7 +223,7 @@ where
                     let mut seen = BTreeSet::new();
                     let mut output = schema.clone();
                     for item in items {
-                        self.analyze_row_expr(&schema, &item.expr, ExprRole::Default);
+                        self.analyze_mutate_expr(&schema, &item.expr);
                         if !seen.insert(item.column.value.clone()) {
                             self.diagnostics.push(Diagnostic::error(
                                 codes::E1207,
@@ -310,7 +312,7 @@ where
                 Stage::Unsupported { name, .. } => {
                     self.diagnostics.push(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{}` is deferred in 0.15.0", name.value),
+                        format!("stage `{}` is deferred in 0.16.0", name.value),
                         name.span,
                     ));
                 }
@@ -336,7 +338,7 @@ where
             if !format_info(&format.value).is_some_and(|info| info.save_supported) {
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1215,
-                    format!("format `{}` is not supported in 0.15.0", format.value),
+                    format!("format `{}` is not supported in 0.16.0", format.value),
                     format.span,
                 ));
             }
@@ -364,7 +366,7 @@ where
             ));
         }
         for arg in &item.args {
-            self.analyze_scalar_expr(arg);
+            self.analyze_scalar_expr(arg, WindowContext::Disallowed);
             for column in aggregate_expr_column_refs(arg) {
                 self.require_column(schema, &column.value, column.span);
             }
@@ -372,13 +374,20 @@ where
     }
 
     fn analyze_row_expr(&mut self, schema: &[String], expr: &Expr, role: ExprRole) {
-        self.analyze_scalar_expr(expr);
+        self.analyze_scalar_expr(expr, WindowContext::Disallowed);
         for column in row_expr_column_refs(expr, schema, role) {
             self.require_column(schema, &column.value, column.span);
         }
     }
 
-    fn analyze_scalar_expr(&mut self, expr: &Expr) {
+    fn analyze_mutate_expr(&mut self, schema: &[String], expr: &Expr) {
+        self.analyze_scalar_expr(expr, WindowContext::Allowed);
+        for column in row_expr_column_refs(expr, schema, ExprRole::Default) {
+            self.require_column(schema, &column.value, column.span);
+        }
+    }
+
+    fn analyze_scalar_expr(&mut self, expr: &Expr, window_context: WindowContext) {
         match expr {
             Expr::Call { name, args, span } => {
                 match scalar_function(&name.value) {
@@ -390,6 +399,13 @@ where
                         ));
                     }
                     Some(_) => {}
+                    None if window_function(&name.value).is_some() => {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1226,
+                            format!("window function `{}` requires `over (...)`", name.value),
+                            name.span,
+                        ));
+                    }
                     None => {
                         self.diagnostics.push(Diagnostic::error(
                             codes::E1401,
@@ -399,15 +415,89 @@ where
                     }
                 }
                 for arg in args {
-                    self.analyze_scalar_expr(arg);
+                    self.analyze_scalar_expr(arg, WindowContext::Disallowed);
                 }
             }
-            Expr::Unary { expr, .. } => self.analyze_scalar_expr(expr),
+            Expr::Window {
+                function,
+                args,
+                spec,
+                span,
+            } => self.analyze_window_expr(function, args, spec, *span, window_context),
+            Expr::Unary { expr, .. } => self.analyze_scalar_expr(expr, window_context),
             Expr::Binary { left, right, .. } => {
-                self.analyze_scalar_expr(left);
-                self.analyze_scalar_expr(right);
+                self.analyze_scalar_expr(left, window_context);
+                self.analyze_scalar_expr(right, window_context);
             }
             Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => {}
+        }
+    }
+
+    fn analyze_window_expr(
+        &mut self,
+        function: &pdl_syntax::Spanned<String>,
+        args: &[Expr],
+        spec: &pdl_syntax::WindowSpec,
+        span: Span,
+        window_context: WindowContext,
+    ) {
+        if window_context == WindowContext::Disallowed {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1226,
+                "window expressions are supported only in `mutate` assignments",
+                span,
+            ));
+        }
+        match window_function(&function.value) {
+            Some(info) if !accepts_arity(*info, args.len()) => {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1402,
+                    format!(
+                        "window function `{}` expects {}",
+                        function.value, info.expected_arity
+                    ),
+                    span,
+                ));
+            }
+            Some(_) => {}
+            None => {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1401,
+                    format!("unknown window function `{}`", function.value),
+                    function.span,
+                ));
+            }
+        }
+
+        if requires_order_by(&function.value) && spec.order_by.is_empty() {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1203,
+                format!("window function `{}` requires `order_by`", function.value),
+                function.span,
+            ));
+        }
+
+        if matches!(function.value.as_str(), "lag" | "lead")
+            && args
+                .get(1)
+                .is_some_and(|arg| !is_non_negative_integer_literal(arg))
+        {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1206,
+                "lag/lead offset must be a non-negative integer literal",
+                args[1].span(),
+            ));
+        }
+
+        for arg in args {
+            if contains_window_expr(arg) {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1226,
+                    "nested window expressions are not supported",
+                    arg.span(),
+                ));
+            }
+            self.analyze_scalar_expr(arg, WindowContext::Disallowed);
         }
     }
 
@@ -495,6 +585,12 @@ enum ExprRole {
     ComparisonRight,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WindowContext {
+    Allowed,
+    Disallowed,
+}
+
 fn row_expr_column_refs(
     expr: &Expr,
     schema: &[String],
@@ -522,6 +618,7 @@ fn row_expr_column_refs(
             .iter()
             .flat_map(|arg| row_expr_column_refs(arg, schema, ExprRole::Default))
             .collect(),
+        Expr::Window { args, spec, .. } => window_expr_column_refs(args, spec, schema),
         Expr::Unary { expr, .. } => row_expr_column_refs(expr, schema, ExprRole::Default),
         Expr::Binary {
             left, op, right, ..
@@ -555,6 +652,7 @@ fn aggregate_expr_column_refs(expr: &Expr) -> Vec<pdl_syntax::Spanned<String>> {
             })
             .unwrap_or_default(),
         Expr::Call { args, .. } => args.iter().flat_map(aggregate_expr_column_refs).collect(),
+        Expr::Window { args, spec, .. } => window_expr_column_refs(args, spec, &[]),
         Expr::Unary { expr, .. } => aggregate_expr_column_refs(expr),
         Expr::Binary { left, right, .. } => {
             let mut refs = aggregate_expr_column_refs(left);
@@ -563,6 +661,43 @@ fn aggregate_expr_column_refs(expr: &Expr) -> Vec<pdl_syntax::Spanned<String>> {
         }
         Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => Vec::new(),
     }
+}
+
+fn window_expr_column_refs(
+    args: &[Expr],
+    spec: &pdl_syntax::WindowSpec,
+    schema: &[String],
+) -> Vec<pdl_syntax::Spanned<String>> {
+    let mut refs = Vec::new();
+    for arg in args {
+        refs.extend(row_expr_column_refs(arg, schema, ExprRole::Default));
+    }
+    refs.extend(spec.partition_by.iter().cloned());
+    refs.extend(spec.order_by.iter().map(|item| item.column.clone()));
+    refs
+}
+
+fn contains_window_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Window { .. } => true,
+        Expr::Call { args, .. } => args.iter().any(contains_window_expr),
+        Expr::Unary { expr, .. } => contains_window_expr(expr),
+        Expr::Binary { left, right, .. } => {
+            contains_window_expr(left) || contains_window_expr(right)
+        }
+        Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => false,
+    }
+}
+
+fn is_non_negative_integer_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Number(value) if value.value >= 0.0 && value.value.fract() == 0.0)
+}
+
+fn requires_order_by(function: &str) -> bool {
+    matches!(
+        function,
+        "rank" | "dense_rank" | "percent_rank" | "cume_dist"
+    )
 }
 
 fn is_comparison_op(op: pdl_syntax::BinaryOp) -> bool {
@@ -696,6 +831,69 @@ mod tests {
 
         assert!(analysis.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "E1005" && diagnostic.message == "unknown column `net_amount`"
+        }));
+        assert!(analysis.ir.is_none());
+    }
+
+    #[test]
+    fn window_mutate_adds_columns_and_checks_referenced_columns() {
+        let parse = pdl_syntax::parse(
+            r#"load "orders.csv"
+  | mutate "running_amount" = sum("amount") over (partition_by "customer_id" order_by "order_date" rows between unbounded_preceding and current_row), "rank" = dense_rank() over (partition_by "region" order_by "amount" desc)"#,
+        );
+
+        let analysis = analyze_program(&parse.program, |_| {
+            Ok(vec![
+                "order_id".to_string(),
+                "customer_id".to_string(),
+                "region".to_string(),
+                "order_date".to_string(),
+                "amount".to_string(),
+            ])
+        });
+
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
+        assert!(analysis.ir.is_some());
+        assert_eq!(
+            analysis.traces[0].output_schema,
+            Some(vec![
+                "order_id".to_string(),
+                "customer_id".to_string(),
+                "region".to_string(),
+                "order_date".to_string(),
+                "amount".to_string(),
+                "running_amount".to_string(),
+                "rank".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn window_context_errors_are_diagnostics() {
+        let parse = pdl_syntax::parse(
+            r#"load "orders.csv"
+  | filter row_number() over (order_by "order_date") > 1
+  | mutate "bad_rank" = rank() over (partition_by "customer_id")"#,
+        );
+
+        let analysis = analyze_program(&parse.program, |_| {
+            Ok(vec![
+                "customer_id".to_string(),
+                "order_date".to_string(),
+                "amount".to_string(),
+            ])
+        });
+
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E1226"
+                && diagnostic.message.contains("only in `mutate` assignments")
+        }));
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E1203" && diagnostic.message.contains("requires `order_by`")
         }));
         assert!(analysis.ir.is_none());
     }
