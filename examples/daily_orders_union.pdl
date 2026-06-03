@@ -3,4 +3,4 @@ let day2 =
 
 load "daily_orders_2026_02_01.csv"
   | union day2 by_name true distinct true
-  | sort "order_id" asc
+  | sort "order_id"

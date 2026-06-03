@@ -1,7 +1,9 @@
 let cleaned =
   load "orders_raw.csv"
   | filter lower(trim("status")) == "completed"
-  | mutate "net_amount" = "gross_amount" - coalesce("discount", 0), "region_channel" = concat(upper(trim("region")), lit(":"), lower(trim("channel")))
+  | mutate
+      "net_amount" = "gross_amount" - coalesce("discount", 0),
+      "region_channel" = concat(upper(trim("region")), lit(":"), lower(trim("channel")))
   | distinct "order_id"
 
 cleaned

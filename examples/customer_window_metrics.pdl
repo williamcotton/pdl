@@ -1,6 +1,29 @@
 load "sales.csv"
   | filter "status" == "completed"
-  | mutate "customer_sale_number" = row_number() over (partition_by "customer_id" order_by "amount" desc), "customer_revenue" = sum("amount") over (partition_by "customer_id"), "region_revenue" = sum("amount") over (partition_by "region")
-  | mutate "region_revenue_rank" = dense_rank() over (order_by "region_revenue" desc)
-  | select "region", "customer_id", "amount", "customer_sale_number", "customer_revenue", "region_revenue_rank"
+  | mutate
+      "customer_sale_number" =
+        row_number() over (
+          partition_by "customer_id"
+          order_by "amount" desc
+        ),
+      "customer_revenue" =
+        sum("amount") over (
+          partition_by "customer_id"
+        ),
+      "region_revenue" =
+        sum("amount") over (
+          partition_by "region"
+        )
+  | mutate
+      "region_revenue_rank" =
+        dense_rank() over (
+          order_by "region_revenue" desc
+        )
+  | select
+      "region",
+      "customer_id",
+      "amount",
+      "customer_sale_number",
+      "customer_revenue",
+      "region_revenue_rank"
   | sort "region_revenue_rank", "customer_id", "amount" desc
