@@ -6,12 +6,13 @@
 
 PDL is a Unix-pipeline-style tabular data transformation DSL.
 
-The current `0.23.0` implementation supports a native tabular-format slice with
+The current `0.24.0` implementation supports a native tabular-format slice with
 registered lettered diagnostics, load-free driver data plans, phase-tagged
 preparation reports, semantic-IR execution planning, schema-aware editor/LSP/WASM
 diagnostics, recoverable syntax diagnostics for malformed filter/sort/aggregate
 stages and missing stage pipes, a routed React/Vite/Monaco browser docs and
-demo site, and WASM in-memory CSV/JSON Lines execution. Native CLI execution
+demo site, and WASM in-memory CSV/JSON Lines execution with named output tables
+and virtual text files for path-backed `save` sinks. Native CLI execution
 supports CSV, JSON Lines, Parquet, Arrow IPC file, and Arrow IPC stream
 loading/saving, stdin sniffing, and deterministic stdout interop. It includes
 row-preserving data manipulation with `mutate`, `distinct`, scalar cleanup

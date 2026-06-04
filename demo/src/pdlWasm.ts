@@ -20,6 +20,7 @@ export interface PdlRuntimeDiagnostic {
 
 export interface PdlRunResult {
   stdout: string | null;
+  files?: Record<string, string>;
   diagnostics: PdlRuntimeDiagnostic[];
   error: string | null;
 }

@@ -1,4 +1,5 @@
-use pdl_data::Table;
+use pdl_data::{write_table_to_bytes, DataFormat, Table};
+use pdl_driver::{PipelineLabel, SinkDescriptor};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -159,6 +160,7 @@ fn run_browser_json(input: &[u8]) -> String {
 
     serde_json::json!({
         "stdout": stdout,
+        "files": saved_files_json(&prepared, &result.named_outputs),
         "outputs": result
             .named_outputs
             .iter()
@@ -173,6 +175,42 @@ fn run_browser_json(input: &[u8]) -> String {
         "error": null,
     })
     .to_string()
+}
+
+fn saved_files_json(
+    prepared: &pdl_driver::PreparedProgram,
+    outputs: &[pdl_exec::runtime::NamedOutput],
+) -> BTreeMap<String, String> {
+    outputs
+        .iter()
+        .filter_map(|output| saved_file_for_output(prepared, output))
+        .collect()
+}
+
+fn saved_file_for_output(
+    prepared: &pdl_driver::PreparedProgram,
+    output: &pdl_exec::runtime::NamedOutput,
+) -> Option<(String, String)> {
+    let sink = prepared.driver_plan.sinks.iter().find(|sink| {
+        matches!(&sink.pipeline, PipelineLabel::Output(name) if name == &output.name)
+            && matches!(sink.sink, SinkDescriptor::Path { .. })
+    })?;
+    let SinkDescriptor::Path { logical_path, .. } = &sink.sink else {
+        return None;
+    };
+    let format = sink
+        .format
+        .explicit
+        .as_deref()
+        .and_then(DataFormat::from_name)
+        .or(sink.format.inferred_from_path)
+        .unwrap_or(DataFormat::Csv);
+    if format.is_binary() {
+        return None;
+    }
+    let bytes = write_table_to_bytes(format, &output.table).ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    Some((logical_path.clone(), text))
 }
 
 fn table_json(table: &Table) -> serde_json::Value {
@@ -539,6 +577,8 @@ output totals =
         assert_eq!(payload["outputs"][0]["table"]["rows"][0][0], "West");
         assert_eq!(payload["outputs"][1]["name"], "totals");
         assert_eq!(payload["outputs"][1]["table"]["rows"][0][0], "40");
+        assert_eq!(payload["files"]["west.csv"], "region,amount\nWest,30\n");
+        assert_eq!(payload["files"]["totals.csv"], "total\n40\n");
         assert!(!Path::new("west.csv").exists());
         assert!(!Path::new("totals.csv").exists());
     }
