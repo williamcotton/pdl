@@ -3,7 +3,15 @@
 /editors/vscode/node_modules/
 /editors/vscode/dist/
 /editors/vscode/*.vsix
+/editors/monaco/node_modules/
+/editors/monaco/dist/
+/editors/monaco/*.tgz
+/packages/wasm/node_modules/
+/packages/wasm/dist/
+/packages/wasm/*.tgz
 /demo/node_modules/
 /demo/dist/
 /demo/public/wasm/
+/demo/.playwright-cli/
+/artifacts/
 .claude/

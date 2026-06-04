@@ -10,5 +10,13 @@ export default defineConfig({
     alias: {
       path: new URL("./src/pathBrowser.ts", import.meta.url).pathname,
     },
+    dedupe: [
+      "monaco-editor",
+      "monaco-editor-textmate",
+      "monaco-textmate",
+      "onigasm",
+      "react",
+      "react-dom",
+    ],
   },
 });

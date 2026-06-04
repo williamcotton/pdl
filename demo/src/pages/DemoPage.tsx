@@ -9,9 +9,9 @@ import {
   RefreshCw,
   Table2,
 } from "lucide-react";
+import { PdlEditor } from "pdl-editor";
+import type { PdlEditorDiagnostic, PdlRunResult, PdlRuntime } from "pdl-wasm";
 
-import { PdlEditor } from "../PdlEditor";
-import type { PdlEditorDiagnostic, PdlRunResult, PdlRuntime } from "../pdlWasm";
 import { publicAssetUrl } from "../publicAssets";
 import { usePdlRuntime } from "./docs/usePdlRuntime";
 
@@ -298,7 +298,7 @@ export function DemoPage(): React.ReactElement {
           dataFile: selectedDataset.file,
           filesSignature: runFilesSignature,
           stdoutFormat,
-          result: { stdout: null, diagnostics: [], error: errorMessage(error) },
+          result: { stdout: null, outputs: [], diagnostics: [], error: errorMessage(error) },
           editorDiagnostics: [],
         });
       } finally {

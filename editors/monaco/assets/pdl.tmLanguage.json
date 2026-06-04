@@ -1,0 +1,129 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "PDL",
+  "scopeName": "source.pdl",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#backtickColumns"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#functions"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.pdl",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.pdl",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.pdl",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.pdl",
+              "match": "\\\\(?:[\"\\\\nrt]|u\\{[0-9A-Fa-f]+\\})"
+            }
+          ]
+        }
+      ]
+    },
+    "backtickColumns": {
+      "patterns": [
+        {
+          "name": "variable.other.column.pdl",
+          "begin": "`",
+          "end": "`",
+          "patterns": [
+            {
+              "name": "constant.character.escape.pdl",
+              "match": "\\\\(?:[`\\\\])"
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.pdl",
+          "match": "\\b[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.pdl",
+          "match": "\\|"
+        },
+        {
+          "name": "keyword.operator.comparison.pdl",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.pdl",
+          "match": "[+\\-*/%]"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.pdl",
+          "match": "\\b(?:let|output|load|filter|select|drop|rename|mutate|group_by|agg|sort|limit|join|union|distinct|pivot_longer|complete|save|on|kind|by_name|names_to|values_to|fill|format|over|partition_by|order_by|rows|between|unbounded_preceding|current_row|unbounded_following|preceding|following|stdin|stdout|and|or|not|asc|desc|inner|left|right|full|semi|anti|nulls_first|nulls_last)\\b"
+        },
+        {
+          "name": "constant.language.pdl",
+          "match": "\\b(?:true|false|null)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "support.function.window.pdl",
+          "match": "\\b(?:count|count_distinct|sum|mean|min|max)\\b(?=\\s*\\([^)]*\\)\\s*over\\b)"
+        },
+        {
+          "name": "support.function.aggregate.pdl",
+          "match": "\\b(?:count|count_distinct|sum|mean|min|max)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.scalar.pdl",
+          "match": "\\b(?:is_null|not_null|coalesce|concat|lower|upper|trim|to_number|abs|round|if_else)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.window.pdl",
+          "match": "\\b(?:row_number|rank|dense_rank|percent_rank|cume_dist|lag|lead|first_value|last_value)\\b(?=\\s*\\()"
+        }
+      ]
+    }
+  }
+}

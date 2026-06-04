@@ -1,8 +1,8 @@
 import React from "react";
 import { AlertCircle, CheckCircle2, Code2, Database, LoaderCircle, Play, Table2 } from "lucide-react";
+import { PdlEditor } from "pdl-editor";
+import type { PdlEditorDiagnostic, PdlRunResult } from "pdl-wasm";
 
-import { PdlEditor } from "../../PdlEditor";
-import type { PdlEditorDiagnostic, PdlRunResult } from "../../pdlWasm";
 import { type RuntimeState, usePdlRuntime } from "./usePdlRuntime";
 
 export interface LiveExampleProps {
@@ -66,7 +66,7 @@ export function LiveExample({
           source: runSource,
           filesSignature: runFilesSignature,
           stdoutFormat,
-          result: { stdout: null, diagnostics: [], error: errorMessage(error) },
+          result: { stdout: null, outputs: [], diagnostics: [], error: errorMessage(error) },
           editorDiagnostics: [],
         });
       } finally {

@@ -1,0 +1,58 @@
+{
+  "name": "pdl-editor",
+  "version": "0.27.0",
+  "description": "Monaco and React editor integration for PDL browser hosts.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "main": "./src/index.tsx",
+  "module": "./src/index.tsx",
+  "types": "./src/index.tsx",
+  "exports": {
+    ".": {
+      "types": "./src/index.tsx",
+      "import": "./src/index.tsx"
+    },
+    "./assets/pdl.tmLanguage.json": "./assets/pdl.tmLanguage.json",
+    "./assets/language-configuration.json": "./assets/language-configuration.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "assets",
+    "src",
+    "README.md"
+  ],
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "scripts": {
+    "sync:assets": "node ../../scripts/sync-editor-assets.mjs",
+    "check": "npm run sync:assets && tsc --noEmit",
+    "build": "npm run check",
+    "pack:local": "npm run build && mkdir -p ../../artifacts && npm pack --pack-destination ../../artifacts"
+  },
+  "peerDependencies": {
+    "monaco-editor": "^0.55.1",
+    "monaco-editor-textmate": "^4.0.0",
+    "monaco-textmate": "^3.0.1",
+    "onigasm": "^2.2.5",
+    "pdl-wasm": "0.27.x",
+    "react": "^18.3.1 || ^19.0.0",
+    "react-dom": "^18.3.1 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "pdl-wasm": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.7",
+    "@types/react-dom": "^18.3.1",
+    "monaco-editor": "^0.55.1",
+    "monaco-editor-textmate": "^4.0.0",
+    "monaco-textmate": "^3.0.1",
+    "onigasm": "^2.2.5",
+    "typescript": "^5.4.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

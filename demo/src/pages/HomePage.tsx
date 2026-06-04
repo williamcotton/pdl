@@ -1,8 +1,8 @@
 import React from "react";
 import { ArrowRight, CheckCircle2, Code2, LoaderCircle, Play, Table2, Terminal } from "lucide-react";
+import { PdlEditor } from "pdl-editor";
+import type { PdlEditorDiagnostic, PdlRunResult } from "pdl-wasm";
 
-import { PdlEditor } from "../PdlEditor";
-import type { PdlEditorDiagnostic, PdlRunResult } from "../pdlWasm";
 import { type RuntimeState, usePdlRuntime } from "./docs/usePdlRuntime";
 
 interface RoutedPageProps {
@@ -54,7 +54,7 @@ export function HomePage({ navigate, routeHref }: RoutedPageProps): React.ReactE
         setDiagnostics(editorResponse.diagnostics);
         setResult(runtime.run(runSource, files, "csv"));
       } catch (error: unknown) {
-        setResult({ stdout: null, diagnostics: [], error: errorMessage(error) });
+        setResult({ stdout: null, outputs: [], diagnostics: [], error: errorMessage(error) });
       } finally {
         setRunning(false);
       }

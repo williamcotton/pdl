@@ -201,6 +201,13 @@ The browser runtime returns `{ stdout, files, outputs, diagnostics, error }`.
 Host apps own networking and file selection; the WASM runtime only sees the
 in-memory file map.
 
+PDL v0.27 also provides local package-shaped browser integrations:
+`packages/wasm` (`pdl-wasm`) for runtime loading and ABI types, and
+`editors/monaco` (`pdl-editor`) for Monaco/React editor wiring. During
+development, hosts can install them with filesystem `file:` paths and pass a
+local `wasmUrl` for a copied `public/wasm/pdl.wasm` artifact. See
+[`docs/NPM_PACKAGES.md`](docs/NPM_PACKAGES.md).
+
 ## Workspace layout
 
 Cargo workspace with ten crates under [`crates/`](crates/):

@@ -2,7 +2,7 @@
   "name": "pdl-vscode",
   "displayName": "PDL",
   "description": "Language support for the Pipeline Data Language.",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "publisher": "pdl",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -82,12 +82,13 @@
     ]
   },
   "scripts": {
-    "compile": "node esbuild.js",
+    "sync:assets": "node ../../scripts/sync-editor-assets.mjs",
+    "compile": "npm run sync:assets && node esbuild.js",
     "watch": "node esbuild.js --watch",
-    "lint": "tsc --noEmit",
-    "test": "node -e \"require('fs').accessSync('dist/extension.js')\"",
-    "package": "npm run compile && vsce package --no-dependencies",
-    "vscode:prepublish": "npm run compile"
+    "lint": "npm run sync:assets && tsc --noEmit",
+    "test": "npm run sync:assets && node -e \"require('fs').accessSync('dist/extension.js')\"",
+    "package": "npm run sync:assets && npm run compile && vsce package --no-dependencies",
+    "vscode:prepublish": "npm run sync:assets && npm run compile"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"

@@ -1,0 +1,31 @@
+{
+  "name": "pdl-wasm",
+  "version": "0.27.0",
+  "description": "Browser runtime loader and TypeScript ABI types for PDL.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "npm run check",
+    "build:wasm": "RUSTC=$(rustup which --toolchain stable rustc) rustup run stable cargo build --manifest-path ../../Cargo.toml -p pdl-wasm --lib --target wasm32-unknown-unknown --release && mkdir -p dist && cp ../../target/wasm32-unknown-unknown/release/pdl_wasm.wasm dist/pdl.wasm",
+    "pack:local": "npm run build:wasm && mkdir -p ../../artifacts && npm pack --pack-destination ../../artifacts"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}

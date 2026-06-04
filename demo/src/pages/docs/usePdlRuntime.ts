@@ -1,6 +1,7 @@
 import React from "react";
+import { loadPdlRuntime, type PdlRuntime } from "pdl-wasm";
 
-import { loadPdlRuntime, type PdlRuntime } from "../../pdlWasm";
+import { publicAssetUrl } from "../../publicAssets";
 
 export type RuntimeState = "loading" | "ready" | "error";
 
@@ -14,7 +15,7 @@ let runtimePromise: Promise<PdlRuntime> | null = null;
 
 function sharedRuntime(): Promise<PdlRuntime> {
   if (!runtimePromise) {
-    runtimePromise = loadPdlRuntime().catch((error) => {
+    runtimePromise = loadPdlRuntime({ wasmUrl: publicAssetUrl("wasm/pdl.wasm") }).catch((error) => {
       runtimePromise = null;
       throw error;
     });

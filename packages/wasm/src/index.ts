@@ -1,5 +1,3 @@
-import { publicAssetUrl } from "./publicAssets";
-
 export interface PdlRuntimeDiagnostic {
   code: string;
   severity: "error" | "warning" | "info" | "hint";
@@ -21,8 +19,24 @@ export interface PdlRuntimeDiagnostic {
 export interface PdlRunResult {
   stdout: string | null;
   files?: Record<string, string>;
+  outputs: PdlNamedOutput[];
   diagnostics: PdlRuntimeDiagnostic[];
   error: string | null;
+}
+
+export interface PdlNamedOutput {
+  name: string;
+  table: PdlNamedOutputTable;
+}
+
+export interface PdlNamedOutputTable {
+  columns: string[];
+  rows: string[][];
+}
+
+export interface PdlRunOptions {
+  stdoutFormat?: string;
+  programPath?: string;
 }
 
 export interface TextPosition {
@@ -81,16 +95,8 @@ export interface PdlEditorServiceResult<T = unknown> {
   error: string | null;
 }
 
-interface PdlWasmExports extends WebAssembly.Exports {
-  memory: WebAssembly.Memory;
-  pdl_alloc(len: number): number;
-  pdl_dealloc(ptr: number, len: number): void;
-  pdl_run_json(ptr: number, len: number): bigint;
-  pdl_editor_service_json(ptr: number, len: number): bigint;
-}
-
 export interface PdlRuntime {
-  run(source: string, files: Record<string, string>, stdoutFormat?: string): PdlRunResult;
+  run(source: string, files: Record<string, string>, options?: PdlRunOptions | string): PdlRunResult;
   editorService<T = unknown>(
     source: string,
     files: Record<string, string>,
@@ -99,13 +105,33 @@ export interface PdlRuntime {
   ): PdlEditorServiceResult<T>;
 }
 
+export interface LoadPdlRuntimeOptions {
+  wasmUrl?: string | URL;
+  fetcher?: typeof fetch;
+}
+
+interface PdlWasmExports extends WebAssembly.Exports {
+  memory: WebAssembly.Memory;
+  pdl_alloc(len: number): number;
+  pdl_dealloc(ptr: number, len: number): void;
+  pdl_run_json(ptr: number, len: number): bigint;
+  pdl_editor_service_json(ptr: number, len: number): bigint;
+}
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-export async function loadPdlRuntime(url = publicAssetUrl("wasm/pdl.wasm")): Promise<PdlRuntime> {
-  const response = await fetch(url);
+export function defaultPdlWasmUrl(baseUrl = import.meta.url): string {
+  return new URL("../dist/pdl.wasm", baseUrl).toString();
+}
+
+export async function loadPdlRuntime(options: LoadPdlRuntimeOptions | string | URL = {}): Promise<PdlRuntime> {
+  const resolvedOptions = normalizeLoadOptions(options);
+  const wasmUrl = resolvedOptions.wasmUrl ?? defaultPdlWasmUrl();
+  const fetcher = resolvedOptions.fetcher ?? fetch;
+  const response = await fetcher(wasmUrl);
   if (!response.ok) {
-    throw new Error(`failed to fetch ${url}: ${response.status}`);
+    throw new Error(`failed to fetch ${wasmUrl.toString()}: ${response.status}`);
   }
 
   const instance = await instantiateWasm(response);
@@ -113,8 +139,8 @@ export async function loadPdlRuntime(url = publicAssetUrl("wasm/pdl.wasm")): Pro
   assertPdlExports(exports);
 
   return {
-    run(source, files, stdoutFormat = "csv") {
-      return runWithExports(exports, source, files, stdoutFormat);
+    run(source, files, options = {}) {
+      return runWithExports(exports, source, files, normalizeRunOptions(options));
     },
     editorService<T = unknown>(
       source: string,
@@ -125,6 +151,14 @@ export async function loadPdlRuntime(url = publicAssetUrl("wasm/pdl.wasm")): Pro
       return editorServiceWithExports<T>(exports, source, files, request, programPath);
     },
   };
+}
+
+function normalizeLoadOptions(options: LoadPdlRuntimeOptions | string | URL): LoadPdlRuntimeOptions {
+  return typeof options === "string" || options instanceof URL ? { wasmUrl: options } : options;
+}
+
+function normalizeRunOptions(options: PdlRunOptions | string): PdlRunOptions {
+  return typeof options === "string" ? { stdoutFormat: options } : options;
 }
 
 async function instantiateWasm(response: Response): Promise<WebAssembly.Instance> {
@@ -162,9 +196,21 @@ function runWithExports(
   exports: PdlWasmExports,
   source: string,
   files: Record<string, string>,
-  stdoutFormat: string,
+  options: PdlRunOptions,
 ): PdlRunResult {
-  return callJson<PdlRunResult>(exports, { source, files, stdout_format: stdoutFormat }, exports.pdl_run_json);
+  const payload: Record<string, unknown> = {
+    source,
+    files,
+    program_path: options.programPath ?? "memory/main.pdl",
+  };
+  if (options.stdoutFormat) {
+    payload.stdout_format = options.stdoutFormat;
+  }
+  const result = callJson<PdlRunResult>(exports, payload, exports.pdl_run_json);
+  return {
+    ...result,
+    outputs: result.outputs ?? [],
+  };
 }
 
 function editorServiceWithExports<T>(

@@ -1,14 +1,22 @@
 # PDL Detailed Specification
 
-Status: Draft 0.26.0
+Status: Draft 0.27.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.26.0`.
+The current repository implementation is `0.27.0`.
 
-Version 0.26.0 is a breaking pre-1.0 syntax cleanup tracked in
+Version 0.27.0 is a packaging and browser-editor integration release tracked in
+`docs/V0_27_PLAN.md`. It keeps the v0.26 source language, runtime, CLI, LSP,
+and WASM JSON ABI semantics while adding canonical editor assets under
+`editors/assets/`, a package-shaped `pdl-wasm` browser runtime loader under
+`packages/wasm/`, a package-shaped `pdl-editor` Monaco/React integration under
+`editors/monaco/`, VS Code asset synchronization from the canonical assets, and
+demo consumption of the shared editor package.
+
+Version 0.26.0 was a breaking pre-1.0 syntax cleanup tracked in
 `docs/V0_26_PLAN.md`. It removes context-sensitive quoted column references,
 reserves double quotes for string/path literals, introduces backtick-escaped
 column references, removes the `as`, `col(...)`, and `lit(...)` authoring
@@ -71,7 +79,7 @@ GitHub Actions workflows for the Rust test suite and GitHub Pages demo
 deployment, plus GitHub Release asset publication for packaged editor and
 browser outputs.
 
-Version 0.26.0 does not yet implement configurable CSV dialect options, full
+Version 0.27.0 does not yet implement configurable CSV dialect options, full
 LSP code actions or cross-document navigation, Arrow IPC browser output,
 output selectors or full multi-output browser controls.
 Those features are tracked as deferred or planned work in successor release
@@ -2549,7 +2557,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.26.0` LSP implementation provides diagnostics,
+The current `0.27.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, semantic tokens, document symbols,
 schema-aware output declarations, and same-document binding go-to-definition,
 references, and rename. Code actions, output selectors, and cross-document
@@ -2707,7 +2715,12 @@ The extension SHOULD register commands only for client wiring, such as restart s
 
 The extension package version SHOULD align with workspace release version.
 
-When PDL syntax changes, `syntaxes/pdl.tmLanguage.json` and `language-configuration.json` SHOULD be updated in the same change.
+When PDL syntax changes, `editors/assets/pdl.tmLanguage.json` and
+`editors/assets/language-configuration.json` MUST be updated as the canonical
+static editor assets. The VS Code package MUST remain self-contained by syncing
+those canonical assets into `editors/vscode/syntaxes/pdl.tmLanguage.json` and
+`editors/vscode/language-configuration.json` before compile, lint, test,
+package, and prepublish workflows.
 
 ## 18. Browser And WASM Runtime
 
@@ -2821,6 +2834,32 @@ Docs-oriented live examples in the demo SHOULD keep the host-supplied input
 fixture visible alongside the PDL source and resulting stdout when layout space
 allows, so users can compare input rows with transformed output rows.
 
+Since version 0.27.0, the reference repository MUST include package-shaped
+browser integrations for npm-style consumption:
+
+- `packages/wasm/` publishes the org-free package name `pdl-wasm` and owns
+  runtime loading, ABI types, and helpers for caller-provided WASM URLs or a
+  generated package-local `pdl.wasm` artifact.
+- `editors/monaco/` publishes the org-free package name `pdl-editor` and owns
+  Monaco language registration, TextMate grammar wiring, language
+  configuration, theme defaults, marker conversion, editor-service provider
+  registration, structural runtime/editor-service types, and a thin React
+  editor component.
+
+`pdl-wasm` MUST NOT include Monaco, React, demo UI, Studio UI, execution
+buttons, output panels, or routing. `pdl-editor` MUST NOT implement PDL parsing,
+analysis, diagnostics, completion, hover, formatting, semantic tokens, symbols,
+definition/reference, or rename in TypeScript; it MUST adapt the upstream
+WASM/editor-service ABI into Monaco providers.
+
+The packages MUST support unpublished local development. In source mode, hosts
+MAY install or alias sibling package directories from `../pdl` and pass an
+explicit local `wasmUrl` for a generated artifact copied into the host's public
+assets. In packed mode, release validation MAY build local tarballs into an
+ignored package `dist/` or workspace `artifacts/` directory and install them
+with `file:` paths before npm publication. Generated `pdl.wasm` binaries and
+local package tarballs MUST NOT be checked into source.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -2891,7 +2930,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.26.0"
+version = "0.27.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -4470,7 +4509,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.26.0.
+PDL source does not require an explicit version declaration in draft 0.27.0.
 
 The implementation SHOULD report supported language version.
 
