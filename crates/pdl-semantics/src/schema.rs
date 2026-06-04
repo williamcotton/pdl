@@ -42,4 +42,5 @@ pub struct PipelineSchema {
 pub enum PipelineSchemaLabel {
     Main,
     Binding(String),
+    Output(String),
 }

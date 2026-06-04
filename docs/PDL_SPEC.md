@@ -1,21 +1,22 @@
 # PDL Detailed Specification
 
-Status: Draft 0.22.0
+Status: Draft 0.23.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.22.0`.
+The current repository implementation is `0.23.0`.
 
 This release keeps the existing language, runtime, editor, LSP, WASM, native
 CLI introspection, formatter, browser demo, and window analytics slices stable
-after the v0.21 packaging release. It publishes GitHub Release assets for the
-VS Code extension `.vsix` and standalone browser `pdl.wasm` runtime, with both
-versioned filenames and `latest` aliases. It
-retains the recoverable syntax diagnostics for malformed filter, aggregate,
-sort, missing-pipe, and trailing-token cases. It implements the `pdl` CLI
-commands `run`, `check`,
+while adding the v0.23 story-table preparation surface: decimal-place
+`round(value, digits)`, `count_distinct`, `pivot_longer`, `complete`, and named
+top-level `output` declarations. It publishes GitHub Release assets for the VS
+Code extension `.vsix` and standalone browser `pdl.wasm` runtime, with both
+versioned filenames and `latest` aliases. It retains the recoverable syntax
+diagnostics for malformed filter, aggregate, sort, missing-pipe, and
+trailing-token cases. It implements the `pdl` CLI commands `run`, `check`,
 `fmt`, `schema`, `plan`, `ast`, `ir`, `manifest`, `lsp`, and `version`; CSV,
 JSON Lines, Parquet, Arrow IPC file, and Arrow IPC stream file loading and
 saving in native execution; CSV and JSON Lines text stdout; binary Parquet,
@@ -23,11 +24,12 @@ Arrow IPC file, and Arrow IPC stream stdout where the host permits binary
 stdout; stdin format overrides and sniffing for native execution; deterministic
 in-memory execution for `load`, `filter`,
 `select`, `drop`, `rename`, `mutate`, `group_by`, `agg`, `sort`, `limit`,
-`join`, `union`, `distinct`, and `save`; named binding evaluation with lazy
-dependency resolution and cycle diagnostics; the scalar functions `col`, `lit`,
+`join`, `union`, `distinct`, `pivot_longer`, `complete`, and `save`; named
+binding evaluation with lazy dependency resolution and cycle diagnostics; named
+output evaluation in source order; the scalar functions `col`, `lit`,
 `is_null`, `not_null`, `coalesce`, `concat`, `lower`, `upper`, `trim`,
 `to_number`, `abs`, `round`, and `if_else`; and the aggregate functions
-`count`, `sum`, `mean`, `min`, and `max`. It implements window expressions
+`count`, `count_distinct`, `sum`, `mean`, `min`, and `max`. It implements window expressions
 with `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `lag`,
 `lead`, `first_value`, `last_value`, `count`, `sum`, `mean`, `min`, and `max`
 over explicit `partition_by`, `order_by`, and `rows between ... and ...`
@@ -58,11 +60,12 @@ GitHub Actions workflows for the Rust test suite and GitHub Pages demo
 deployment, plus GitHub Release asset publication for packaged editor and
 browser outputs.
 
-Version 0.22.0 does not yet implement configurable CSV dialect options, full
+Version 0.23.0 does not yet implement configurable CSV dialect options, full
 LSP code actions or cross-document navigation, Arrow IPC browser output,
-virtual browser output sinks, or full multi-output browser controls.
+virtual browser output sinks, output selectors, or full multi-output browser
+controls.
 Those features are tracked as deferred or planned work in successor release
-plans after `docs/V0_22_PLAN.md`.
+plans after `docs/V0_23_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -142,7 +145,7 @@ The keyword `table` means an ordered, typed, rectangular relation with named col
 The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
-over a partition and order of rows. Version 0.22.0 implements window
+over a partition and order of rows. Version 0.23.0 implements window
 expressions in `mutate` assignments.
 
 The keyword `column` means a named field with a static PDL type and nullability.
@@ -259,7 +262,8 @@ Named bindings are still pipeline expressions.
 
 They are not task blocks.
 
-They are evaluated only when referenced by the main pipeline or a selected output.
+They are evaluated only when referenced by the main pipeline or by an output
+pipeline.
 
 PDL supports stdout for Unix composition:
 
@@ -649,7 +653,7 @@ Assignments in one `mutate` stage are evaluated against the input schema in para
 
 Later stages see newly created columns.
 
-The version 0.22.0 implementation supports scalar row expressions and window
+The version 0.23.0 implementation supports scalar row expressions and window
 expressions in `mutate` assignments. New columns append in assignment order.
 Replacing an existing column preserves that column's position. Duplicate
 assignment targets in one stage MUST produce `E1207`.
@@ -810,11 +814,17 @@ Reserved stage and declaration words in version 0.1 are:
 - `join`
 - `union`
 - `distinct`
+- `pivot_longer`
+- `complete`
 - `let`
+- `output`
 - `as`
 - `on`
 - `kind`
 - `by_name`
+- `names_to`
+- `values_to`
+- `fill`
 - `format`
 - `stdin`
 - `stdout`
@@ -827,7 +837,7 @@ Reserved stage and declaration words in version 0.1 are:
 - `asc`
 - `desc`
 
-Reserved words MUST NOT be used as binding identifiers.
+Reserved words MUST NOT be used as binding or output identifiers.
 
 Column names may match reserved words because quoted column references are strings.
 
@@ -844,7 +854,7 @@ Window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are reserved by the version 0.22.0 implementation.
+These words are reserved by the version 0.23.0 implementation.
 
 ### 6.6 Quoted Tokens
 
@@ -928,17 +938,31 @@ Synthetic recovery tokens MUST be marked synthetic and MUST NOT claim source byt
 ### 7.1 Program
 
 ```ebnf
-Program       ::= Trivia* BindingDecl* PipelineExpr Trivia* EOF ;
+Program       ::= Trivia* BindingDecl* OutputDecl* PipelineExpr? Trivia* EOF ;
 BindingDecl   ::= "let" Ident "=" PipelineExpr ;
+OutputDecl    ::= "output" Ident "=" PipelineExpr ;
 PipelineExpr  ::= PipelineStart PipelineTail* ;
 PipelineStart ::= LoadStage | Ident ;
 PipelineTail  ::= "|" Stage ;
 Stage         ::= TransformStage | SaveStage ;
 ```
 
-A file contains zero or more `let` bindings followed by one main pipeline expression.
+A file contains zero or more `let` bindings followed by zero or more `output`
+declarations followed by an optional main pipeline expression.
 
-The main pipeline expression is the default run target.
+The main pipeline expression is the default run target when no `output`
+declarations are present.
+
+A file with one or more `output` declarations MUST NOT also contain a main
+pipeline expression. Mixing both forms MUST produce `E1503`.
+
+Output declaration names occupy the same top-level namespace as bindings.
+Duplicate output names or output names that conflict with binding names MUST
+produce `E1001`.
+
+Output declarations evaluate in source order. An `output` declaration names the
+materialized table result of its pipeline; it does not replace `save` as the
+file or stream output boundary.
 
 If a valid stage starts where a pipeline tail is expected but the `|` token is
 missing, parsers MUST report `E0001` on the stage name and SHOULD recover as if
@@ -989,7 +1013,9 @@ TransformStage ::= FilterStage
                  | LimitStage
                  | JoinStage
                  | UnionStage
-                 | DistinctStage ;
+                 | DistinctStage
+                 | PivotLongerStage
+                 | CompleteStage ;
 ```
 
 ### 7.5 Filter
@@ -1116,7 +1142,21 @@ Without a column list, `distinct` uses all columns as the duplicate key. With a
 column list, `distinct` uses the listed key columns and retains the first row
 for each key in current row order.
 
-### 7.12 Expressions
+### 7.12 Pivot Longer And Complete
+
+```ebnf
+PivotLongerStage ::= "pivot_longer" ColumnRefList
+                     "names_to" ColumnName "values_to" ColumnName ;
+CompleteStage    ::= "complete" ColumnRefList CompleteFill? ;
+CompleteFill     ::= "fill" CompleteFillItem ("," CompleteFillItem)* ;
+CompleteFillItem ::= ColumnName "=" ValueExpr ;
+```
+
+`pivot_longer` reshapes selected source columns into name/value rows.
+
+`complete` inserts missing key combinations from observed key-column values.
+
+### 7.13 Expressions
 
 ```ebnf
 ValueExpr     ::= OrExpr ;
@@ -1152,12 +1192,12 @@ Comparison chaining is not supported.
 `"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
 `"a" < "b" and "b" < "c"`.
 
-Window expressions are implemented in version 0.22.0 for `mutate`
+Window expressions are implemented in version 0.23.0 for `mutate`
 assignments. Using a window expression outside `mutate`, nesting one window
 expression inside another, or using a window function without `over (...)` MUST
 produce `E1226`.
 
-### 7.13 Error Recovery
+### 7.14 Error Recovery
 
 The parser MUST recover from malformed pipelines.
 
@@ -1166,6 +1206,7 @@ Recovery points include:
 - `|`
 - newline followed by a stage keyword
 - `let`
+- `output`
 - `save`
 - EOF
 - `,`
@@ -1183,9 +1224,20 @@ Bindings live in file scope.
 
 Binding names MUST be unique.
 
+Output declaration names live in the same top-level file scope as bindings.
+
+Output declaration names MUST be unique and MUST NOT conflict with binding
+names.
+
 The main pipeline can reference earlier bindings.
 
 Bindings can reference earlier bindings.
+
+Output pipelines can reference bindings.
+
+Output declarations are not binding values and MUST NOT be referenced as
+pipeline starts, join sources, or union sources unless a future selector feature
+explicitly promotes that behavior.
 
 Forward binding references MAY be allowed if the analyzer resolves the whole file before execution.
 
@@ -1360,7 +1412,7 @@ CSV loading MUST support:
 - comma delimiter by default
 
 Configurable CSV delimiters, quote characters, and null tokens remain deferred
-in version 0.22.0. A future release MAY promote them with source or CLI option
+in version 0.23.0. A future release MAY promote them with source or CLI option
 syntax, diagnostics, examples, and tests.
 
 CSV output MUST be deterministic.
@@ -1416,7 +1468,7 @@ Arrow streams begin with a continuation marker and schema message.
 
 The v0.15.0 native implementation supports `arrow-stream` for `--stdout-format`,
 `--stdin-format`, `load stdin`, `save stdout`, and explicit-format file
-loads/saves. The v0.22.0 WASM browser run ABI continues to reject binary stdout
+loads/saves. The v0.23.0 WASM browser run ABI continues to reject binary stdout
 formats because its current stdout field is UTF-8 text.
 
 The runtime SHOULD read and write record batches without unnecessary conversion.
@@ -1589,7 +1641,7 @@ New columns append in assignment order.
 
 Duplicate assignment targets in one `mutate` stage MUST produce `E1207`.
 
-The version 0.22.0 implementation supports scalar row expressions and window
+The version 0.23.0 implementation supports scalar row expressions and window
 expressions in `mutate`.
 
 ### 11.7 Group By
@@ -1717,7 +1769,62 @@ Output order follows retained row order.
 
 Unknown distinct key columns MUST produce `E1005`.
 
-### 11.14 Window Expressions
+### 11.14 Pivot Longer
+
+`pivot_longer` converts selected source columns into name/value rows.
+
+For each input row, the stage emits one output row for each selected source
+column. Output order MUST be input row order followed by selected-column order.
+
+Output columns are the input columns except the selected source columns, followed
+by the `names_to` column and the `values_to` column.
+
+The `names_to` value is the selected source column name. The `values_to` value is
+the selected source column value from the input row.
+
+The selected source column list MUST be non-empty. An empty or missing list MUST
+produce `E1203`.
+
+Unknown selected source columns MUST produce `E1005`.
+
+Duplicate selected source columns MUST produce `E1205`.
+
+`names_to` and `values_to` MUST be distinct and MUST NOT collide with retained
+input columns. Collisions MUST produce `E1207`.
+
+### 11.15 Complete
+
+`complete` inserts rows for missing combinations of observed key-column values.
+
+The key column list MUST be non-empty. A missing key list MUST produce `E1203`.
+
+Key columns must exist. Unknown key columns MUST produce `E1005`.
+
+Duplicate key columns MUST produce `E1205`.
+
+For each key column, the stage records observed key values in first-appearance
+order from the input rows. It then builds the Cartesian product of those observed
+key-value lists. Existing rows are preserved. For each missing key tuple, one
+new row is inserted.
+
+Inserted rows populate key columns from the generated tuple. Unfilled non-key
+columns are null. Fill assignments evaluate against the inserted base row and
+write their target columns.
+
+Fill target columns must exist. Unknown fill targets MUST produce `E1005`.
+
+Duplicate fill targets MUST produce `E1205`.
+
+A fill target MUST NOT be a key column. Violations MUST produce `E1207`.
+
+If the input contains multiple existing rows for the same key tuple, `complete`
+cannot choose a single existing row for that tuple and MUST produce `E1208`.
+
+Output order is the Cartesian key tuple order using first-appearance key value
+order. For existing tuples, the original row is emitted. For missing tuples, the
+inserted row is emitted.
+
+### 11.16 Window Expressions
 
 Window expressions are row expressions that add or replace columns without
 changing row count.
@@ -1770,7 +1877,7 @@ Aggregate expressions can reference aggregate functions and group keys.
 
 Window expressions are a row-expression form valid in `mutate` assignments.
 They do not introduce aggregate context, and they are not valid inside `agg`,
-`filter`, `sort`, or other non-`mutate` expression positions in version 0.22.0.
+`filter`, `sort`, or other non-`mutate` expression positions in version 0.23.0.
 
 Path context accepts string literals and future path functions.
 
@@ -1793,7 +1900,7 @@ Implementations SHOULD emit helpful diagnostics when a quoted token could plausi
 
 ### 12.3 Scalar Functions
 
-The version 0.22.0 implementation supports these scalar functions in row
+The version 0.23.0 implementation supports these scalar functions in row
 expressions:
 
 - `col(name)`: resolves a quoted value as a column reference.
@@ -1812,6 +1919,10 @@ expressions:
   Empty, null, or unparseable values return null.
 - `abs(value)`: returns the numeric absolute value.
 - `round(value)`: rounds a numeric value to the nearest integer.
+- `round(value, digits)`: rounds a numeric value to `digits` decimal places.
+  `digits` MUST be a literal integer from `0` through `12`. Invalid digit
+  values MUST produce `E1206`. Null numeric values propagate null. Results that
+  would render as negative zero MUST normalize to `0`.
 - `if_else(condition, when_true, when_false)`: returns `when_true` when the
   condition is true, `when_false` when it is false, and null when the condition
   is null.
@@ -1840,6 +1951,7 @@ Required aggregate functions:
 
 - `count()`
 - `count(column)`
+- `count_distinct(column)`
 - `sum(column)`
 - `mean(column)`
 - `min(column)`
@@ -1861,13 +1973,17 @@ Recommended aggregate functions:
 
 `count(column)` counts non-null values.
 
+`count_distinct(column)` counts unique non-null values within the aggregate
+group. Equality follows the implementation's deterministic value rendering for
+distinct row keys.
+
 `sum`, `mean`, `min`, and `max` ignore null values.
 
 Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions
 
-Window function syntax is implemented in version 0.22.0 for `mutate`
+Window function syntax is implemented in version 0.23.0 for `mutate`
 assignments.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
@@ -1934,7 +2050,7 @@ when `order_by` is present. Running calculations require an explicit frame:
 rows between unbounded_preceding and current_row
 ```
 
-Ranking, distribution, and offset functions ignore frames in version 0.22.0.
+Ranking, distribution, and offset functions ignore frames in version 0.23.0.
 
 For `rank` and `dense_rank`, peer rows are rows with equal `order_by` values.
 
@@ -1966,7 +2082,7 @@ Non-deterministic function not allowed MUST produce `E1405`.
 
 Divide by zero detected statically MUST produce `E1407`.
 
-Invalid window specifications MUST produce stable diagnostics; version 0.22.0
+Invalid window specifications MUST produce stable diagnostics; version 0.23.0
 uses `E1203`, `E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1401`, or
 `E1402` depending on the malformed clause.
 
@@ -2032,7 +2148,8 @@ The CLI SHOULD support `fmt`, `schema`, `plan`, `ast`, `ir`, `manifest`, `lsp`, 
 
 ### 14.2 pdl run
 
-`pdl run file.pdl` parses, analyzes, plans, and executes the main pipeline.
+`pdl run file.pdl` parses, analyzes, plans, and executes the main pipeline or,
+when the document declares named outputs, all output pipelines.
 
 Recommended options:
 
@@ -2047,6 +2164,11 @@ Recommended options:
 If the pipeline has `save` stages, those stages write their artifacts.
 
 If stdout output is requested, the final table is written to stdout.
+
+Named output declarations MUST execute in source order.
+
+If multiple named outputs would write distinct tables to one stdout stream, the
+CLI MUST produce `E1607` instead of interleaving or concatenating data streams.
 
 Operational logs MUST go to stderr so stdout remains a clean data stream.
 
@@ -2083,14 +2205,16 @@ It MUST exit non-zero on errors.
 
 ### 14.4 pdl schema
 
-`pdl schema file.pdl` prints inferred schema for the main pipeline.
+`pdl schema file.pdl` prints inferred schema for the main pipeline, or the last
+declared output when a document contains named outputs and no selector is
+provided.
 
 `pdl schema file.pdl --binding name` prints schema for a binding.
 
 `pdl schema file.pdl --json` prints deterministic JSON.
 
-The version 0.22.0 implementation emits column names, unknown logical types,
-nullability, stage traces, and diagnostics in JSON mode.
+The version 0.23.0 implementation emits column names, unknown logical types,
+nullability, stage traces, named output schemas, and diagnostics in JSON mode.
 
 `--binding name` MUST inspect the requested binding without changing normal
 `check` and `run` lazy-binding behavior.
@@ -2105,9 +2229,10 @@ It SHOULD show source reads, transform stages, format decisions, and sinks.
 
 `pdl plan file.pdl --json` prints deterministic JSON.
 
-The version 0.22.0 implementation accepts `--stdin-format <format>` and
+The version 0.23.0 implementation accepts `--stdin-format <format>` and
 `--stdout-format <format>` so stream choices are reflected in the plan. It MUST
-NOT read stdin or execute transforms while planning.
+NOT read stdin or execute transforms while planning. Plans for named-output
+documents MUST include output boundaries in declaration order.
 
 ### 14.6 pdl fmt
 
@@ -2117,7 +2242,7 @@ NOT read stdin or execute transforms while planning.
 
 The formatter MUST preserve semantics.
 
-The version 0.22.0 implementation rewrites files in place in the stable
+The version 0.23.0 implementation rewrites files in place in the stable
 leading-pipe style when formatting is available. It keeps short item lists
 inline, expands long item-list stages, and expands top-level window assignments
 in `mutate`. It returns a non-zero exit code without writing when parse errors
@@ -2129,8 +2254,9 @@ are present or when comments make safe rewriting unavailable.
 
 It MUST NOT execute data pipelines or read table data.
 
-The version 0.22.0 implementation exits non-zero on parse errors. When parsing
-succeeds, its JSON payload includes the parsed program and parse diagnostics.
+The version 0.23.0 implementation exits non-zero on parse errors. When parsing
+succeeds, its JSON payload includes the parsed program, output declarations, and
+parse diagnostics.
 
 ### 14.8 pdl ir
 
@@ -2138,8 +2264,9 @@ succeeds, its JSON payload includes the parsed program and parse diagnostics.
 
 It MUST NOT execute data pipelines or write output artifacts.
 
-The version 0.22.0 implementation exits non-zero when syntax, schema, or
-semantic errors prevent IR construction.
+The version 0.23.0 implementation exits non-zero when syntax, schema, or
+semantic errors prevent IR construction. Successful IR JSON includes output
+declarations when present.
 
 ### 14.9 pdl manifest
 
@@ -2147,9 +2274,9 @@ semantic errors prevent IR construction.
 
 It MUST NOT execute transforms or write output artifacts.
 
-The version 0.22.0 implementation accepts `--stdin-format <format>` and
+The version 0.23.0 implementation accepts `--stdin-format <format>` and
 `--stdout-format <format>`, includes source, driver, stream, execution-plan,
-final-schema, diagnostics, and Arrow-stdout stream hint fields, and exits
+final-schema, output schemas, diagnostics, and Arrow-stdout stream hint fields, and exits
 non-zero when planning fails.
 
 ### 14.10 pdl lsp
@@ -2243,7 +2370,7 @@ Strict mode MUST fail on row-level parse errors.
 
 The runtime SHOULD emit a run manifest when requested.
 
-The version 0.22.0 native CLI implements `pdl manifest file.pdl` as a
+The version 0.23.0 native CLI implements `pdl manifest file.pdl` as a
 deterministic dry-run manifest inspection command. It plans but does not execute
 the pipeline, and it does not write output artifacts.
 
@@ -2255,6 +2382,7 @@ Manifest fields SHOULD include:
 - detected formats
 - output artifacts
 - final schema
+- named output schemas
 - row counts where known
 - content hashes where computed
 - diagnostics
@@ -2354,10 +2482,11 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.22.0` LSP implementation provides diagnostics,
-completion, driver-backed hover, formatting, semantic tokens, document symbols, and
-same-document binding go-to-definition, references, and rename. Code actions and
-cross-document navigation remain deferred.
+The current `0.23.0` LSP implementation provides diagnostics,
+completion, driver-backed hover, formatting, semantic tokens, document symbols,
+schema-aware output declarations, and same-document binding go-to-definition,
+references, and rename. Code actions, output selectors, and cross-document
+navigation remain deferred.
 
 The current formatter withholds edits for documents containing comments because
 comment attachment is not yet source-preserving. The lexer and CST preserve
@@ -2369,6 +2498,7 @@ rewriting commented documents.
 Completion SHOULD support:
 
 - stage names after `|`
+- declaration names at top level
 - binding names at pipeline starts and join sources
 - column names in column positions
 - aggregate function names
@@ -2547,27 +2677,34 @@ Schema-aware WASM check calls MUST use host-supplied in-memory schemas or files
 through the shared driver/editor-service path. They MUST NOT read arbitrary host
 files or reimplement semantic validation in JavaScript or TypeScript.
 
-The v0.15 WASM implementation MUST expose packed JSON calls for:
+The v0.23 WASM implementation MUST expose packed JSON calls for:
 
-- `pdl_run_json`, which accepts PDL source, a host-supplied file map, a synthetic
-  program path, and a requested stdout format, then prepares and executes through
-  shared driver and exec code using in-memory driver IO
+- `pdl_run_json`, which accepts PDL source, a host-supplied file map, a
+  synthetic program path, and an optional requested stdout format, then prepares
+  and executes through shared driver and exec code using in-memory driver IO
 - `pdl_editor_service_json`, which accepts PDL source, the same host file map, a
   synthetic program path, and an editor-service request, then returns editor
   diagnostics plus the requested editor-service result
 
 The browser run request's host file map is format-neutral and MAY contain
 multiple files: keys are logical file paths and values are host-supplied file
-contents. Version 0.22.0 requires CSV and JSON Lines host file contents to
+contents. Version 0.23.0 requires CSV and JSON Lines host file contents to
 execute successfully through this JSON ABI because host files are supplied as
 UTF-8 strings. Binary host-file contents remain deferred until the ABI accepts
 byte payloads. The ABI MUST NOT special-case CSV at the TypeScript editor layer.
 
-`pdl_run_json` in version 0.22.0 MUST support CSV and JSON Lines stdout for the
-resulting table. Virtual path-backed output sinks, Arrow IPC byte output, and
-binary dataframe decoders remain deferred until a later plan promotes them.
+`pdl_run_json` in version 0.23.0 MUST support CSV and JSON Lines stdout for the
+resulting table when a stdout format is requested or when the document has no
+named outputs and no stdout format is supplied. For documents with named output
+declarations and no requested stdout format, `pdl_run_json` MUST return an
+`outputs` array of `{ name, table }` entries in declaration order, where `table`
+contains `columns` and string-rendered `rows`. The browser run facade MUST NOT
+write path-backed `save` sinks to the native filesystem; those sinks are planned
+but not materialized at the WASM boundary. Virtual path-backed output sinks,
+Arrow IPC byte output, and binary dataframe decoders remain deferred until a
+later plan promotes them.
 
-For hover requests, `pdl_editor_service_json` in version 0.22.0 MUST use the
+For hover requests, `pdl_editor_service_json` in version 0.23.0 MUST use the
 same host file map through in-memory driver I/O so Monaco/WASM hover previews
 match native LSP hover behavior for text-backed paths and columns.
 
@@ -2669,7 +2806,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.22.0"
+version = "0.23.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3787,7 +3924,7 @@ stage-argument error.
 
 ### 20.3 Binding, Scope, Column, And Schema Diagnostics
 
-`E1001` duplicate binding name.
+`E1001` duplicate top-level name.
 
 `E1002` reserved keyword used as binding.
 
@@ -3827,7 +3964,7 @@ stage-argument error.
 
 `E1204` unknown stage option.
 
-`E1205` duplicate stage option.
+`E1205` duplicate stage option or duplicate stage item.
 
 `E1206` invalid stage argument type.
 
@@ -3941,7 +4078,7 @@ stage-argument error.
 
 `E1502` no runnable main pipeline.
 
-`E1503` selected binding not found.
+`E1503` ambiguous or unavailable runnable target.
 
 `E1504` cache entry invalid.
 
@@ -4234,7 +4371,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.22.0.
+PDL source does not require an explicit version declaration in draft 0.23.0.
 
 The implementation SHOULD report supported language version.
 
@@ -4251,8 +4388,9 @@ Manifest schemas MUST include a manifest version.
 ## 25. Appendix A: Complete EBNF Draft
 
 ```ebnf
-Program          ::= Trivia* BindingDecl* PipelineExpr Trivia* EOF ;
+Program          ::= Trivia* BindingDecl* OutputDecl* PipelineExpr? Trivia* EOF ;
 BindingDecl      ::= "let" Ident "=" PipelineExpr ;
+OutputDecl       ::= "output" Ident "=" PipelineExpr ;
 PipelineExpr     ::= PipelineStart PipelineTail* ;
 PipelineStart    ::= LoadStage | Ident ;
 PipelineTail     ::= "|" Stage ;
@@ -4268,6 +4406,8 @@ Stage            ::= FilterStage
                    | JoinStage
                    | UnionStage
                    | DistinctStage
+                   | PivotLongerStage
+                   | CompleteStage
                    | SaveStage ;
 
 LoadStage        ::= "load" SourceRef FormatClause? ;
@@ -4304,6 +4444,11 @@ UnionOptions     ::= UnionOption* ;
 UnionOption      ::= "by_name" BoolLiteral | "distinct" BoolLiteral ;
 DistinctStage    ::= "distinct" ColumnRefList? ;
 ColumnRefList    ::= ColumnRef ("," ColumnRef)* ;
+PivotLongerStage ::= "pivot_longer" ColumnRefList
+                     "names_to" ColumnName "values_to" ColumnName ;
+CompleteStage    ::= "complete" ColumnRefList CompleteFill? ;
+CompleteFill     ::= "fill" CompleteFillItem ("," CompleteFillItem)* ;
+CompleteFillItem ::= ColumnName "=" ValueExpr ;
 
 PredicateExpr    ::= ValueExpr ;
 ValueExpr        ::= OrExpr ;
@@ -4410,7 +4555,7 @@ Syntax:
 
 - Lexer supports UTF-8, comments, quoted tokens, numbers, identifiers, operators, and spans.
 - Parser supports resilient pipeline parsing.
-- Parser supports `let` bindings and main pipeline.
+- Parser supports `let` bindings, named `output` declarations, and main pipeline.
 - Formatter emits stable leading-pipe style.
 
 Semantics:
@@ -4418,6 +4563,7 @@ Semantics:
 - Analyzer resolves bindings and columns.
 - Analyzer tracks schema after every stage.
 - Analyzer validates grouping and aggregation.
+- Analyzer validates `pivot_longer`, `complete`, and named output declarations.
 - Analyzer validates format clauses and stage options.
 - Analyzer detects binding cycles.
 
@@ -4427,12 +4573,14 @@ Data and driver:
 - Driver infers formats by extension.
 - Driver sniffs stdin when needed.
 - Data crate reads CSV and Arrow IPC stream.
-- Reference implementation still defers Parquet.
+- Reference implementation reads and writes CSV, JSON Lines, Parquet, Arrow IPC
+  file, and Arrow IPC stream formats where supported by host boundaries.
 
 Execution and output:
 
 - Exec crate emits deterministic CSV.
 - Exec crate emits Arrow IPC streams.
+- Exec crate evaluates named outputs in source order.
 - CLI emits deterministic dry-run manifest and schema JSON.
 - CLI keeps logs off stdout in data-output mode.
 
@@ -4441,6 +4589,7 @@ Editor and browser:
 - `pdl lsp` serves diagnostics, completion, hover, formatting, and semantic tokens.
 - VS Code extension is a thin LSP client.
 - WASM exposes editor-service JSON ABI.
+- WASM run JSON exposes named output tables.
 - Monaco demo uses WASM and does not reimplement language logic.
 
 Stream interop:

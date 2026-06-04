@@ -69,6 +69,7 @@ pub enum SyntaxKind {
     SortItemNode,
     MutateItemNode,
     ExprNode,
+    OutputDecl,
 }
 
 impl SyntaxKind {
@@ -112,6 +113,7 @@ impl SyntaxKind {
             35 => SyntaxKind::SortItemNode,
             36 => SyntaxKind::MutateItemNode,
             37 => SyntaxKind::ExprNode,
+            38 => SyntaxKind::OutputDecl,
             _ => SyntaxKind::Error,
         }
     }
@@ -127,11 +129,18 @@ impl SyntaxKind {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Program {
     pub bindings: Vec<Binding>,
+    pub outputs: Vec<OutputDecl>,
     pub main: Option<Pipeline>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Binding {
+    pub name: Spanned<String>,
+    pub pipeline: Pipeline,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputDecl {
     pub name: Spanned<String>,
     pub pipeline: Pipeline,
 }
@@ -222,6 +231,17 @@ pub enum Stage {
         columns: Vec<Spanned<String>>,
         span: Span,
     },
+    PivotLonger {
+        columns: Vec<Spanned<String>>,
+        names_to: Spanned<String>,
+        values_to: Spanned<String>,
+        span: Span,
+    },
+    Complete {
+        keys: Vec<Spanned<String>>,
+        fills: Vec<CompleteFillItem>,
+        span: Span,
+    },
     Save(SaveStage),
     Unsupported {
         name: Spanned<String>,
@@ -244,6 +264,8 @@ impl Stage {
             | Stage::Join { span, .. }
             | Stage::Union { span, .. }
             | Stage::Distinct { span, .. }
+            | Stage::PivotLonger { span, .. }
+            | Stage::Complete { span, .. }
             | Stage::Unsupported { span, .. } => *span,
             Stage::Save(save) => save.span,
         }
@@ -271,6 +293,13 @@ pub struct RenameItem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MutateItem {
+    pub column: Spanned<String>,
+    pub expr: Expr,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompleteFillItem {
     pub column: Spanned<String>,
     pub expr: Expr,
     pub span: Span,
@@ -521,6 +550,7 @@ impl<'a> Parser<'a> {
 
     fn parse_program(&mut self) -> (Program, Vec<Diagnostic>) {
         let mut bindings = Vec::new();
+        let mut outputs = Vec::new();
         while self.at_ident("let") {
             if let Some(binding) = self.parse_binding() {
                 bindings.push(binding);
@@ -528,13 +558,22 @@ impl<'a> Parser<'a> {
                 self.recover_to_pipe_or_eof();
             }
         }
+        while self.at_ident("output") {
+            if let Some(output) = self.parse_output_decl() {
+                outputs.push(output);
+            } else {
+                self.recover_to_pipe_or_eof();
+            }
+        }
 
         let main = if self.at_eof() {
-            self.diagnostics.push(Diagnostic::error(
-                codes::E1502,
-                "no runnable main pipeline",
-                self.current().span,
-            ));
+            if outputs.is_empty() {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1502,
+                    "no runnable main pipeline",
+                    self.current().span,
+                ));
+            }
             None
         } else {
             self.parse_pipeline()
@@ -549,7 +588,11 @@ impl<'a> Parser<'a> {
         }
 
         (
-            Program { bindings, main },
+            Program {
+                bindings,
+                outputs,
+                main,
+            },
             std::mem::take(&mut self.diagnostics),
         )
     }
@@ -560,6 +603,14 @@ impl<'a> Parser<'a> {
         self.expect_equal();
         let pipeline = self.parse_pipeline()?;
         Some(Binding { name, pipeline })
+    }
+
+    fn parse_output_decl(&mut self) -> Option<OutputDecl> {
+        self.expect_ident("output")?;
+        let name = self.expect_output_name()?;
+        self.expect_equal();
+        let pipeline = self.parse_pipeline()?;
+        Some(OutputDecl { name, pipeline })
     }
 
     fn parse_pipeline(&mut self) -> Option<Pipeline> {
@@ -655,6 +706,8 @@ impl<'a> Parser<'a> {
             "join" => self.parse_join(name.span),
             "union" => self.parse_union(name.span),
             "distinct" => self.parse_distinct(name.span),
+            "pivot_longer" => self.parse_pivot_longer(name.span),
+            "complete" => self.parse_complete(name.span),
             "save" => self.parse_save(name.span).map(Stage::Save),
             _ => {
                 self.diagnostics.push(Diagnostic::error(
@@ -1127,6 +1180,93 @@ impl<'a> Parser<'a> {
             .map_or(name_span.end, |column| column.span.end);
         Some(Stage::Distinct {
             columns,
+            span: Span::new(name_span.start, end),
+        })
+    }
+
+    fn parse_pivot_longer(&mut self, name_span: Span) -> Option<Stage> {
+        let mut columns = Vec::new();
+        while !self.at_stage_boundary() && !self.at_ident("names_to") {
+            columns.push(self.expect_column_name()?);
+            if !self.consume_comma() {
+                break;
+            }
+        }
+        if !self.consume_ident("names_to") {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1203,
+                "pivot_longer requires `names_to`",
+                self.current().span,
+            ));
+        }
+        let names_to = self.expect_column_name()?;
+        if !self.consume_ident("values_to") {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1203,
+                "pivot_longer requires `values_to`",
+                self.current().span,
+            ));
+        }
+        let values_to = self.expect_column_name()?;
+        let mut end = values_to.span.end;
+        if !self.at_stage_boundary() {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1204,
+                "unknown pivot_longer option",
+                self.current().span,
+            ));
+            end = self.consume_until_stage_boundary(name_span).end;
+        }
+        Some(Stage::PivotLonger {
+            columns,
+            names_to,
+            values_to,
+            span: Span::new(name_span.start, end),
+        })
+    }
+
+    fn parse_complete(&mut self, name_span: Span) -> Option<Stage> {
+        let mut keys = Vec::new();
+        while !self.at_stage_boundary() && !self.at_ident("fill") {
+            keys.push(self.expect_column_name()?);
+            if !self.consume_comma() {
+                break;
+            }
+        }
+        let mut fills = Vec::new();
+        if self.consume_ident("fill") {
+            loop {
+                let column = self.expect_column_name()?;
+                if !self.consume_equal() {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E1203,
+                        "complete fill assignments require `=`",
+                        self.current().span,
+                    ));
+                }
+                let expr = self.parse_expr(0)?;
+                let span = column.span.join(expr.span());
+                fills.push(CompleteFillItem { column, expr, span });
+                if !self.consume_comma() {
+                    break;
+                }
+            }
+        }
+        let mut end = fills.last().map_or_else(
+            || keys.last().map_or(name_span.end, |key| key.span.end),
+            |fill| fill.span.end,
+        );
+        if !self.at_stage_boundary() {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1204,
+                "unknown complete option",
+                self.current().span,
+            ));
+            end = self.consume_until_stage_boundary(name_span).end;
+        }
+        Some(Stage::Complete {
+            keys,
+            fills,
             span: Span::new(name_span.start, end),
         })
     }
@@ -1634,6 +1774,21 @@ impl<'a> Parser<'a> {
         Some(name)
     }
 
+    fn expect_output_name(&mut self) -> Option<Spanned<String>> {
+        let name = self.expect_identifier("output name")?;
+        if is_reserved_keyword(&name.value) {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1002,
+                format!(
+                    "reserved keyword `{}` cannot be used as an output",
+                    name.value
+                ),
+                name.span,
+            ));
+        }
+        Some(name)
+    }
+
     fn expect_column_name(&mut self) -> Option<Spanned<String>> {
         let token = self.advance().clone();
         match token.kind {
@@ -1894,6 +2049,8 @@ fn is_recoverable_stage_name(value: &str) -> bool {
             | "join"
             | "union"
             | "distinct"
+            | "pivot_longer"
+            | "complete"
     )
 }
 
@@ -1914,11 +2071,17 @@ fn is_reserved_keyword(value: &str) -> bool {
             | "join"
             | "union"
             | "distinct"
+            | "pivot_longer"
+            | "complete"
             | "let"
+            | "output"
             | "as"
             | "on"
             | "kind"
             | "by_name"
+            | "names_to"
+            | "values_to"
+            | "fill"
             | "format"
             | "over"
             | "partition_by"

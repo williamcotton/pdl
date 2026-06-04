@@ -1,8 +1,8 @@
 use pdl_core::Severity;
 
 use crate::{
-    parse, AggItem, BinaryOp, Expr, FrameBound, JoinOn, MutateItem, NullsOrder, Pipeline,
-    PipelineStart, SinkRef, SortDirection, SortItem, SourceRef, Spanned, Stage, UnaryOp,
+    parse, AggItem, BinaryOp, CompleteFillItem, Expr, FrameBound, JoinOn, MutateItem, NullsOrder,
+    Pipeline, PipelineStart, SinkRef, SortDirection, SortItem, SourceRef, Spanned, Stage, UnaryOp,
     UnionOptionKind, WindowFrame, WindowSpec,
 };
 
@@ -33,8 +33,15 @@ pub fn format_source(source: &str) -> FormatResult {
         lines.extend(format_pipeline(&binding.pipeline, "  ", "  "));
         lines.push(String::new());
     }
+    for output in &parse.program.outputs {
+        lines.push(format!("output {} =", output.name.value));
+        lines.extend(format_pipeline(&output.pipeline, "  ", "  "));
+        lines.push(String::new());
+    }
     if let Some(main) = &parse.program.main {
         lines.extend(format_pipeline(main, "", "  "));
+    } else if lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
     }
 
     Some(lines.join("\n"))
@@ -109,6 +116,16 @@ fn format_stage_lines(stage: &Stage, pipe_indent: &str) -> Vec<String> {
             if !columns.is_empty() && should_multiline_item_stage(&inline, columns.len()) =>
         {
             format_item_stage_lines("distinct", format_column_items(columns), pipe_indent)
+        }
+        Stage::PivotLonger { columns, .. }
+            if should_multiline_item_stage(&inline, columns.len()) =>
+        {
+            format_pivot_longer_stage_lines(stage, pipe_indent)
+        }
+        Stage::Complete { keys, fills, .. }
+            if should_multiline_item_stage(&inline, keys.len() + fills.len()) =>
+        {
+            format_complete_stage_lines(keys, fills, pipe_indent)
         }
         _ => vec![format!("{}| {}", pipe_indent, inline)],
     }
@@ -190,6 +207,31 @@ fn format_stage_inline(stage: &Stage) -> String {
         }
         Stage::Distinct { columns, .. } if columns.is_empty() => "distinct".to_string(),
         Stage::Distinct { columns, .. } => format!("distinct {}", format_columns(columns)),
+        Stage::PivotLonger {
+            columns,
+            names_to,
+            values_to,
+            ..
+        } => format!(
+            "pivot_longer {} names_to {} values_to {}",
+            format_columns(columns),
+            quote(&names_to.value),
+            quote(&values_to.value)
+        ),
+        Stage::Complete { keys, fills, .. } => {
+            let mut text = format!("complete {}", format_columns(keys));
+            if !fills.is_empty() {
+                text.push_str(" fill ");
+                text.push_str(
+                    &fills
+                        .iter()
+                        .map(format_complete_fill_item)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            text
+        }
         Stage::Save(save) => {
             let mut text = match &save.sink {
                 SinkRef::Path(path) => format!("save {}", quote(&path.value)),
@@ -267,6 +309,63 @@ fn format_mutate_item(item: &MutateItem) -> String {
         quote(&item.column.value),
         format_expr(&item.expr)
     )
+}
+
+fn format_complete_fill_item(item: &CompleteFillItem) -> String {
+    format!(
+        "{} = {}",
+        quote(&item.column.value),
+        format_expr(&item.expr)
+    )
+}
+
+fn format_pivot_longer_stage_lines(stage: &Stage, pipe_indent: &str) -> Vec<String> {
+    let Stage::PivotLonger {
+        columns,
+        names_to,
+        values_to,
+        ..
+    } = stage
+    else {
+        return Vec::new();
+    };
+    let item_indent = format!("{pipe_indent}    ");
+    let mut lines = vec![format!("{pipe_indent}| pivot_longer")];
+    for column in columns {
+        lines.push(format!("{item_indent}{},", quote(&column.value)));
+    }
+    lines.push(format!(
+        "{item_indent}names_to {} values_to {}",
+        quote(&names_to.value),
+        quote(&values_to.value)
+    ));
+    lines
+}
+
+fn format_complete_stage_lines(
+    keys: &[Spanned<String>],
+    fills: &[CompleteFillItem],
+    pipe_indent: &str,
+) -> Vec<String> {
+    let item_indent = format!("{pipe_indent}    ");
+    let mut lines = vec![format!("{pipe_indent}| complete")];
+    for key in keys {
+        lines.push(format!("{item_indent}{},", quote(&key.value)));
+    }
+    if !fills.is_empty() {
+        let last_index = fills.len().saturating_sub(1);
+        lines.push(format!("{item_indent}fill"));
+        for (index, item) in fills.iter().enumerate() {
+            let comma = if index == last_index { "" } else { "," };
+            lines.push(format!(
+                "{item_indent}  {} = {}{}",
+                quote(&item.column.value),
+                format_expr(&item.expr),
+                comma
+            ));
+        }
+    }
+    lines
 }
 
 fn format_mutate_stage_lines(items: &[MutateItem], pipe_indent: &str) -> Vec<String> {

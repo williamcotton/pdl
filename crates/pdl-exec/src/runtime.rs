@@ -8,8 +8,9 @@ use pdl_driver::{
     SinkDescriptor, SourceDescriptor,
 };
 use pdl_semantics::{
-    AggItemIr, BinaryOpIr, ExprIr, FrameBoundIr, JoinKindIr, MutateItemIr, NullsOrderIr,
-    PipelineIr, PipelineStartIr, SortDirectionIr, StageIr, UnaryOpIr, WindowFrameIr, WindowSpecIr,
+    AggItemIr, BinaryOpIr, CompleteFillItemIr, ExprIr, FrameBoundIr, JoinKindIr, MutateItemIr,
+    NullsOrderIr, PipelineIr, PipelineStartIr, SortDirectionIr, StageIr, UnaryOpIr, WindowFrameIr,
+    WindowSpecIr,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,7 +38,14 @@ impl Default for RunOptions {
 #[derive(Clone, Debug, Default)]
 pub struct RunResult {
     pub stdout: Option<Vec<u8>>,
+    pub named_outputs: Vec<NamedOutput>,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamedOutput {
+    pub name: String,
+    pub table: Table,
 }
 
 pub fn run_prepared(prepared: &PreparedProgram, options: RunOptions) -> RunResult {
@@ -62,6 +70,7 @@ pub fn run_prepared_with_io(
         Err(diagnostics) => {
             return RunResult {
                 stdout: None,
+                named_outputs: Vec::new(),
                 diagnostics,
             };
         }
@@ -85,46 +94,77 @@ pub fn run_prepared_with_io(
         ));
         return RunResult {
             stdout: None,
-            diagnostics: runtime.diagnostics,
-        };
-    };
-    let Some(main) = &ir.main else {
-        runtime.diagnostics.push(Diagnostic::error(
-            codes::E1502,
-            "no runnable main pipeline",
-            Span::zero(),
-        ));
-        return RunResult {
-            stdout: None,
+            named_outputs: Vec::new(),
             diagnostics: runtime.diagnostics,
         };
     };
 
-    let table = match runtime.execute_pipeline(main) {
-        Ok(table) => table,
-        Err(diagnostic) => {
-            runtime.diagnostics.push(diagnostic);
+    let mut named_outputs = Vec::new();
+    let final_table = if ir.outputs.is_empty() {
+        let Some(main) = &ir.main else {
+            runtime.diagnostics.push(Diagnostic::error(
+                codes::E1502,
+                "no runnable main pipeline",
+                Span::zero(),
+            ));
             return RunResult {
                 stdout: None,
+                named_outputs,
                 diagnostics: runtime.diagnostics,
             };
+        };
+        match runtime.execute_pipeline(main) {
+            Ok(table) => Some(table),
+            Err(diagnostic) => {
+                runtime.diagnostics.push(diagnostic);
+                return RunResult {
+                    stdout: None,
+                    named_outputs,
+                    diagnostics: runtime.diagnostics,
+                };
+            }
         }
+    } else {
+        let mut last = None;
+        for output in &ir.outputs {
+            match runtime.execute_pipeline(&output.pipeline) {
+                Ok(table) => {
+                    last = Some(table.clone());
+                    named_outputs.push(NamedOutput {
+                        name: output.name.clone(),
+                        table,
+                    });
+                }
+                Err(diagnostic) => {
+                    runtime.diagnostics.push(diagnostic);
+                    return RunResult {
+                        stdout: None,
+                        named_outputs,
+                        diagnostics: runtime.diagnostics,
+                    };
+                }
+            }
+        }
+        last
     };
 
     let stdout = if let Some(format) = plan.stdout_format {
-        match emit_stdout(format, &table) {
-            Ok(bytes) => Some(bytes),
-            Err(diagnostic) => {
-                runtime.diagnostics.push(diagnostic);
-                None
-            }
-        }
+        final_table
+            .as_ref()
+            .and_then(|table| match emit_stdout(format, table) {
+                Ok(bytes) => Some(bytes),
+                Err(diagnostic) => {
+                    runtime.diagnostics.push(diagnostic);
+                    None
+                }
+            })
     } else {
         runtime.stdout.take()
     };
 
     RunResult {
         stdout,
+        named_outputs,
         diagnostics: runtime.diagnostics,
     }
 }
@@ -242,13 +282,26 @@ impl Runtime<'_> {
                     table = table.distinct(columns);
                     grouping = None;
                 }
+                StageIr::PivotLonger {
+                    columns,
+                    names_to,
+                    values_to,
+                    span,
+                } => {
+                    table = pivot_longer(table, columns, names_to, values_to, *span)?;
+                    grouping = None;
+                }
+                StageIr::Complete { keys, fills, span } => {
+                    table = complete(table, keys, fills, *span)?;
+                    grouping = None;
+                }
                 StageIr::Save { format, span, .. } => {
                     self.execute_save(*span, format.as_deref(), &table)?;
                 }
                 StageIr::Unsupported { name, span } => {
                     return Err(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{name}` is deferred in 0.21.0"),
+                        format!("stage `{name}` is deferred in 0.23.0"),
                         *span,
                     ));
                 }
@@ -602,6 +655,215 @@ impl Runtime<'_> {
     }
 }
 
+fn pivot_longer(
+    table: Table,
+    columns: &[String],
+    names_to: &str,
+    values_to: &str,
+    span: Span,
+) -> Result<Table, Diagnostic> {
+    if columns.is_empty() {
+        return Err(Diagnostic::error(
+            codes::E1203,
+            "pivot_longer requires at least one source column",
+            span,
+        ));
+    }
+    let mut selected_indices = Vec::new();
+    for column in columns {
+        let index = table.column_index(column).ok_or_else(|| {
+            Diagnostic::error(codes::E1005, format!("unknown column `{column}`"), span)
+        })?;
+        selected_indices.push((column.clone(), index));
+    }
+    let selected_names: BTreeSet<&String> = columns.iter().collect();
+    let copied = table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| !selected_names.contains(*column))
+        .map(|(index, column)| (index, column.clone()))
+        .collect::<Vec<_>>();
+    if copied.iter().any(|(_, column)| column == names_to) {
+        return Err(Diagnostic::error(
+            codes::E1207,
+            format!("pivot_longer names_to `{names_to}` already exists"),
+            span,
+        ));
+    }
+    if copied.iter().any(|(_, column)| column == values_to) {
+        return Err(Diagnostic::error(
+            codes::E1207,
+            format!("pivot_longer values_to `{values_to}` already exists"),
+            span,
+        ));
+    }
+    if names_to == values_to {
+        return Err(Diagnostic::error(
+            codes::E1207,
+            "pivot_longer names_to and values_to must be different columns",
+            span,
+        ));
+    }
+
+    let mut output_columns = copied
+        .iter()
+        .map(|(_, column)| column.clone())
+        .collect::<Vec<_>>();
+    output_columns.push(names_to.to_string());
+    output_columns.push(values_to.to_string());
+
+    let mut rows = Vec::new();
+    for row in &table.rows {
+        for (column, source_index) in &selected_indices {
+            let mut values = copied
+                .iter()
+                .map(|(index, _)| row.values.get(*index).cloned().unwrap_or(Value::Null))
+                .collect::<Vec<_>>();
+            values.push(Value::String(column.clone()));
+            values.push(
+                row.values
+                    .get(*source_index)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+            rows.push(Row { values });
+        }
+    }
+
+    Ok(Table {
+        columns: output_columns,
+        rows,
+    })
+}
+
+fn complete(
+    table: Table,
+    keys: &[String],
+    fills: &[CompleteFillItemIr],
+    span: Span,
+) -> Result<Table, Diagnostic> {
+    if keys.is_empty() {
+        return Err(Diagnostic::error(
+            codes::E1203,
+            "complete requires at least one key column",
+            span,
+        ));
+    }
+    let key_indices = keys
+        .iter()
+        .map(|key| {
+            table.column_index(key).ok_or_else(|| {
+                Diagnostic::error(codes::E1005, format!("unknown column `{key}`"), span)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let fill_indices = fills
+        .iter()
+        .map(|fill| {
+            table.column_index(&fill.column).ok_or_else(|| {
+                Diagnostic::error(
+                    codes::E1005,
+                    format!("unknown column `{}`", fill.column),
+                    fill.span,
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut observed_by_key = vec![Vec::<Value>::new(); keys.len()];
+    let mut observed_seen = vec![BTreeSet::<String>::new(); keys.len()];
+    let mut existing = BTreeMap::<Vec<String>, Row>::new();
+    for row in &table.rows {
+        let mut tuple_key = Vec::new();
+        for (position, index) in key_indices.iter().enumerate() {
+            let value = row.values.get(*index).cloned().unwrap_or(Value::Null);
+            let key = value.to_csv_cell();
+            if observed_seen[position].insert(key.clone()) {
+                observed_by_key[position].push(value.clone());
+            }
+            tuple_key.push(key);
+        }
+        if existing.insert(tuple_key.clone(), row.clone()).is_some() {
+            return Err(Diagnostic::error(
+                codes::E1208,
+                "complete found duplicate input rows for the same key tuple",
+                span,
+            ));
+        }
+    }
+
+    let mut rows = Vec::new();
+    let mut tuple_values = Vec::new();
+    let context = CompleteContext {
+        table: &table,
+        observed_by_key: &observed_by_key,
+        key_indices: &key_indices,
+        fills,
+        fill_indices: &fill_indices,
+        existing: &existing,
+    };
+    complete_rows(&context, &mut tuple_values, &mut rows)?;
+
+    Ok(Table {
+        columns: table.columns,
+        rows,
+    })
+}
+
+struct CompleteContext<'a> {
+    table: &'a Table,
+    observed_by_key: &'a [Vec<Value>],
+    key_indices: &'a [usize],
+    fills: &'a [CompleteFillItemIr],
+    fill_indices: &'a [usize],
+    existing: &'a BTreeMap<Vec<String>, Row>,
+}
+
+fn complete_rows(
+    context: &CompleteContext<'_>,
+    tuple_values: &mut Vec<Value>,
+    rows: &mut Vec<Row>,
+) -> Result<(), Diagnostic> {
+    if tuple_values.len() == context.observed_by_key.len() {
+        let tuple_key = tuple_values
+            .iter()
+            .map(Value::to_csv_cell)
+            .collect::<Vec<_>>();
+        if let Some(row) = context.existing.get(&tuple_key) {
+            rows.push(row.clone());
+            return Ok(());
+        }
+
+        let mut values = vec![Value::Null; context.table.columns.len()];
+        for (key_position, column_index) in context.key_indices.iter().enumerate() {
+            values[*column_index] = tuple_values[key_position].clone();
+        }
+        let base_row = Row {
+            values: values.clone(),
+        };
+        for (fill, column_index) in context.fills.iter().zip(context.fill_indices) {
+            values[*column_index] = eval_row_expr(
+                &fill.expr,
+                context.table,
+                &base_row,
+                ExprRole::Default,
+                None,
+            )?;
+        }
+        rows.push(Row { values });
+        return Ok(());
+    }
+
+    let position = tuple_values.len();
+    for value in &context.observed_by_key[position] {
+        tuple_values.push(value.clone());
+        complete_rows(context, tuple_values, rows)?;
+        tuple_values.pop();
+    }
+    Ok(())
+}
+
 fn resolve_input_format(
     input: &PlanInputSource,
     explicit_format: Option<&str>,
@@ -613,7 +875,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.21.0"),
+                format!("format `{format}` is not supported in 0.23.0"),
                 span,
             )
         });
@@ -623,7 +885,7 @@ fn resolve_input_format(
             return DataFormat::from_name(format).ok_or_else(|| {
                 Diagnostic::error(
                     codes::E1215,
-                    format!("stdin format `{format}` is not supported in 0.21.0"),
+                    format!("stdin format `{format}` is not supported in 0.23.0"),
                     input.span,
                 )
             });
@@ -647,7 +909,7 @@ fn resolve_output_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1705,
-                format!("output format `{format}` is not supported in 0.21.0"),
+                format!("output format `{format}` is not supported in 0.23.0"),
                 span,
             )
         });
@@ -1093,22 +1355,24 @@ fn eval_call(
                 )),
             },
         ),
-        "round" => eval_single_arg(
-            args,
-            table,
-            row,
-            span,
-            window_row_index,
-            |value| match value {
-                Value::Null => Ok(Value::Null),
-                Value::Number(value) => Ok(Value::Number(value.round())),
-                _ => Err(Diagnostic::error(
-                    codes::E1302,
-                    "round() requires a number",
-                    span,
-                )),
-            },
-        ),
+        "round" => match args {
+            [value_expr] => {
+                let value =
+                    eval_row_expr(value_expr, table, row, ExprRole::Default, window_row_index)?;
+                round_value(value, 0, span)
+            }
+            [value_expr, digits_expr] => {
+                let digits = round_digits(digits_expr, span)?;
+                let value =
+                    eval_row_expr(value_expr, table, row, ExprRole::Default, window_row_index)?;
+                round_value(value, digits, span)
+            }
+            _ => Err(Diagnostic::error(
+                codes::E1402,
+                "round() expects one or two arguments",
+                span,
+            )),
+        },
         "if_else" => match args {
             [condition, when_true, when_false] => {
                 let condition =
@@ -1137,6 +1401,41 @@ fn eval_call(
         _ => Err(Diagnostic::error(
             codes::E1401,
             format!("unknown function `{name}`"),
+            span,
+        )),
+    }
+}
+
+fn round_digits(expr: &ExprIr, span: Span) -> Result<i32, Diagnostic> {
+    let ExprIr::Number { value, .. } = expr else {
+        return Err(Diagnostic::error(
+            codes::E1206,
+            "round() digits must be an integer literal from 0 through 12",
+            span,
+        ));
+    };
+    if value.fract() != 0.0 || !(0.0..=12.0).contains(value) {
+        return Err(Diagnostic::error(
+            codes::E1206,
+            "round() digits must be an integer literal from 0 through 12",
+            span,
+        ));
+    }
+    Ok(*value as i32)
+}
+
+fn round_value(value: Value, digits: i32, span: Span) -> Result<Value, Diagnostic> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Number(value) => {
+            let scale = 10_f64.powi(digits);
+            let rounded = (value * scale).round() / scale;
+            let normalized = if rounded == 0.0 { 0.0 } else { rounded };
+            Ok(Value::Number(normalized))
+        }
+        _ => Err(Diagnostic::error(
+            codes::E1302,
+            "round() requires a number",
             span,
         )),
     }
@@ -1753,6 +2052,15 @@ fn eval_aggregate(item: &AggItemIr, table: &Table, rows: &[&Row]) -> Result<Valu
                 .max_by(|left, right| compare_values(left, right).unwrap_or(Ordering::Equal))
                 .unwrap_or(Value::Null)
         }),
+        "count_distinct" => {
+            let values = aggregate_arg_values(&item.args[0], table, rows)?;
+            let distinct = values
+                .into_iter()
+                .filter(|value| !matches!(value, Value::Null))
+                .map(|value| value.to_csv_cell())
+                .collect::<BTreeSet<_>>();
+            Ok(Value::Number(distinct.len() as f64))
+        }
         function => Err(Diagnostic::error(
             codes::E1401,
             format!("unknown aggregate function `{function}`"),
@@ -2026,6 +2334,370 @@ mod tests {
             String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
             "order_id,region_channel,net_amount,priority\nA1,NORTH:web,100,standard\nA3,WEST:web,150,high\n"
         );
+    }
+
+    #[test]
+    fn executes_decimal_rounding_and_count_distinct() {
+        let io = InMemoryDriverIo::default().with_file_bytes(
+            "memory/events.csv",
+            "group,user,amount\nA,u1,1.234\nA,u1,2.345\nA,u2,-0.004\nA,,4.0\nB,u3,10.005\n",
+        );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "events.csv"
+  | group_by "group"
+  | agg count_distinct("user") as "users", sum("amount") as "total"
+  | mutate "rounded" = round("total", 2), "nearest" = round("total")
+  | sort "group""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "group,users,total,rounded,nearest\nA,2,7.575,7.58,8\nB,1,10.005,10.01,10\n"
+        );
+    }
+
+    #[test]
+    fn round_propagates_null_and_normalizes_negative_zero() {
+        let io = InMemoryDriverIo::default()
+            .with_file_bytes("memory/values.csv", "id,value\nnegative,-0.004\nempty,\n");
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "values.csv"
+  | mutate "rounded" = round("value", 2)
+  | sort "id""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "id,value,rounded\nempty,,\nnegative,-0.004,0\n"
+        );
+    }
+
+    #[test]
+    fn invalid_round_digits_are_semantic_diagnostics() {
+        let io = InMemoryDriverIo::default().with_file_bytes("memory/values.csv", "value\n1.234\n");
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "values.csv"
+  | mutate "rounded" = round("value", 13)"#,
+            &io,
+        );
+        let diagnostics = prepared.diagnostics();
+
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E1206"
+                    && diagnostic.message.contains("round() digits")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn executes_pivot_longer_with_stable_order() {
+        let io = InMemoryDriverIo::default().with_file_bytes(
+            "memory/wide.csv",
+            "rider_type,Share of rides,Share of revenue\nmember,65.96,39.01\nvisitor,34.04,60.99\n",
+        );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "wide.csv"
+  | pivot_longer "Share of rides", "Share of revenue" names_to "metric" values_to "share""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "rider_type,metric,share\nmember,Share of rides,65.96\nmember,Share of revenue,39.01\nvisitor,Share of rides,34.04\nvisitor,Share of revenue,60.99\n"
+        );
+    }
+
+    #[test]
+    fn executes_complete_with_deterministic_fill_rows() {
+        let io = InMemoryDriverIo::default().with_file_bytes(
+            "memory/daily.csv",
+            "trip_date,rider_type,trips,revenue\n2026-04-01,member,3,13.85\n2026-04-01,visitor,2,33.13\n2026-04-03,member,2,8.35\n",
+        );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "daily.csv"
+  | complete "trip_date", "rider_type" fill "trips" = 0, "revenue" = 0"#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "trip_date,rider_type,trips,revenue\n2026-04-01,member,3,13.85\n2026-04-01,visitor,2,33.13\n2026-04-03,member,2,8.35\n2026-04-03,visitor,0,0\n"
+        );
+    }
+
+    #[test]
+    fn complete_rejects_duplicate_key_tuples() {
+        let io = InMemoryDriverIo::default().with_file_bytes(
+            "memory/daily.csv",
+            "trip_date,rider_type,trips\n2026-04-01,member,3\n2026-04-01,member,4\n",
+        );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "daily.csv"
+  | complete "trip_date", "rider_type" fill "trips" = 0"#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.stdout.is_none());
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E1208"));
+    }
+
+    #[test]
+    fn executes_named_outputs_in_source_order() {
+        let io = InMemoryDriverIo::default()
+            .with_file_bytes("memory/sales.csv", "region,amount\nWest,30\nEast,10\n");
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"let sales =
+  load "sales.csv"
+
+output west =
+  sales
+  | filter "region" == "West"
+  | save "west.csv"
+
+output totals =
+  sales
+  | agg sum("amount") as "total"
+  | save "totals.csv""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: None,
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            result
+                .named_outputs
+                .iter()
+                .map(|output| output.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["west", "totals"]
+        );
+        assert_eq!(
+            result.named_outputs[0].table.columns,
+            vec!["region", "amount"]
+        );
+        assert_eq!(result.named_outputs[0].table.rows.len(), 1);
+        assert_eq!(result.named_outputs[1].table.columns, vec!["total"]);
+    }
+
+    #[test]
+    fn multiple_named_outputs_reject_stdout_format() {
+        let io = InMemoryDriverIo::default()
+            .with_file_bytes("memory/sales.csv", "region,amount\nWest,30\n");
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"output one =
+  load "sales.csv"
+
+output two =
+  load "sales.csv""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.stdout.is_none());
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E1607"));
+    }
+
+    #[test]
+    fn prepares_bikeshare_story_named_outputs() {
+        let io = InMemoryDriverIo::default().with_file_bytes(
+            "memory/trips.csv",
+            "trip_id,trip_date,rider_type,weather,dock_id,bike_id,fare,tip,trip_status\nT1,2026-04-01,member,clear,D1,B1,10.005,0.5,valid\nT2,2026-04-01,visitor,clear,D2,B2,20.125,1.0,valid\nT3,2026-04-02,visitor,rain,D2,B2,8.1,0,invalid\nT4,2026-04-03,member,rain,D1,B1,5.333,0.25,valid\n",
+        );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"let cleaned =
+  load "trips.csv"
+  | filter "trip_status" == "valid"
+  | mutate "revenue" = round("fare" + "tip", 2)
+
+output daily_rider_trips =
+  cleaned
+  | group_by "trip_date", "rider_type"
+  | agg count() as "trips", sum("revenue") as "revenue"
+  | complete "trip_date", "rider_type" fill "trips" = 0, "revenue" = 0
+  | sort "trip_date", "rider_type"
+  | save "daily_rider_trips.csv"
+
+output valid_trips =
+  cleaned
+  | select "trip_id", "trip_date", "rider_type", "weather", "dock_id", "revenue"
+  | sort "trip_id"
+  | save "valid_trips.csv"
+
+output revenue_inversion =
+  cleaned
+  | group_by "rider_type"
+  | agg count() as "trips", sum("revenue") as "revenue"
+  | mutate "Share of rides" = round("trips", 2), "Share of revenue" = round("revenue", 2)
+  | select "rider_type", "Share of rides", "Share of revenue"
+  | pivot_longer "Share of rides", "Share of revenue" names_to "metric" values_to "value"
+  | save "revenue_inversion.csv"
+
+output weather_split =
+  cleaned
+  | group_by "weather", "rider_type"
+  | agg count() as "trips"
+  | sort "weather", "rider_type"
+  | save "weather_split.csv"
+
+output dock_priority =
+  cleaned
+  | group_by "dock_id"
+  | agg count() as "trips", count_distinct("bike_id") as "bikes", sum("revenue") as "revenue"
+  | mutate "revenue" = round("revenue", 2)
+  | sort "dock_id"
+  | save "dock_priority.csv""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: None,
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            result
+                .named_outputs
+                .iter()
+                .map(|output| output.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "daily_rider_trips",
+                "valid_trips",
+                "revenue_inversion",
+                "weather_split",
+                "dock_priority"
+            ]
+        );
+        assert_eq!(
+            named_output_csv(&result, "daily_rider_trips"),
+            "trip_date,rider_type,trips,revenue\n2026-04-01,member,1,10.51\n2026-04-01,visitor,1,21.13\n2026-04-03,member,1,5.58\n2026-04-03,visitor,0,0\n"
+        );
+        assert_eq!(
+            named_output_csv(&result, "valid_trips"),
+            "trip_id,trip_date,rider_type,weather,dock_id,revenue\nT1,2026-04-01,member,clear,D1,10.51\nT2,2026-04-01,visitor,clear,D2,21.13\nT4,2026-04-03,member,rain,D1,5.58\n"
+        );
+        assert_eq!(
+            named_output_csv(&result, "revenue_inversion"),
+            "rider_type,metric,value\nmember,Share of rides,2\nmember,Share of revenue,16.09\nvisitor,Share of rides,1\nvisitor,Share of revenue,21.13\n"
+        );
+        assert_eq!(
+            named_output_csv(&result, "weather_split"),
+            "weather,rider_type,trips\nclear,member,1\nclear,visitor,1\nrain,member,1\n"
+        );
+        assert_eq!(
+            named_output_csv(&result, "dock_priority"),
+            "dock_id,trips,bikes,revenue\nD1,2,1,16.09\nD2,1,1,21.13\n"
+        );
+    }
+
+    fn named_output_csv(result: &RunResult, name: &str) -> String {
+        let table = &result
+            .named_outputs
+            .iter()
+            .find(|output| output.name == name)
+            .unwrap_or_else(|| panic!("missing named output `{name}`"))
+            .table;
+        String::from_utf8(
+            pdl_data::write_table_to_bytes(DataFormat::Csv, table).expect("csv output"),
+        )
+        .expect("utf8 csv")
     }
 
     #[test]

@@ -42,6 +42,12 @@ impl DriverPlan {
                 &binding.pipeline,
             );
         }
+        for output in &program.outputs {
+            builder.record_pipeline(
+                PipelineLabel::Output(output.name.value.clone()),
+                &output.pipeline,
+            );
+        }
         if let Some(main) = &program.main {
             builder.record_pipeline(PipelineLabel::Main, main);
         }
@@ -105,6 +111,7 @@ pub struct SourceDependency {
 pub enum PipelineLabel {
     Main,
     Binding(String),
+    Output(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

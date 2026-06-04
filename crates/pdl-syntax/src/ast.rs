@@ -1,8 +1,8 @@
 pub use crate::parser::{
-    AggItem, BinaryOp, Binding, Expr, FrameBound, JoinKind, JoinOn, LoadStage, MutateItem,
-    NullsOrder, Pipeline, PipelineStart, Program, RenameItem, SaveStage, SelectItem, SinkRef,
-    SortDirection, SortItem, SourceRef, Spanned, Stage, UnaryOp, UnionOption, UnionOptionKind,
-    WindowFrame, WindowSpec,
+    AggItem, BinaryOp, Binding, CompleteFillItem, Expr, FrameBound, JoinKind, JoinOn, LoadStage,
+    MutateItem, NullsOrder, OutputDecl, Pipeline, PipelineStart, Program, RenameItem, SaveStage,
+    SelectItem, SinkRef, SortDirection, SortItem, SourceRef, Spanned, Stage, UnaryOp, UnionOption,
+    UnionOptionKind, WindowFrame, WindowSpec,
 };
 
 use pdl_core::Span;
@@ -86,6 +86,10 @@ impl Root {
         child_nodes(&self.syntax, BindingDecl::cast)
     }
 
+    pub fn output_decls(&self) -> Vec<OutputDeclNode> {
+        child_nodes(&self.syntax, OutputDeclNode::cast)
+    }
+
     pub fn main_pipeline(&self) -> Option<PipelineExpr> {
         self.syntax.children().filter_map(PipelineExpr::cast).last()
     }
@@ -123,6 +127,33 @@ impl BindingDecl {
             .filter_map(|element| element.into_token())
             .filter(|token| token.kind() == SyntaxKind::Ident)
             .find(|token| token.text() != "let")
+    }
+}
+
+ast_node!(
+    /// A top-level `output name = pipeline` declaration.
+    OutputDeclNode = OutputDecl
+);
+
+impl OutputDeclNode {
+    pub fn name(&self) -> Option<String> {
+        self.name_token().map(|token| token.text().to_string())
+    }
+
+    pub fn name_span(&self) -> Option<Span> {
+        self.name_token().map(token_span)
+    }
+
+    pub fn pipeline(&self) -> Option<PipelineExpr> {
+        self.syntax.children().find_map(PipelineExpr::cast)
+    }
+
+    fn name_token(&self) -> Option<SyntaxToken> {
+        self.syntax
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| token.kind() == SyntaxKind::Ident)
+            .find(|token| token.text() != "output")
     }
 }
 

@@ -319,6 +319,16 @@ pub fn document_symbols(source: &str) -> Vec<EditorDocumentSymbol> {
             children: pipeline_stage_symbols(source, &binding.pipeline),
         });
     }
+    for output in &parse.program.outputs {
+        symbols.push(EditorDocumentSymbol {
+            name: output.name.value.clone(),
+            detail: "output".to_string(),
+            kind: DocumentSymbolKind::Function,
+            range: range_for_span(source, output.name.span.join(output.pipeline.span)),
+            selection_range: range_for_span(source, output.name.span),
+            children: pipeline_stage_symbols(source, &output.pipeline),
+        });
+    }
     if let Some(main) = &parse.program.main {
         symbols.push(EditorDocumentSymbol {
             name: "main".to_string(),
@@ -493,9 +503,10 @@ impl CompletionContext {
             && !inside_string
             && after_keyword.is_some_and(|suffix| !suffix.contains('(') || suffix.ends_with(','));
         let in_mutate_context = stage.as_deref() == Some("mutate");
-        let in_scalar_function_context = matches!(stage.as_deref(), Some("filter" | "mutate"))
-            && !inside_string
-            && word.chars().all(is_ident_char);
+        let in_scalar_function_context =
+            matches!(stage.as_deref(), Some("filter" | "mutate" | "complete"))
+                && !inside_string
+                && word.chars().all(is_ident_char);
         let in_sort_direction_context = stage.as_deref() == Some("sort")
             && !inside_string
             && line_prefix.contains('"')
@@ -513,6 +524,8 @@ impl CompletionContext {
                     | "sort"
                     | "join"
                     | "distinct"
+                    | "pivot_longer"
+                    | "complete"
             )
         );
 
@@ -537,6 +550,9 @@ fn optimistic_columns(program: &Program) -> Vec<String> {
     let mut columns = BTreeSet::new();
     for binding in &program.bindings {
         collect_pipeline_columns(&binding.pipeline, &mut columns);
+    }
+    for output in &program.outputs {
+        collect_pipeline_columns(&output.pipeline, &mut columns);
     }
     if let Some(main) = &program.main {
         collect_pipeline_columns(main, &mut columns);
@@ -599,6 +615,27 @@ fn collect_pipeline_columns(pipeline: &Pipeline, columns: &mut BTreeSet<String>)
             Stage::Distinct { columns: keys, .. } => {
                 for column in keys {
                     columns.insert(column.value.clone());
+                }
+            }
+            Stage::PivotLonger {
+                columns: keys,
+                names_to,
+                values_to,
+                ..
+            } => {
+                for column in keys {
+                    columns.insert(column.value.clone());
+                }
+                columns.insert(names_to.value.clone());
+                columns.insert(values_to.value.clone());
+            }
+            Stage::Complete { keys, fills, .. } => {
+                for key in keys {
+                    columns.insert(key.value.clone());
+                }
+                for fill in fills {
+                    columns.insert(fill.column.value.clone());
+                    collect_expr_columns(&fill.expr, columns);
                 }
             }
             Stage::Limit { .. } | Stage::Save(_) | Stage::Unsupported { .. } => {}
@@ -677,6 +714,11 @@ impl DocumentFacts {
         for binding in &program.bindings {
             if contains(binding.pipeline.span, offset) {
                 return self.pipeline_schema_before_offset(&binding.pipeline, offset);
+            }
+        }
+        for output in &program.outputs {
+            if contains(output.pipeline.span, offset) {
+                return self.pipeline_schema_before_offset(&output.pipeline, offset);
             }
         }
         if let Some(main) = &program.main {
@@ -787,6 +829,26 @@ fn apply_stage_to_schema(facts: &DocumentFacts, schema: &mut SchemaState, stage:
         Stage::Union { .. } => {
             schema.grouping = None;
         }
+        Stage::PivotLonger {
+            columns,
+            names_to,
+            values_to,
+            ..
+        } => {
+            let selected = columns
+                .iter()
+                .map(|column| column.value.clone())
+                .collect::<BTreeSet<_>>();
+            schema
+                .columns
+                .retain(|column| !selected.iter().any(|selected| selected == column));
+            schema.columns.push(names_to.value.clone());
+            schema.columns.push(values_to.value.clone());
+            schema.grouping = None;
+        }
+        Stage::Complete { .. } => {
+            schema.grouping = None;
+        }
         Stage::Unsupported { .. } => {}
     }
 }
@@ -867,6 +929,11 @@ fn binding_name_at_offset(program: &Program, offset: usize) -> Option<String> {
             return Some(name);
         }
     }
+    for output in &program.outputs {
+        if let Some(name) = pipeline_start_binding_at_offset(&output.pipeline, offset) {
+            return Some(name);
+        }
+    }
     program
         .main
         .as_ref()
@@ -925,6 +992,27 @@ fn binding_spans(program: &Program, name: &str) -> Vec<Span> {
             }
             _ => None,
         }));
+    }
+    for output in &program.outputs {
+        if let PipelineStart::Binding(start) = &output.pipeline.start {
+            if start.value == name {
+                spans.push(start.span);
+            }
+        }
+        spans.extend(
+            output
+                .pipeline
+                .stages
+                .iter()
+                .filter_map(|stage| match stage {
+                    Stage::Join { source, .. } | Stage::Union { source, .. }
+                        if source.value == name =>
+                    {
+                        Some(source.span)
+                    }
+                    _ => None,
+                }),
+        );
     }
     spans
 }
@@ -1108,6 +1196,12 @@ fn stage_name_for_offset(program: &Program, offset: usize) -> Option<String> {
         .find_map(|binding| stage_name_for_pipeline_offset(&binding.pipeline, offset))
         .or_else(|| {
             program
+                .outputs
+                .iter()
+                .find_map(|output| stage_name_for_pipeline_offset(&output.pipeline, offset))
+        })
+        .or_else(|| {
+            program
                 .main
                 .as_ref()
                 .and_then(|pipeline| stage_name_for_pipeline_offset(pipeline, offset))
@@ -1150,6 +1244,8 @@ pub(crate) fn stage_name(stage: &Stage) -> &'static str {
         Stage::Join { .. } => "join",
         Stage::Union { .. } => "union",
         Stage::Distinct { .. } => "distinct",
+        Stage::PivotLonger { .. } => "pivot_longer",
+        Stage::Complete { .. } => "complete",
         Stage::Save(_) => "save",
         Stage::Unsupported { name, .. } => match name.value.as_str() {
             "join" => "join",

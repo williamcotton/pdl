@@ -1,17 +1,25 @@
 use pdl_core::Span;
 use pdl_syntax::{
-    AggItem, BinaryOp, Expr, FrameBound, Pipeline, PipelineStart, Program, SinkRef, SortItem,
-    SourceRef, Stage, UnaryOp, UnionOptionKind, WindowSpec,
+    AggItem, BinaryOp, CompleteFillItem, Expr, FrameBound, Pipeline, PipelineStart, Program,
+    SinkRef, SortItem, SourceRef, Stage, UnaryOp, UnionOptionKind, WindowSpec,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProgramIr {
     pub bindings: Vec<BindingIr>,
+    pub outputs: Vec<OutputIr>,
     pub main: Option<PipelineIr>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BindingIr {
+    pub name: String,
+    pub span: Span,
+    pub pipeline: PipelineIr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputIr {
     pub name: String,
     pub span: Span,
     pub pipeline: PipelineIr,
@@ -106,6 +114,17 @@ pub enum StageIr {
         columns: Vec<String>,
         span: Span,
     },
+    PivotLonger {
+        columns: Vec<String>,
+        names_to: String,
+        values_to: String,
+        span: Span,
+    },
+    Complete {
+        keys: Vec<String>,
+        fills: Vec<CompleteFillItemIr>,
+        span: Span,
+    },
     Save {
         sink: SinkIr,
         format: Option<String>,
@@ -133,6 +152,13 @@ pub struct RenameItemIr {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MutateItemIr {
+    pub column: String,
+    pub expr: ExprIr,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompleteFillItemIr {
     pub column: String,
     pub expr: ExprIr,
     pub span: Span,
@@ -295,6 +321,15 @@ pub fn lower_program(program: &Program) -> ProgramIr {
                 pipeline: lower_pipeline(&binding.pipeline),
             })
             .collect(),
+        outputs: program
+            .outputs
+            .iter()
+            .map(|output| OutputIr {
+                name: output.name.value.clone(),
+                span: output.name.span,
+                pipeline: lower_pipeline(&output.pipeline),
+            })
+            .collect(),
         main: program.main.as_ref().map(lower_pipeline),
     }
 }
@@ -425,6 +460,22 @@ fn lower_stage(stage: &Stage) -> StageIr {
             columns: columns.iter().map(|column| column.value.clone()).collect(),
             span: *span,
         },
+        Stage::PivotLonger {
+            columns,
+            names_to,
+            values_to,
+            span,
+        } => StageIr::PivotLonger {
+            columns: columns.iter().map(|column| column.value.clone()).collect(),
+            names_to: names_to.value.clone(),
+            values_to: values_to.value.clone(),
+            span: *span,
+        },
+        Stage::Complete { keys, fills, span } => StageIr::Complete {
+            keys: keys.iter().map(|key| key.value.clone()).collect(),
+            fills: fills.iter().map(lower_complete_fill_item).collect(),
+            span: *span,
+        },
         Stage::Save(save) => StageIr::Save {
             sink: match &save.sink {
                 SinkRef::Path(path) => SinkIr::Path(path.value.clone()),
@@ -437,6 +488,14 @@ fn lower_stage(stage: &Stage) -> StageIr {
             name: name.value.clone(),
             span: *span,
         },
+    }
+}
+
+fn lower_complete_fill_item(item: &CompleteFillItem) -> CompleteFillItemIr {
+    CompleteFillItemIr {
+        column: item.column.value.clone(),
+        expr: lower_expr(&item.expr),
+        span: item.span,
     }
 }
 

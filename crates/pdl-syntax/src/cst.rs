@@ -5,8 +5,8 @@ use rowan::{
 
 use crate::lexer::{Token, TokenKind};
 use crate::parser::{
-    AggItem, Binding, Expr, PdlLanguage, Pipeline, PipelineStart, Program, SinkRef, SourceRef,
-    Stage, SyntaxKind,
+    AggItem, Binding, Expr, OutputDecl, PdlLanguage, Pipeline, PipelineStart, Program, SinkRef,
+    SourceRef, Stage, SyntaxKind,
 };
 
 pub type SyntaxToken = RowanSyntaxToken<PdlLanguage>;
@@ -20,6 +20,9 @@ pub(crate) fn build_cst(tokens: &[Token], program: &Program, source_len: usize) 
     builder.start_node(SyntaxKind::Root);
     for binding in &program.bindings {
         builder.binding(binding);
+    }
+    for output in &program.outputs {
+        builder.output_decl(output);
     }
     if let Some(main) = &program.main {
         builder.pipeline(main);
@@ -87,6 +90,17 @@ impl CstBuilder<'_> {
         });
     }
 
+    fn output_decl(&mut self, output: &OutputDecl) {
+        let span = Span::new(
+            self.find_keyword_before("output", output.name.span)
+                .map_or(output.name.span.start, |span| span.start),
+            output.pipeline.span.end,
+        );
+        self.node(SyntaxKind::OutputDecl, span, |builder| {
+            builder.pipeline(&output.pipeline);
+        });
+    }
+
     fn pipeline(&mut self, pipeline: &Pipeline) {
         self.node(SyntaxKind::PipelineExpr, pipeline.span, |builder| {
             match &pipeline.start {
@@ -151,6 +165,8 @@ impl CstBuilder<'_> {
                 | Stage::Join { .. }
                 | Stage::Union { .. }
                 | Stage::Distinct { .. }
+                | Stage::PivotLonger { .. }
+                | Stage::Complete { .. }
                 | Stage::GroupBy { .. }
                 | Stage::Limit { .. }
                 | Stage::Save(_)

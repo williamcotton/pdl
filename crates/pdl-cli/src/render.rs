@@ -5,13 +5,14 @@ use pdl_driver::{
 };
 use pdl_exec::{ExecutionPlan, ExecutionPlanStep};
 use pdl_semantics::{
-    BinaryOpIr, ExprIr, FrameBoundIr, JoinKindIr, PipelineSchemaLabel, PipelineStartIr, ProgramIr,
-    SinkIr, SortDirectionIr, StageIr, UnaryOpIr, WindowFrameIr, WindowSpecIr,
+    BinaryOpIr, CompleteFillItemIr, ExprIr, FrameBoundIr, JoinKindIr, PipelineSchemaLabel,
+    PipelineStartIr, ProgramIr, SinkIr, SortDirectionIr, StageIr, UnaryOpIr, WindowFrameIr,
+    WindowSpecIr,
 };
 use pdl_syntax::{
-    AggItem, BinaryOp, Binding, Expr, FrameBound, JoinOn, MutateItem, Pipeline, PipelineStart,
-    Program, SaveStage, SinkRef, SortDirection, SourceRef, Spanned, Stage, UnaryOp,
-    UnionOptionKind, WindowFrame, WindowSpec,
+    AggItem, BinaryOp, Binding, CompleteFillItem, Expr, FrameBound, JoinOn, MutateItem, OutputDecl,
+    Pipeline, PipelineStart, Program, SaveStage, SinkRef, SortDirection, SourceRef, Spanned, Stage,
+    UnaryOp, UnionOptionKind, WindowFrame, WindowSpec,
 };
 use serde::Serialize;
 
@@ -21,7 +22,12 @@ pub fn final_schema_columns(prepared: &PreparedProgram) -> Option<Vec<String>> {
         .outputs
         .iter()
         .rev()
-        .find(|output| matches!(output.label, PipelineSchemaLabel::Main))
+        .find(|output| {
+            matches!(
+                output.label,
+                PipelineSchemaLabel::Main | PipelineSchemaLabel::Output(_)
+            )
+        })
         .map(|output| output.columns.clone())
 }
 
@@ -104,6 +110,7 @@ pub fn plan_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> PlanOutput
         source_path: prepared.path.display().to_string(),
         driver: driver_plan_json(&prepared.driver_plan),
         execution: execution_plan_json(plan),
+        output_schemas: output_schema_json(prepared),
         final_schema: final_schema_columns(prepared).map(SchemaJson::from_columns),
         diagnostics: prepared.diagnostics(),
     }
@@ -112,12 +119,13 @@ pub fn plan_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> PlanOutput
 pub fn manifest_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> ManifestJson {
     let stdout_format = plan.stdout_format.map(|format| format.canonical_name());
     ManifestJson {
-        manifest_version: "0.21.0",
+        manifest_version: "0.23.0",
         implementation_version: env!("CARGO_PKG_VERSION"),
-        language_version: "0.21.0",
+        language_version: "0.23.0",
         source_path: prepared.path.display().to_string(),
         driver: driver_plan_json(&prepared.driver_plan),
         execution: execution_plan_json(plan),
+        output_schemas: output_schema_json(prepared),
         final_schema: final_schema_columns(prepared).map(SchemaJson::from_columns),
         diagnostics: prepared.diagnostics(),
         stream_interop: (stdout_format == Some("arrow-stream")).then_some(StreamInteropJson {
@@ -162,6 +170,7 @@ pub struct PlanOutputJson {
     source_path: String,
     driver: DriverPlanJson,
     execution: ExecutionPlanJson,
+    output_schemas: Vec<NamedSchemaJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     final_schema: Option<SchemaJson>,
     diagnostics: Vec<Diagnostic>,
@@ -175,6 +184,7 @@ pub struct ManifestJson {
     source_path: String,
     driver: DriverPlanJson,
     execution: ExecutionPlanJson,
+    output_schemas: Vec<NamedSchemaJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     final_schema: Option<SchemaJson>,
     diagnostics: Vec<Diagnostic>,
@@ -201,6 +211,13 @@ struct SchemaJson {
     columns: Vec<ColumnJson>,
 }
 
+#[derive(Serialize)]
+struct NamedSchemaJson {
+    name: String,
+    schema: SchemaJson,
+    span: Span,
+}
+
 impl SchemaJson {
     fn from_columns(columns: Vec<String>) -> Self {
         Self {
@@ -214,6 +231,22 @@ impl SchemaJson {
                 .collect(),
         }
     }
+}
+
+fn output_schema_json(prepared: &PreparedProgram) -> Vec<NamedSchemaJson> {
+    prepared
+        .analysis
+        .outputs
+        .iter()
+        .filter_map(|output| match &output.label {
+            PipelineSchemaLabel::Output(name) => Some(NamedSchemaJson {
+                name: name.clone(),
+                schema: SchemaJson::from_columns(output.columns.clone()),
+                span: output.span,
+            }),
+            PipelineSchemaLabel::Main | PipelineSchemaLabel::Binding(_) => None,
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -308,6 +341,7 @@ struct ExecutionPlanJson {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ExecutionStepJson {
+    Output { name: String },
     Load { source: String, format: String },
     Binding { name: String },
     Transform { stage: String },
@@ -385,6 +419,7 @@ fn execution_plan_json(plan: &ExecutionPlan) -> ExecutionPlanJson {
 
 fn execution_step_json(step: &ExecutionPlanStep) -> ExecutionStepJson {
     match step {
+        ExecutionPlanStep::Output { name } => ExecutionStepJson::Output { name: name.clone() },
         ExecutionPlanStep::Load { source, format } => ExecutionStepJson::Load {
             source: source.clone(),
             format: format.clone(),
@@ -423,6 +458,7 @@ fn pipeline_label_text(label: &PipelineLabel) -> String {
     match label {
         PipelineLabel::Main => "main".to_string(),
         PipelineLabel::Binding(name) => format!("binding:{name}"),
+        PipelineLabel::Output(name) => format!("output:{name}"),
     }
 }
 
@@ -464,6 +500,7 @@ fn stream_direction_text(direction: StreamDirection) -> &'static str {
 
 fn execution_step_text(step: &ExecutionPlanStep) -> String {
     match step {
+        ExecutionPlanStep::Output { name } => format!("output {name}"),
         ExecutionPlanStep::Load { source, format } => format!("load {source} format {format}"),
         ExecutionPlanStep::Binding { name } => format!("binding {name}"),
         ExecutionPlanStep::Transform { stage } => stage.clone(),
@@ -475,12 +512,19 @@ fn execution_step_text(step: &ExecutionPlanStep) -> String {
 #[derive(Serialize)]
 struct ProgramJson {
     bindings: Vec<BindingJson>,
+    outputs: Vec<OutputJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     main: Option<PipelineJson>,
 }
 
 #[derive(Serialize)]
 struct BindingJson {
+    name: SpannedJson<String>,
+    pipeline: PipelineJson,
+}
+
+#[derive(Serialize)]
+struct OutputJson {
     name: SpannedJson<String>,
     pipeline: PipelineJson,
 }
@@ -576,6 +620,17 @@ enum StageJson {
         columns: Vec<SpannedJson<String>>,
         span: Span,
     },
+    PivotLonger {
+        columns: Vec<SpannedJson<String>>,
+        names_to: SpannedJson<String>,
+        values_to: SpannedJson<String>,
+        span: Span,
+    },
+    Complete {
+        keys: Vec<SpannedJson<String>>,
+        fills: Vec<CompleteFillItemJson>,
+        span: Span,
+    },
     Save {
         sink: SinkJsonAst,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -603,6 +658,13 @@ struct RenameItemJson {
 
 #[derive(Serialize)]
 struct MutateItemJson {
+    column: SpannedJson<String>,
+    expr: ExprJson,
+    span: Span,
+}
+
+#[derive(Serialize)]
+struct CompleteFillItemJson {
     column: SpannedJson<String>,
     expr: ExprJson,
     span: Span,
@@ -734,6 +796,7 @@ where
 fn program_json(program: &Program) -> ProgramJson {
     ProgramJson {
         bindings: program.bindings.iter().map(binding_json).collect(),
+        outputs: program.outputs.iter().map(output_json).collect(),
         main: program.main.as_ref().map(pipeline_json),
     }
 }
@@ -742,6 +805,13 @@ fn binding_json(binding: &Binding) -> BindingJson {
     BindingJson {
         name: spanned_json(&binding.name),
         pipeline: pipeline_json(&binding.pipeline),
+    }
+}
+
+fn output_json(output: &OutputDecl) -> OutputJson {
+    OutputJson {
+        name: spanned_json(&output.name),
+        pipeline: pipeline_json(&output.pipeline),
     }
 }
 
@@ -877,6 +947,22 @@ fn stage_json(stage: &Stage) -> StageJson {
             columns: columns.iter().map(spanned_json).collect(),
             span: *span,
         },
+        Stage::PivotLonger {
+            columns,
+            names_to,
+            values_to,
+            span,
+        } => StageJson::PivotLonger {
+            columns: columns.iter().map(spanned_json).collect(),
+            names_to: spanned_json(names_to),
+            values_to: spanned_json(values_to),
+            span: *span,
+        },
+        Stage::Complete { keys, fills, span } => StageJson::Complete {
+            keys: keys.iter().map(spanned_json).collect(),
+            fills: fills.iter().map(complete_fill_item_json).collect(),
+            span: *span,
+        },
         Stage::Save(save) => save_stage_json(save),
         Stage::Unsupported { name, span } => StageJson::Unsupported {
             name: spanned_json(name),
@@ -895,6 +981,14 @@ fn save_stage_json(save: &SaveStage) -> StageJson {
 
 fn mutate_item_json(item: &MutateItem) -> MutateItemJson {
     MutateItemJson {
+        column: spanned_json(&item.column),
+        expr: expr_json(&item.expr),
+        span: item.span,
+    }
+}
+
+fn complete_fill_item_json(item: &CompleteFillItem) -> CompleteFillItemJson {
+    CompleteFillItemJson {
         column: spanned_json(&item.column),
         expr: expr_json(&item.expr),
         span: item.span,
@@ -1056,12 +1150,20 @@ fn binary_op_text(op: BinaryOp) -> &'static str {
 #[derive(Serialize)]
 struct ProgramIrJson {
     bindings: Vec<BindingIrJson>,
+    outputs: Vec<OutputIrJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     main: Option<PipelineIrJson>,
 }
 
 #[derive(Serialize)]
 struct BindingIrJson {
+    name: String,
+    span: Span,
+    pipeline: PipelineIrJson,
+}
+
+#[derive(Serialize)]
+struct OutputIrJson {
     name: String,
     span: Span,
     pipeline: PipelineIrJson,
@@ -1147,6 +1249,17 @@ enum StageIrJson {
         columns: Vec<String>,
         span: Span,
     },
+    PivotLonger {
+        columns: Vec<String>,
+        names_to: String,
+        values_to: String,
+        span: Span,
+    },
+    Complete {
+        keys: Vec<String>,
+        fills: Vec<CompleteFillItemIrJson>,
+        span: Span,
+    },
     Save {
         sink: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1175,6 +1288,13 @@ struct RenameItemIrJson {
 
 #[derive(Serialize)]
 struct MutateItemIrJson {
+    column: String,
+    expr: ExprIrJson,
+    span: Span,
+}
+
+#[derive(Serialize)]
+struct CompleteFillItemIrJson {
     column: String,
     expr: ExprIrJson,
     span: Span,
@@ -1281,6 +1401,19 @@ fn program_ir_json(ir: &ProgramIr) -> ProgramIrJson {
                     start: pipeline_start_ir_json(&binding.pipeline.start),
                     stages: binding.pipeline.stages.iter().map(stage_ir_json).collect(),
                     span: binding.pipeline.span,
+                },
+            })
+            .collect(),
+        outputs: ir
+            .outputs
+            .iter()
+            .map(|output| OutputIrJson {
+                name: output.name.clone(),
+                span: output.span,
+                pipeline: PipelineIrJson {
+                    start: pipeline_start_ir_json(&output.pipeline.start),
+                    stages: output.pipeline.stages.iter().map(stage_ir_json).collect(),
+                    span: output.pipeline.span,
                 },
             })
             .collect(),
@@ -1423,6 +1556,22 @@ fn stage_ir_json(stage: &StageIr) -> StageIrJson {
             columns: columns.clone(),
             span: *span,
         },
+        StageIr::PivotLonger {
+            columns,
+            names_to,
+            values_to,
+            span,
+        } => StageIrJson::PivotLonger {
+            columns: columns.clone(),
+            names_to: names_to.clone(),
+            values_to: values_to.clone(),
+            span: *span,
+        },
+        StageIr::Complete { keys, fills, span } => StageIrJson::Complete {
+            keys: keys.clone(),
+            fills: fills.iter().map(complete_fill_item_ir_json).collect(),
+            span: *span,
+        },
         StageIr::Save { sink, format, span } => StageIrJson::Save {
             sink: match sink {
                 SinkIr::Path(path) => path.clone(),
@@ -1435,6 +1584,14 @@ fn stage_ir_json(stage: &StageIr) -> StageIrJson {
             name: name.clone(),
             span: *span,
         },
+    }
+}
+
+fn complete_fill_item_ir_json(item: &CompleteFillItemIr) -> CompleteFillItemIrJson {
+    CompleteFillItemIrJson {
+        column: item.column.clone(),
+        expr: expr_ir_json(&item.expr),
+        span: item.span,
     }
 }
 

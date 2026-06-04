@@ -70,11 +70,31 @@ where
     F: FnMut(LoadRequest<'_>) -> Result<Vec<String>, Diagnostic>,
 {
     fn analyze(&mut self, program: &Program) {
-        self.check_duplicate_bindings(&program.bindings);
+        self.check_top_level_names(program);
         for binding in &program.bindings {
             self.binding_decls
                 .entry(binding.name.value.clone())
                 .or_insert_with(|| binding.clone());
+        }
+        if !program.outputs.is_empty() && program.main.is_some() {
+            let span = program
+                .main
+                .as_ref()
+                .map_or_else(Span::zero, |pipeline| pipeline.span);
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1503,
+                "document cannot mix output declarations with a main pipeline",
+                span,
+            ));
+        }
+        for output in &program.outputs {
+            if let Some(columns) = self.analyze_pipeline(&output.pipeline, &mut Vec::new()) {
+                self.outputs.push(PipelineSchema {
+                    label: PipelineSchemaLabel::Output(output.name.value.clone()),
+                    span: output.pipeline.span,
+                    columns,
+                });
+            }
         }
         if let Some(main) = &program.main {
             if let Some(columns) = self.analyze_pipeline(main, &mut Vec::new()) {
@@ -87,14 +107,35 @@ where
         }
     }
 
-    fn check_duplicate_bindings(&mut self, bindings: &[Binding]) {
+    fn check_top_level_names(&mut self, program: &Program) {
         let mut seen = BTreeSet::new();
-        for binding in bindings {
+        for binding in &program.bindings {
             if !seen.insert(binding.name.value.clone()) {
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1001,
                     format!("duplicate binding `{}`", binding.name.value),
                     binding.name.span,
+                ));
+            }
+        }
+        let binding_names = seen.clone();
+        let mut output_names = BTreeSet::new();
+        for output in &program.outputs {
+            if !output_names.insert(output.name.value.clone()) {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1001,
+                    format!("duplicate output `{}`", output.name.value),
+                    output.name.span,
+                ));
+            }
+            if binding_names.contains(&output.name.value) {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1001,
+                    format!(
+                        "output `{}` conflicts with an existing binding",
+                        output.name.value
+                    ),
+                    output.name.span,
                 ));
             }
         }
@@ -308,11 +349,114 @@ where
                     }
                     grouping = None;
                 }
+                Stage::PivotLonger {
+                    columns,
+                    names_to,
+                    values_to,
+                    ..
+                } => {
+                    if columns.is_empty() {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1203,
+                            "pivot_longer requires at least one source column",
+                            names_to.span,
+                        ));
+                    }
+                    let mut seen = BTreeSet::new();
+                    for column in columns {
+                        self.require_column(&schema, &column.value, column.span);
+                        if !seen.insert(column.value.clone()) {
+                            self.diagnostics.push(Diagnostic::error(
+                                codes::E1205,
+                                format!("duplicate pivot_longer column `{}`", column.value),
+                                column.span,
+                            ));
+                        }
+                    }
+                    let selected: BTreeSet<String> =
+                        columns.iter().map(|column| column.value.clone()).collect();
+                    let copied = schema
+                        .iter()
+                        .filter(|column| !selected.contains(*column))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if copied.iter().any(|column| column == &names_to.value) {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1207,
+                            format!("pivot_longer names_to `{}` already exists", names_to.value),
+                            names_to.span,
+                        ));
+                    }
+                    if copied.iter().any(|column| column == &values_to.value) {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1207,
+                            format!(
+                                "pivot_longer values_to `{}` already exists",
+                                values_to.value
+                            ),
+                            values_to.span,
+                        ));
+                    }
+                    if names_to.value == values_to.value {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1207,
+                            "pivot_longer names_to and values_to must be different columns",
+                            values_to.span,
+                        ));
+                    }
+                    schema = copied;
+                    schema.push(names_to.value.clone());
+                    schema.push(values_to.value.clone());
+                    grouping = None;
+                }
+                Stage::Complete { keys, fills, .. } => {
+                    if keys.is_empty() {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E1203,
+                            "complete requires at least one key column",
+                            stage.span(),
+                        ));
+                    }
+                    let mut key_names = BTreeSet::new();
+                    for key in keys {
+                        self.require_column(&schema, &key.value, key.span);
+                        if !key_names.insert(key.value.clone()) {
+                            self.diagnostics.push(Diagnostic::error(
+                                codes::E1205,
+                                format!("duplicate complete key `{}`", key.value),
+                                key.span,
+                            ));
+                        }
+                    }
+                    let mut fill_names = BTreeSet::new();
+                    for fill in fills {
+                        self.require_column(&schema, &fill.column.value, fill.column.span);
+                        self.analyze_mutate_expr(&schema, &fill.expr);
+                        if key_names.contains(&fill.column.value) {
+                            self.diagnostics.push(Diagnostic::error(
+                                codes::E1207,
+                                format!(
+                                    "complete fill target `{}` cannot be a key column",
+                                    fill.column.value
+                                ),
+                                fill.column.span,
+                            ));
+                        }
+                        if !fill_names.insert(fill.column.value.clone()) {
+                            self.diagnostics.push(Diagnostic::error(
+                                codes::E1205,
+                                format!("duplicate complete fill target `{}`", fill.column.value),
+                                fill.column.span,
+                            ));
+                        }
+                    }
+                    grouping = None;
+                }
                 Stage::Save(save) => self.analyze_save(save),
                 Stage::Unsupported { name, .. } => {
                     self.diagnostics.push(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{}` is deferred in 0.21.0", name.value),
+                        format!("stage `{}` is deferred in 0.23.0", name.value),
                         name.span,
                     ));
                 }
@@ -338,7 +482,7 @@ where
             if !format_info(&format.value).is_some_and(|info| info.save_supported) {
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1215,
-                    format!("format `{}` is not supported in 0.21.0", format.value),
+                    format!("format `{}` is not supported in 0.23.0", format.value),
                     format.span,
                 ));
             }
@@ -413,6 +557,15 @@ where
                             name.span,
                         ));
                     }
+                }
+                if name.value == "round"
+                    && args.get(1).is_some_and(|arg| !is_round_digits_literal(arg))
+                {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E1206,
+                        "round() digits must be an integer literal from 0 through 12",
+                        args[1].span(),
+                    ));
                 }
                 for arg in args {
                     self.analyze_scalar_expr(arg, WindowContext::Disallowed);
@@ -693,6 +846,10 @@ fn is_non_negative_integer_literal(expr: &Expr) -> bool {
     matches!(expr, Expr::Number(value) if value.value >= 0.0 && value.value.fract() == 0.0)
 }
 
+fn is_round_digits_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Number(value) if (0.0..=12.0).contains(&value.value) && value.value.fract() == 0.0)
+}
+
 fn requires_order_by(function: &str) -> bool {
     matches!(
         function,
@@ -726,6 +883,8 @@ fn stage_name(stage: &Stage) -> &'static str {
         Stage::Join { .. } => "join",
         Stage::Union { .. } => "union",
         Stage::Distinct { .. } => "distinct",
+        Stage::PivotLonger { .. } => "pivot_longer",
+        Stage::Complete { .. } => "complete",
         Stage::Save(_) => "save",
         Stage::Unsupported { name, .. } => match name.value.as_str() {
             "mutate" => "mutate",

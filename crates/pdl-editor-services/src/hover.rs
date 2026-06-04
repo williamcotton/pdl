@@ -55,6 +55,18 @@ fn hover_with_facts(
             });
         }
     }
+    for output in &parse.program.outputs {
+        if contains(output.name.span, offset) {
+            let schema = facts
+                .pipeline_schema_before_offset(&output.pipeline, output.pipeline.span.end)
+                .map(|columns| columns.join(", "))
+                .unwrap_or_else(|| "unknown".to_string());
+            return Some(EditorHover {
+                range: range_for_span(source, output.name.span),
+                markdown: format!("**output `{}`**\n\nSchema: `{schema}`", output.name.value),
+            });
+        }
+    }
 
     hover_pipeline(source, &parse.program, &facts, &previews, offset)
 }
@@ -69,6 +81,11 @@ fn hover_pipeline(
     for binding in &program.bindings {
         if let Some(hover) = hover_for_pipeline(source, &binding.pipeline, facts, previews, offset)
         {
+            return Some(hover);
+        }
+    }
+    for output in &program.outputs {
+        if let Some(hover) = hover_for_pipeline(source, &output.pipeline, facts, previews, offset) {
             return Some(hover);
         }
     }
@@ -358,6 +375,9 @@ impl PreviewFacts {
                     .insert(binding.name.value.clone(), preview);
             }
         }
+        for output in &program.outputs {
+            let _ = facts.pipeline_preview_with_io(&output.pipeline, program_path, io);
+        }
         if let Some(main) = &program.main {
             let _ = facts.pipeline_preview_with_io(main, program_path, io);
         }
@@ -584,6 +604,7 @@ fn apply_stage_to_preview(preview: &mut TablePreview, stage: &Stage) {
         | Stage::Sort { .. }
         | Stage::GroupBy { .. }
         | Stage::Distinct { .. }
+        | Stage::Complete { .. }
         | Stage::Save(_) => {}
         Stage::Limit { n, .. } => {
             preview.rows_sampled = preview.rows_sampled.min(*n);
@@ -638,7 +659,7 @@ fn apply_stage_to_preview(preview: &mut TablePreview, stage: &Stage) {
             let mut output = Vec::new();
             for item in items {
                 let logical_type = match item.function.value.as_str() {
-                    "count" | "sum" | "mean" => LogicalType::Number,
+                    "count" | "count_distinct" | "sum" | "mean" => LogicalType::Number,
                     "min" | "max" => item
                         .args
                         .first()
@@ -656,6 +677,28 @@ fn apply_stage_to_preview(preview: &mut TablePreview, stage: &Stage) {
             preview.sample_rows.clear();
         }
         Stage::Join { .. } | Stage::Union { .. } => {
+            preview.sample_rows.clear();
+        }
+        Stage::PivotLonger {
+            columns,
+            names_to,
+            values_to,
+            ..
+        } => {
+            let selected = columns
+                .iter()
+                .map(|column| column.value.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            preview
+                .columns
+                .retain(|column| !selected.iter().any(|selected| selected == &column.name));
+            preview.columns.push(ColumnPreview::derived(
+                names_to.value.clone(),
+                LogicalType::String,
+            ));
+            preview
+                .columns
+                .push(ColumnPreview::unknown(values_to.value.clone()));
             preview.sample_rows.clear();
         }
         Stage::Unsupported { .. } => {}
@@ -709,6 +752,25 @@ fn column_spans(stage: &Stage) -> Vec<Span> {
         Stage::Join { on, .. } => vec![on.left().span, on.right().span],
         Stage::Union { .. } => Vec::new(),
         Stage::Distinct { columns, .. } => columns.iter().map(|column| column.span).collect(),
+        Stage::PivotLonger {
+            columns,
+            names_to,
+            values_to,
+            ..
+        } => columns
+            .iter()
+            .map(|column| column.span)
+            .chain([names_to.span, values_to.span])
+            .collect(),
+        Stage::Complete { keys, fills, .. } => keys
+            .iter()
+            .map(|key| key.span)
+            .chain(fills.iter().flat_map(|fill| {
+                expr_column_spans(&fill.expr)
+                    .into_iter()
+                    .chain([fill.column.span])
+            }))
+            .collect(),
         Stage::Limit { .. } | Stage::Save(_) | Stage::Unsupported { .. } => Vec::new(),
     }
 }
@@ -724,6 +786,10 @@ fn scalar_function_spans(stage: &Stage) -> Vec<(String, Span)> {
             .iter()
             .flat_map(|item| item.args.iter().flat_map(expr_function_spans))
             .collect(),
+        Stage::Complete { fills, .. } => fills
+            .iter()
+            .flat_map(|fill| expr_function_spans(&fill.expr))
+            .collect(),
         Stage::Select { .. }
         | Stage::Drop { .. }
         | Stage::Rename { .. }
@@ -733,6 +799,7 @@ fn scalar_function_spans(stage: &Stage) -> Vec<(String, Span)> {
         | Stage::Join { .. }
         | Stage::Union { .. }
         | Stage::Distinct { .. }
+        | Stage::PivotLonger { .. }
         | Stage::Save(_)
         | Stage::Unsupported { .. } => Vec::new(),
     }

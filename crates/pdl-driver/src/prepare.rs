@@ -317,7 +317,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.21.0"),
+                format!("format `{format}` is not supported in 0.23.0"),
                 format_span,
             )
         });
@@ -326,7 +326,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.21.0"),
+                format!("format `{format}` is not supported in 0.23.0"),
                 span,
             )
         });
@@ -347,7 +347,7 @@ fn stdin_pre_read_diagnostics(program: &Program, stdin_format: &Option<String>) 
             None => {
                 return vec![Diagnostic::error(
                     codes::E1215,
-                    format!("stdin format `{format}` is not supported in 0.21.0"),
+                    format!("stdin format `{format}` is not supported in 0.23.0"),
                     Span::zero(),
                 )];
             }
@@ -364,7 +364,7 @@ fn stdin_pre_read_diagnostics(program: &Program, stdin_format: &Option<String>) 
                 let Some(explicit_format) = DataFormat::from_name(&explicit.value) else {
                     diagnostics.push(Diagnostic::error(
                         codes::E1215,
-                        format!("format `{}` is not supported in 0.21.0", explicit.value),
+                        format!("format `{}` is not supported in 0.23.0", explicit.value),
                         explicit.span,
                     ));
                     continue;
@@ -422,6 +422,10 @@ fn pipeline_schema_hint(pipeline: &Pipeline) -> Vec<String> {
             | Stage::Distinct {
                 columns: stage_columns,
                 ..
+            }
+            | Stage::PivotLonger {
+                columns: stage_columns,
+                ..
             } => {
                 for column in stage_columns {
                     push_unique(&mut columns, &column.value);
@@ -452,6 +456,15 @@ fn pipeline_schema_hint(pipeline: &Pipeline) -> Vec<String> {
             }
             Stage::Join { on, .. } => {
                 push_unique(&mut columns, &on.left().value);
+            }
+            Stage::Complete { keys, fills, .. } => {
+                for key in keys {
+                    push_unique(&mut columns, &key.value);
+                }
+                for fill in fills {
+                    collect_expr_columns(&fill.expr, ExprHintRole::Default, &mut columns);
+                    push_unique(&mut columns, &fill.column.value);
+                }
             }
             Stage::Limit { .. }
             | Stage::Union { .. }
@@ -540,6 +553,7 @@ fn program_pipelines(program: &Program) -> Vec<&Pipeline> {
         .iter()
         .map(|binding: &Binding| &binding.pipeline)
         .collect();
+    pipelines.extend(program.outputs.iter().map(|output| &output.pipeline));
     if let Some(main) = &program.main {
         pipelines.push(main);
     }
@@ -554,6 +568,7 @@ fn analysis_target_program(program: &Program, binding: &str) -> Program {
         .map_or_else(Span::zero, |candidate| candidate.name.span);
     Program {
         bindings: program.bindings.clone(),
+        outputs: Vec::new(),
         main: Some(Pipeline {
             start: PipelineStart::Binding(Spanned::new(binding.to_string(), span)),
             stages: Vec::new(),

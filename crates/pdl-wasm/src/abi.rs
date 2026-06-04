@@ -1,3 +1,4 @@
+use pdl_data::Table;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -16,8 +17,8 @@ struct BrowserRunRequest {
     files: BTreeMap<String, String>,
     #[serde(default = "default_program_path")]
     program_path: String,
-    #[serde(default = "default_stdout_format")]
-    stdout_format: String,
+    #[serde(default)]
+    stdout_format: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,10 +59,6 @@ enum BrowserEditorFeatureRequest {
 
 fn default_program_path() -> String {
     "memory/main.pdl".to_string()
-}
-
-fn default_stdout_format() -> String {
-    "csv".to_string()
 }
 
 pub fn check_json(source: &str) -> String {
@@ -128,11 +125,19 @@ fn run_browser_json(input: &[u8]) -> String {
     let program_path = PathBuf::from(&request.program_path);
     let io = in_memory_io(&program_path, request.files);
     let prepared = pdl_driver::prepare_source_with_io(&program_path, request.source, &io);
+    let stdout_format = request.stdout_format.or_else(|| {
+        prepared
+            .analysis
+            .ir
+            .as_ref()
+            .map_or(true, |ir| ir.outputs.is_empty())
+            .then(|| "csv".to_string())
+    });
     let result = pdl_exec::run_prepared_with_io(
         &prepared,
         pdl_exec::RunOptions {
-            stdout_format: Some(request.stdout_format),
-            dry_run: false,
+            stdout_format,
+            dry_run: true,
             allow_binary_stdout: false,
         },
         &io,
@@ -154,10 +159,36 @@ fn run_browser_json(input: &[u8]) -> String {
 
     serde_json::json!({
         "stdout": stdout,
+        "outputs": result
+            .named_outputs
+            .iter()
+            .map(|output| {
+                serde_json::json!({
+                    "name": output.name,
+                    "table": table_json(&output.table),
+                })
+            })
+            .collect::<Vec<_>>(),
         "diagnostics": result.diagnostics,
         "error": null,
     })
     .to_string()
+}
+
+fn table_json(table: &Table) -> serde_json::Value {
+    serde_json::json!({
+        "columns": table.columns,
+        "rows": table
+            .rows
+            .iter()
+            .map(|row| {
+                row.values
+                    .iter()
+                    .map(|value| value.to_csv_cell())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+    })
 }
 
 fn editor_service_browser_json(input: &[u8]) -> String {
@@ -452,6 +483,64 @@ mod tests {
             "{\"region\":\"West\",\"amount\":200}\n{\"region\":\"North\",\"amount\":120}\n"
         );
         assert_eq!(payload["diagnostics"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn run_json_returns_named_output_tables() {
+        let request = serde_json::json!({
+            "source": r#"let sales =
+  load "sales.csv"
+
+output west =
+  sales
+  | filter "region" == "West"
+
+output totals =
+  sales
+  | agg sum("amount") as "total""#,
+            "files": {
+                "sales.csv": "region,amount\nWest,30\nEast,10\n"
+            },
+            "stdout_format": "csv"
+        });
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&run_json(&request.to_string())).expect("json");
+
+        assert!(payload["error"].is_null(), "{payload}");
+        assert_eq!(payload["diagnostics"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["diagnostics"][0]["code"], "E1607");
+
+        let request = serde_json::json!({
+            "source": r#"let sales =
+  load "sales.csv"
+
+output west =
+  sales
+  | filter "region" == "West"
+  | save "west.csv"
+
+output totals =
+  sales
+  | agg sum("amount") as "total"
+  | save "totals.csv""#,
+            "files": {
+                "sales.csv": "region,amount\nWest,30\nEast,10\n"
+            }
+        });
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&run_json(&request.to_string())).expect("json");
+
+        assert!(payload["error"].is_null(), "{payload}");
+        assert_eq!(payload["diagnostics"].as_array().unwrap().len(), 0);
+        assert_eq!(payload["outputs"][0]["name"], "west");
+        assert_eq!(payload["outputs"][0]["table"]["columns"][0], "region");
+        assert_eq!(payload["outputs"][0]["table"]["rows"][0][0], "West");
+        assert_eq!(payload["outputs"][1]["name"], "totals");
+        assert_eq!(payload["outputs"][1]["table"]["rows"][0][0], "40");
+        assert!(!Path::new("west.csv").exists());
+        assert!(!Path::new("totals.csv").exists());
     }
 
     #[test]

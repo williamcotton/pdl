@@ -20,6 +20,7 @@ pub struct ExecutionPlan {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExecutionPlanStep {
+    Output { name: String },
     Load { source: String, format: String },
     Binding { name: String },
     Transform { stage: String },
@@ -40,7 +41,7 @@ pub fn plan_prepared(
         let Some(data_format) = DataFormat::from_name(format) else {
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
-                format!("stdout format `{format}` is not supported in 0.21.0"),
+                format!("stdout format `{format}` is not supported in 0.23.0"),
                 Span::zero(),
             ));
             return Err(diagnostics);
@@ -49,7 +50,7 @@ pub fn plan_prepared(
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
                 format!(
-                    "stdout format `{}` is not supported in 0.21.0",
+                    "stdout format `{}` is not supported in 0.23.0",
                     data_format.canonical_name()
                 ),
                 Span::zero(),
@@ -81,22 +82,55 @@ pub fn plan_prepared(
         return Err(diagnostics);
     };
 
-    let Some(main) = &ir.main else {
-        diagnostics.push(Diagnostic::error(
-            codes::E1502,
-            "no runnable main pipeline",
-            Span::zero(),
-        ));
-        return Err(diagnostics);
-    };
-
     let mut steps = Vec::new();
     let mut planned_bindings = BTreeSet::new();
-    if let Err(diagnostic) =
-        append_pipeline_steps(prepared, ir, main, &mut planned_bindings, &mut steps)
-    {
-        diagnostics.push(diagnostic);
-        return Err(diagnostics);
+    if ir.outputs.is_empty() {
+        let Some(main) = &ir.main else {
+            diagnostics.push(Diagnostic::error(
+                codes::E1502,
+                "no runnable main pipeline",
+                Span::zero(),
+            ));
+            return Err(diagnostics);
+        };
+        if let Err(diagnostic) =
+            append_pipeline_steps(prepared, ir, main, &mut planned_bindings, &mut steps)
+        {
+            diagnostics.push(diagnostic);
+            return Err(diagnostics);
+        }
+    } else {
+        if stdout_format.is_some() && ir.outputs.len() > 1 {
+            diagnostics.push(Diagnostic::error(
+                codes::E1607,
+                "multiple output declarations cannot share one stdout stream",
+                Span::zero(),
+            ));
+            return Err(diagnostics);
+        }
+        if prepared.driver_plan.stdout_writes().len() > 1 {
+            diagnostics.push(Diagnostic::error(
+                codes::E1607,
+                "multiple output declarations cannot write separate tables to stdout",
+                Span::zero(),
+            ));
+            return Err(diagnostics);
+        }
+        for output in &ir.outputs {
+            steps.push(ExecutionPlanStep::Output {
+                name: output.name.clone(),
+            });
+            if let Err(diagnostic) = append_pipeline_steps(
+                prepared,
+                ir,
+                &output.pipeline,
+                &mut planned_bindings,
+                &mut steps,
+            ) {
+                diagnostics.push(diagnostic);
+                return Err(diagnostics);
+            }
+        }
     }
 
     if let Some(format) = stdout_format {
@@ -231,6 +265,8 @@ fn stage_name(stage: &StageIr) -> &'static str {
         StageIr::Join { .. } => "join",
         StageIr::Union { .. } => "union",
         StageIr::Distinct { .. } => "distinct",
+        StageIr::PivotLonger { .. } => "pivot_longer",
+        StageIr::Complete { .. } => "complete",
         StageIr::Save { .. } => "save",
         StageIr::Unsupported { name, .. } => match name.as_str() {
             "join" => "join",

@@ -121,6 +121,20 @@ pub const STAGES: &[StageInfo] = &[
         can_start_pipeline: false,
         implemented: true,
     },
+    StageInfo {
+        name: "pivot_longer",
+        documentation:
+            "Reshape selected source columns into name/value rows with `names_to` and `values_to`.",
+        can_start_pipeline: false,
+        implemented: true,
+    },
+    StageInfo {
+        name: "complete",
+        documentation:
+            "Insert missing Cartesian key combinations, optionally assigning fill values.",
+        can_start_pipeline: false,
+        implemented: true,
+    },
 ];
 
 pub const SCALAR_FUNCTIONS: &[FunctionInfo] = &[
@@ -214,11 +228,12 @@ pub const SCALAR_FUNCTIONS: &[FunctionInfo] = &[
     },
     FunctionInfo {
         name: "round",
-        documentation: "`round(value)`: round numeric input to the nearest integer.",
+        documentation:
+            "`round(value[, digits])`: round numeric input to the nearest integer or decimal place.",
         kind: FunctionKind::Scalar,
         min_args: 1,
-        max_args: Some(1),
-        expected_arity: "one argument",
+        max_args: Some(2),
+        expected_arity: "one or two arguments",
     },
     FunctionInfo {
         name: "if_else",
@@ -266,6 +281,14 @@ pub const AGGREGATE_FUNCTIONS: &[AggregateFunctionInfo] = &[
     FunctionInfo {
         name: "max",
         documentation: "`max(\"column\")`: maximum value.",
+        kind: FunctionKind::Aggregate,
+        min_args: 1,
+        max_args: Some(1),
+        expected_arity: "one argument",
+    },
+    FunctionInfo {
+        name: "count_distinct",
+        documentation: "`count_distinct(expr)`: count unique non-null values in each group.",
         kind: FunctionKind::Aggregate,
         min_args: 1,
         max_args: Some(1),
@@ -441,11 +464,17 @@ pub const KEYWORDS: &[&str] = &[
     "join",
     "union",
     "distinct",
+    "pivot_longer",
+    "complete",
     "let",
+    "output",
     "as",
     "on",
     "kind",
     "by_name",
+    "names_to",
+    "values_to",
+    "fill",
     "format",
     "over",
     "partition_by",
