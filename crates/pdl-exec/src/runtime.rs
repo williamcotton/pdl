@@ -301,7 +301,7 @@ impl Runtime<'_> {
                 StageIr::Unsupported { name, span } => {
                     return Err(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{name}` is deferred in 0.24.0"),
+                        format!("stage `{name}` is deferred in 0.25.0"),
                         *span,
                     ));
                 }
@@ -875,7 +875,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.24.0"),
+                format!("format `{format}` is not supported in 0.25.0"),
                 span,
             )
         });
@@ -885,7 +885,7 @@ fn resolve_input_format(
             return DataFormat::from_name(format).ok_or_else(|| {
                 Diagnostic::error(
                     codes::E1215,
-                    format!("stdin format `{format}` is not supported in 0.24.0"),
+                    format!("stdin format `{format}` is not supported in 0.25.0"),
                     input.span,
                 )
             });
@@ -909,7 +909,7 @@ fn resolve_output_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1705,
-                format!("output format `{format}` is not supported in 0.24.0"),
+                format!("output format `{format}` is not supported in 0.25.0"),
                 span,
             )
         });

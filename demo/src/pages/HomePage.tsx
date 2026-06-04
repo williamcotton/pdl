@@ -1,5 +1,5 @@
 import React from "react";
-import { ArrowRight, CheckCircle2, Code2, LoaderCircle, Play, Table2 } from "lucide-react";
+import { ArrowRight, CheckCircle2, Code2, LoaderCircle, Play, Table2, Terminal } from "lucide-react";
 
 import { PdlEditor } from "../PdlEditor";
 import type { PdlEditorDiagnostic, PdlRunResult } from "../pdlWasm";
@@ -29,12 +29,9 @@ const STARTER_SOURCE = `load "sales.csv"
   | sort "total_revenue" desc
 `;
 
-const BUILD_COMMANDS = `cargo build -p pdl-cli
-cargo run -p pdl-cli -- run examples/top_regions.pdl --stdout-format csv
-`;
-
-const INTEROP_COMMANDS = `pdl run prep.pdl --stdout-format arrow-stream > prepared.arrow
-pdl run passthrough.pdl --stdin-format arrow-stream < prepared.arrow > sorted.arrow
+const HOMEBREW_INSTALL_COMMANDS = `brew tap williamcotton/pdl
+brew install williamcotton/pdl/pdl
+brew update && brew upgrade williamcotton/pdl/pdl
 `;
 
 export function HomePage({ navigate, routeHref }: RoutedPageProps): React.ReactElement {
@@ -140,25 +137,17 @@ export function HomePage({ navigate, routeHref }: RoutedPageProps): React.ReactE
         </div>
       </section>
 
-      <section className="install-strip" aria-label="Build PDL">
+      <section className="install-strip" aria-label="Install PDL CLI">
         <div>
-          <p className="eyebrow">Native CLI</p>
-          <h2>Build the binary and run a pipeline.</h2>
-          <p>Use `check`, `fmt`, `schema`, `plan`, `ir`, `manifest`, and `lsp` while iterating.</p>
+          <p className="eyebrow">
+            <Terminal size={15} aria-hidden="true" />
+            Install the CLI
+          </p>
+          <h2>Use Homebrew for local PDL runs.</h2>
+          <p>Install once, then keep the formula current with the upgrade command.</p>
         </div>
         <pre>
-          <code>{BUILD_COMMANDS}</code>
-        </pre>
-      </section>
-
-      <section className="install-strip" aria-label="Arrow stream output">
-        <div>
-          <p className="eyebrow">Streams</p>
-          <h2>Prepare tables for downstream consumers.</h2>
-          <p>Use Arrow IPC streams when another process needs typed tabular data on stdin.</p>
-        </div>
-        <pre>
-          <code>{INTEROP_COMMANDS}</code>
+          <code>{HOMEBREW_INSTALL_COMMANDS}</code>
         </pre>
       </section>
 

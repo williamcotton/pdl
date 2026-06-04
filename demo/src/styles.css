@@ -425,6 +425,12 @@ button {
   background: #fbfbf9;
 }
 
+.install-strip pre {
+  border-color: #122026;
+  color: #eaf4f6;
+  background: #122026;
+}
+
 .install-strip code,
 .doc-codeblock,
 .doc-codeblock code {
