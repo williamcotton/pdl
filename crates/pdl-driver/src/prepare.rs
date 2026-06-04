@@ -243,11 +243,14 @@ fn parse_errors_allow_semantic_followup(diagnostics: &[Diagnostic]) -> bool {
 }
 
 fn is_recoverable_parse_error_for_semantic_followup(diagnostic: &Diagnostic) -> bool {
+    if matches!(diagnostic.code, "E0026" | "E0027") {
+        return true;
+    }
     matches!(
         (diagnostic.code, diagnostic.message.as_str()),
         ("E0001", "expected operator in filter expression")
             | ("E0001", "expected `|` before stage")
-            | ("E1213", "aggregate items require `as`")
+            | ("E1417", "aggregate items require assignment")
     )
 }
 
@@ -317,7 +320,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.25.0"),
+                format!("format `{format}` is not supported in 0.26.0"),
                 format_span,
             )
         });
@@ -326,7 +329,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.25.0"),
+                format!("format `{format}` is not supported in 0.26.0"),
                 span,
             )
         });
@@ -347,7 +350,7 @@ fn stdin_pre_read_diagnostics(program: &Program, stdin_format: &Option<String>) 
             None => {
                 return vec![Diagnostic::error(
                     codes::E1215,
-                    format!("stdin format `{format}` is not supported in 0.25.0"),
+                    format!("stdin format `{format}` is not supported in 0.26.0"),
                     Span::zero(),
                 )];
             }
@@ -364,7 +367,7 @@ fn stdin_pre_read_diagnostics(program: &Program, stdin_format: &Option<String>) 
                 let Some(explicit_format) = DataFormat::from_name(&explicit.value) else {
                     diagnostics.push(Diagnostic::error(
                         codes::E1215,
-                        format!("format `{}` is not supported in 0.25.0", explicit.value),
+                        format!("format `{}` is not supported in 0.26.0", explicit.value),
                         explicit.span,
                     ));
                     continue;
@@ -485,17 +488,11 @@ enum ExprHintRole {
 
 fn collect_expr_columns(expr: &Expr, role: ExprHintRole, columns: &mut Vec<String>) {
     match expr {
-        Expr::Quoted(value) => {
+        Expr::Ident(value) => {
             if matches!(
                 role,
                 ExprHintRole::Default | ExprHintRole::PredicateRoot | ExprHintRole::ComparisonLeft
             ) {
-                push_unique(columns, &value.value);
-            }
-        }
-        Expr::Call { name, .. } if name.value == "lit" => {}
-        Expr::Call { name, args, .. } if name.value == "col" => {
-            if let Some(Expr::Quoted(value)) = args.first() {
                 push_unique(columns, &value.value);
             }
         }
@@ -526,7 +523,7 @@ fn collect_expr_columns(expr: &Expr, role: ExprHintRole, columns: &mut Vec<Strin
             collect_expr_columns(left, ExprHintRole::Default, columns);
             collect_expr_columns(right, ExprHintRole::Default, columns);
         }
-        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => {}
+        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Quoted(_) => {}
     }
 }
 
@@ -587,7 +584,7 @@ mod tests {
         let io = InMemoryDriverIo::default().with_schema("memory/sales.csv", ["amount", "region"]);
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
-            r#"load "sales.csv" | select "region""#,
+            r#"load "sales.csv" | select region"#,
             &io,
         );
 
@@ -630,10 +627,10 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "sales.csv"
-  | filter "staus" = "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age", count() as "orders"
-  | sort "total_revenue" desc
+  | filter staus = "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age), orders = count()
+  | sort total_revenue desc
   | limit 3"#,
             &io,
         );
@@ -657,10 +654,10 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "sales.csv"
-  | filter "staus" = "completed"
-  | group_by "region"
-  | agg sum("amount") a "total_revenue", mean("customer_age") as "avg_age", count() as "orders"
-  | sort "total_revenue" desc
+  | filter staus = "completed"
+  | group_by region
+  | agg sum(amount) a total_revenue, avg_age = mean(customer_age), orders = count()
+  | sort total_revenue desc
   | limit 3"#,
             &io,
         );
@@ -671,7 +668,7 @@ mod tests {
             .any(|diagnostic| diagnostic.code == "E0001"));
         assert!(diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "E1213"));
+            .any(|diagnostic| diagnostic.code == "E1417"));
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "E1005" && diagnostic.message == "unknown column `staus`"
         }));
@@ -690,10 +687,10 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "sales.csv"
-  filter "staus" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age", count() as "orders"
-  | sort "total_revenue" desc
+  filter staus == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age), orders = count()
+  | sort total_revenue desc
   | limit 3"#,
             &io,
         );
@@ -734,9 +731,9 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load stdin format "csv"
-  | filter "status" == "completed"
-  | select "order_id", "region", "amount"
-  | sort "order_id""#,
+  | filter status == "completed"
+  | select order_id, region, amount
+  | sort order_id"#,
             &io,
         );
 

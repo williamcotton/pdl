@@ -33,13 +33,13 @@ window analytics, and typed stream handoff.
 
 ```pdl
 load "sales.csv"
-  | filter "status" == "completed"
-  | group_by "region"
+  | filter status == "completed"
+  | group_by region
   | agg
-      sum("amount") as "total_revenue",
-      mean("customer_age") as "avg_age",
-      count() as "orders"
-  | sort "total_revenue" desc
+      total_revenue = sum(amount),
+      avg_age = mean(customer_age),
+      orders = count()
+  | sort total_revenue desc
   | limit 3
 ```
 
@@ -55,32 +55,32 @@ selects the final shape.
 
 ```pdl
 load "orders_raw.csv"
-  | filter lower(trim("status")) == "completed"
+  | filter lower(trim(status)) == "completed"
   | mutate
-      "net_amount" = "gross_amount" - coalesce("discount", 0),
-      "region_channel" = concat(upper(trim("region")), lit(":"), lower(trim("channel"))),
-      "priority" = if_else("gross_amount" >= 150, lit("high"), lit("standard"))
-  | distinct "order_id"
-  | select "order_id", "region_channel", "net_amount", "priority"
-  | sort "order_id"
+      net_amount = gross_amount - coalesce(discount, 0),
+      region_channel = concat(upper(trim(region)), ":", lower(trim(channel))),
+      priority = if_else(gross_amount >= 150, "high", "standard")
+  | distinct order_id
+  | select order_id, region_channel, net_amount, priority
+  | sort order_id
 ```
 
 ## 3. Segment revenue: join a lookup table
 
 Named `let` bindings keep lookup tables explicit. `join customers on
-"customer_id" kind left` adds customer segments before the revenue summary.
+customer_id kind left` adds customer segments before the revenue summary.
 
 ```pdl
 let customers =
   load "customers.csv"
-  | select "customer_id", "segment"
+  | select customer_id, segment
 
 load "sales.csv"
-  | filter "status" == "completed"
-  | join customers on "customer_id" kind left
-  | group_by "segment"
-  | agg sum("amount") as "revenue", count() as "orders"
-  | sort "revenue" desc
+  | filter status == "completed"
+  | join customers on customer_id kind left
+  | group_by segment
+  | agg revenue = sum(amount), orders = count()
+  | sort revenue desc
 ```
 
 ## 4. Daily orders: union files by name
@@ -94,7 +94,7 @@ let day2 =
 
 load "daily_orders_2026_02_01.csv"
   | union day2 by_name true distinct true
-  | sort "order_id"
+  | sort order_id
 ```
 
 ## 5. Customer windows: row-preserving analytics
@@ -105,16 +105,16 @@ depends on row groups or ordering.
 
 ```pdl
 load "sales.csv"
-  | filter "status" == "completed"
+  | filter status == "completed"
   | mutate
-      "customer_sale_number" =
+      customer_sale_number =
         row_number() over (
-          partition_by "customer_id"
-          order_by "amount" desc
+          partition_by customer_id
+          order_by amount desc
         ),
-      "customer_revenue" =
-        sum("amount") over (
-          partition_by "customer_id"
+      customer_revenue =
+        sum(amount) over (
+          partition_by customer_id
         )
 ```
 

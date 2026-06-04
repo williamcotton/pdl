@@ -270,7 +270,7 @@ fn native_file_formats_save_and_load_by_path_inference() {
         std::fs::write(
             &save_program,
             format!(
-                "load \"{}\"\n  | filter \"status\" == \"completed\"\n  | select \"region\", \"amount\"\n  | sort \"amount\" desc\n  | save \"{}\"\n",
+                "load \"{}\"\n  | filter status == \"completed\"\n  | select region, amount\n  | sort amount desc\n  | save \"{}\"\n",
                 sales_path.display(),
                 output_path.display()
             ),
@@ -290,10 +290,7 @@ fn native_file_formats_save_and_load_by_path_inference() {
 
         std::fs::write(
             &load_program,
-            format!(
-                "load \"{}\"\n  | sort \"amount\" desc\n",
-                output_path.display()
-            ),
+            format!("load \"{}\"\n  | sort amount desc\n", output_path.display()),
         )
         .expect("write load program");
         let output = command_output_owned(&[
@@ -340,7 +337,7 @@ fn stdin_format_conflict_reports_e1217_on_stderr_with_empty_stdout() {
 #[test]
 fn fmt_check_rejects_unformatted_source_and_fmt_rewrites() {
     let path = temp_pdl_path("fmt-unformatted");
-    std::fs::write(&path, r#"load "sales.csv"|select "region""#).expect("write temp pdl");
+    std::fs::write(&path, r#"load "sales.csv"|select region"#).expect("write temp pdl");
 
     let output = command_output_owned(&["fmt", "--check", path.to_str().expect("utf-8 path")]);
     assert!(!output.status.success());
@@ -356,7 +353,7 @@ fn fmt_check_rejects_unformatted_source_and_fmt_rewrites() {
     );
     assert_eq!(
         std::fs::read_to_string(&path).expect("read formatted pdl"),
-        "load \"sales.csv\"\n  | select \"region\"\n"
+        "load \"sales.csv\"\n  | select region\n"
     );
 
     let _ = std::fs::remove_file(path);
@@ -447,7 +444,7 @@ fn ast_ir_and_manifest_commands_emit_json() {
         String::from_utf8_lossy(&manifest.stderr)
     );
     let manifest_stdout = String::from_utf8(manifest.stdout).expect("manifest stdout is UTF-8");
-    assert!(manifest_stdout.contains("\"manifest_version\": \"0.25.0\""));
+    assert!(manifest_stdout.contains("\"manifest_version\": \"0.26.0\""));
     assert!(manifest_stdout.contains("\"stream_interop\""));
     assert!(manifest_stdout.contains("\"arrow-stream\""));
 }

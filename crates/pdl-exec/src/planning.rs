@@ -41,7 +41,7 @@ pub fn plan_prepared(
         let Some(data_format) = DataFormat::from_name(format) else {
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
-                format!("stdout format `{format}` is not supported in 0.25.0"),
+                format!("stdout format `{format}` is not supported in 0.26.0"),
                 Span::zero(),
             ));
             return Err(diagnostics);
@@ -50,7 +50,7 @@ pub fn plan_prepared(
             diagnostics.push(Diagnostic::error(
                 codes::E1705,
                 format!(
-                    "stdout format `{}` is not supported in 0.25.0",
+                    "stdout format `{}` is not supported in 0.26.0",
                     data_format.canonical_name()
                 ),
                 Span::zero(),
@@ -286,7 +286,7 @@ mod tests {
         let io = InMemoryDriverIo::default().with_schema("memory/sales.csv", ["amount", "region"]);
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
-            r#"load "sales.csv" | filter "amount" > 0 | select "region""#,
+            r#"load "sales.csv" | filter amount > 0 | select region"#,
             &io,
         );
 
@@ -331,8 +331,8 @@ mod tests {
   load "customers.csv"
 
 load "sales.csv"
-  | join customers on "customer_id"
-  | join customers on "customer_id""#,
+  | join customers on customer_id
+  | join customers on customer_id"#,
             &io,
         );
 

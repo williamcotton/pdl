@@ -195,12 +195,14 @@ function setupPdlMonaco(): Promise<void> {
           { open: "[", close: "]" },
           { open: "(", close: ")" },
           { open: '"', close: '"' },
+          { open: "`", close: "`" },
         ],
         surroundingPairs: [
           { open: "{", close: "}" },
           { open: "[", close: "]" },
           { open: "(", close: ")" },
           { open: '"', close: '"' },
+          { open: "`", close: "`" },
         ],
       });
     }
@@ -231,6 +233,8 @@ function configureMonacoWorker(): void {
 }
 
 function definePdlTheme(): void {
+  const functionStyle = { foreground: "0f5f8f", fontStyle: "bold" };
+
   monaco.editor.defineTheme(THEME_NAME, {
     base: "vs",
     inherit: true,
@@ -242,7 +246,14 @@ function definePdlTheme(): void {
       { token: "constant.language", foreground: "6f42c1" },
       { token: "keyword.control", foreground: "166f5c", fontStyle: "bold" },
       { token: "keyword.operator", foreground: "4f5b63" },
-      { token: "support.function.aggregate", foreground: "0f5f8f", fontStyle: "bold" },
+      { token: "function", ...functionStyle },
+      { token: "support.function", ...functionStyle },
+      { token: "support.function.aggregate", ...functionStyle },
+      { token: "support.function.aggregate.pdl", ...functionStyle },
+      { token: "support.function.scalar", ...functionStyle },
+      { token: "support.function.scalar.pdl", ...functionStyle },
+      { token: "support.function.window", ...functionStyle },
+      { token: "support.function.window.pdl", ...functionStyle },
       { token: "punctuation", foreground: "68757d" },
     ],
     colors: {

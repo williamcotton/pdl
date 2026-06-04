@@ -228,12 +228,8 @@ pub fn completions(
             keyword_completion("nulls_first", "Place nulls before non-null values"),
             keyword_completion("nulls_last", "Place nulls after non-null values"),
         ]);
-    } else if context.in_column_context {
+    } else if context.in_column_context && !context.inside_string {
         completions.extend(column_completions(&schema, context.inside_string));
-    }
-
-    if completions.is_empty() && context.inside_string {
-        completions.extend(column_completions(&schema, true));
     }
 
     dedupe_completions(completions)
@@ -275,6 +271,10 @@ pub fn semantic_tokens(source: &str) -> Vec<EditorSemanticToken> {
         } else if ch == '"' {
             let end = scan_string(source, pos);
             push_semantic_token(source, &mut tokens, pos, end, SemanticTokenKind::String);
+            pos = end;
+        } else if ch == '`' {
+            let end = scan_backtick_column(source, pos);
+            push_semantic_token(source, &mut tokens, pos, end, SemanticTokenKind::Variable);
             pos = end;
         } else if ch.is_ascii_digit() {
             let end = scan_number(source, pos);
@@ -507,9 +507,17 @@ impl CompletionContext {
             matches!(stage.as_deref(), Some("filter" | "mutate" | "complete"))
                 && !inside_string
                 && word.chars().all(is_ident_char);
+        let current_sort_item = after_keyword
+            .map(|suffix| suffix.rsplit(',').next().unwrap_or("").trim_start())
+            .unwrap_or("");
         let in_sort_direction_context = stage.as_deref() == Some("sort")
             && !inside_string
-            && line_prefix.contains('"')
+            && !current_sort_item.is_empty()
+            && (current_sort_item.split_whitespace().count() > 1
+                || current_sort_item
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace))
             && word.chars().all(is_ident_char);
         let in_column_context = matches!(
             stage.as_deref(),
@@ -645,9 +653,7 @@ fn collect_pipeline_columns(pipeline: &Pipeline, columns: &mut BTreeSet<String>)
 
 fn collect_expr_columns(expr: &Expr, columns: &mut BTreeSet<String>) {
     match expr {
-        Expr::Quoted(value) => {
-            columns.insert(value.value.clone());
-        }
+        Expr::Quoted(_) => {}
         Expr::Ident(value) => {
             columns.insert(value.value.clone());
         }
@@ -878,16 +884,6 @@ fn join_schema_for_editor(
     output
 }
 
-fn quote(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-    format!("\"{escaped}\"")
-}
-
 fn pipeline_stage_symbols(source: &str, pipeline: &Pipeline) -> Vec<EditorDocumentSymbol> {
     let mut symbols = Vec::new();
     if let PipelineStart::Load(load) = &pipeline.start {
@@ -1084,6 +1080,25 @@ fn scan_string(source: &str, start: usize) -> usize {
     pos
 }
 
+fn scan_backtick_column(source: &str, start: usize) -> usize {
+    let mut pos = start + 1;
+    let mut escaped = false;
+    while pos < source.len() {
+        let Some(ch) = source[pos..].chars().next() else {
+            break;
+        };
+        pos += ch.len_utf8();
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '`' {
+            break;
+        }
+    }
+    pos
+}
+
 fn scan_number(source: &str, start: usize) -> usize {
     let mut pos = scan_ascii_digits(source, start);
     if source[pos..].starts_with('.') {
@@ -1263,7 +1278,7 @@ fn column_completions(columns: &[String], inside_string: bool) -> Vec<EditorComp
             insert_text: if inside_string {
                 column.clone()
             } else {
-                quote(column)
+                format_column_reference(column)
             },
             detail: "column".to_string(),
             kind: CompletionKind::Column,
@@ -1330,7 +1345,41 @@ fn dedupe_completions(items: Vec<EditorCompletion>) -> Vec<EditorCompletion> {
 
 pub(crate) fn unquoted_text_at_span(source: &str, span: Span) -> Option<String> {
     let text = source.get(span.start..span.end)?;
-    Some(text.trim_matches('"').to_string())
+    if text.starts_with('`') && text.ends_with('`') && text.len() >= 2 {
+        return Some(unescape_backtick_column(text));
+    }
+    if text.starts_with('"') && text.ends_with('"') && text.len() >= 2 {
+        return Some(text.trim_matches('"').to_string());
+    }
+    Some(text.to_string())
+}
+
+fn unescape_backtick_column(text: &str) -> String {
+    let mut value = String::new();
+    let mut chars = text[1..text.len() - 1].chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(escaped) = chars.next() {
+                value.push(escaped);
+            }
+        } else {
+            value.push(ch);
+        }
+    }
+    value
+}
+
+fn format_column_reference(value: &str) -> String {
+    if is_simple_column_name(value) && !KEYWORDS.contains(&value) {
+        return value.to_string();
+    }
+    let escaped = value.replace('\\', "\\\\").replace('`', "\\`");
+    format!("`{escaped}`")
+}
+
+fn is_simple_column_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(is_ident_start) && chars.all(is_ident_char)
 }
 
 fn is_ident_char(ch: char) -> bool {
@@ -1381,14 +1430,14 @@ mod tests {
 
     #[test]
     fn diagnostics_map_byte_spans_to_utf16_ranges_after_non_ascii_text() {
-        let source = "load \"😀.csv\"\n  | select \"missing\"";
-        let start = source.find("\"missing\"").expect("diagnostic span");
+        let source = "load \"😀.csv\"\n  | select missing";
+        let start = source.find("missing").expect("diagnostic span");
         let diagnostics = diagnostics_for_editor(
             source,
             &[Diagnostic::error(
                 pdl_core::codes::E1005,
                 "unknown column `missing`",
-                Span::new(start, start + "\"missing\"".len()),
+                Span::new(start, start + "missing".len()),
             )],
         );
 
@@ -1399,10 +1448,10 @@ mod tests {
     #[test]
     fn host_schema_diagnostics_report_unknown_filter_columns() {
         let source = r#"load "sales.csv"
-  | filter "sttus" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age", count() as "orders"
-  | sort "total_revenue" desc
+  | filter sttus == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age), orders = count()
+  | sort total_revenue desc
   | limit 3"#;
 
         let schemas = [(
@@ -1425,7 +1474,7 @@ mod tests {
         assert_eq!(diagnostic.range.start.line, 1);
         assert_eq!(diagnostic.range.start.character, 11);
 
-        let corrected = source.replace("\"sttus\"", "\"status\"");
+        let corrected = source.replace("sttus", "status");
         let corrected_document = analyze_document_with_schemas(
             &corrected,
             Path::new("memory/main.pdl"),
@@ -1451,14 +1500,13 @@ mod tests {
 
     #[test]
     fn formats_pipeline_style() {
-        let source =
-            r#"load "sales.csv"|filter "status"=="completed"|agg sum("amount") as "total""#;
+        let source = r#"load "sales.csv"|filter status=="completed"|agg total = sum(amount)"#;
 
         assert_eq!(
             pdl_syntax::format_source(source).expect("formatted"),
             r#"load "sales.csv"
-  | filter "status" == "completed"
-  | agg sum("amount") as "total""#
+  | filter status == "completed"
+  | agg total = sum(amount)"#
         );
     }
 
@@ -1499,7 +1547,7 @@ load "sales.csv"
   load "customers.csv"
 
 load "sales.csv"
-  | join customers on "customer_id" kind "#;
+  | join customers on customer_id kind "#;
 
         let items = completions(source, None, position_for_byte_offset(source, source.len()));
 
@@ -1508,27 +1556,32 @@ load "sales.csv"
     }
 
     #[test]
-    fn semantic_string_tokens_use_source_offsets() {
+    fn semantic_tokens_use_source_offsets() {
         let source = r#"load "sales.csv"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age", count() as "orders"
-  | sort "total_revenue" desc
+  | filter status == "completed"
+  | group_by `group`
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age), orders = count()
+  | sort total_revenue desc
   | limit 3"#;
         let tokens = semantic_tokens(source);
 
-        for text in [
-            "\"status\"",
-            "\"region\"",
-            "\"customer_age\"",
-            "\"avg_age\"",
-            "\"orders\"",
-        ] {
+        for text in ["\"sales.csv\"", "\"completed\""] {
             let start = source.find(text).expect("sample string");
             let end = start + text.len();
             assert!(
                 tokens.iter().any(|token| {
                     token.token_type == SemanticTokenKind::String
+                        && token.range == range_for_span(source, Span::new(start, end))
+                }),
+                "missing intact semantic token for {text}"
+            );
+        }
+        for text in ["status", "`group`", "total_revenue"] {
+            let start = source.find(text).expect("sample variable");
+            let end = start + text.len();
+            assert!(
+                tokens.iter().any(|token| {
+                    token.token_type == SemanticTokenKind::Variable
                         && token.range == range_for_span(source, Span::new(start, end))
                 }),
                 "missing intact semantic token for {text}"
@@ -1540,14 +1593,14 @@ load "sales.csv"
     fn binding_document_symbol_selection_range_is_inside_full_range() {
         let source = r#"let cleaned =
   load "orders_raw.csv"
-  | filter lower(trim("status")) == "completed"
-  | mutate "net_amount" = "gross_amount" - coalesce("discount", 0), "region_channel" = concat(upper(trim("region")), lit(":"), lower(trim("channel")))
-  | distinct "order_id"
+  | filter lower(trim(status)) == "completed"
+  | mutate net_amount = gross_amount - coalesce(discount, 0), region_channel = concat(upper(trim(region)), ":", lower(trim(channel)))
+  | distinct order_id
 
 cleaned
-  | group_by "region_channel"
-  | agg count() as "orders", sum("net_amount") as "revenue"
-  | sort "revenue" desc"#;
+  | group_by region_channel
+  | agg orders = count(), revenue = sum(net_amount)
+  | sort revenue desc"#;
 
         let symbols = document_symbols(source);
         let cleaned = symbols

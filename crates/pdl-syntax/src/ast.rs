@@ -344,10 +344,10 @@ mod tests {
         let parse = crate::parse(
             r#"let clean =
   load "sales.csv"
-  | filter "amount" > 0
+  | filter amount > 0
 
 clean
-  | select "region""#,
+  | select region"#,
         );
         let root = Root::cast(parse.syntax).expect("root cst view");
         let binding = root.binding_decls().into_iter().next().expect("binding");

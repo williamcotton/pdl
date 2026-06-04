@@ -1,9 +1,9 @@
 load "sales.csv"
-  | filter "status" == "completed"
-  | group_by "region"
+  | filter status == "completed"
+  | group_by region
   | agg
-      sum("amount") as "total_revenue",
-      mean("customer_age") as "avg_age",
-      count() as "orders"
-  | sort "total_revenue" desc
+      total_revenue = sum(amount),
+      avg_age = mean(customer_age),
+      orders = count()
+  | sort total_revenue desc
   | limit 3

@@ -10,6 +10,7 @@ pub enum TokenKind {
     BlockComment,
     Ident(String),
     String(String),
+    BacktickColumn(String),
     Number(String),
     Pipe,
     Comma,
@@ -40,6 +41,7 @@ impl TokenKind {
             TokenKind::BlockComment => SyntaxKind::BlockComment,
             TokenKind::Ident(_) => SyntaxKind::Ident,
             TokenKind::String(_) => SyntaxKind::String,
+            TokenKind::BacktickColumn(_) => SyntaxKind::BacktickColumn,
             TokenKind::Number(_) => SyntaxKind::Number,
             TokenKind::Pipe => SyntaxKind::Pipe,
             TokenKind::Comma => SyntaxKind::Comma,
@@ -151,6 +153,22 @@ fn lex(source: &str) -> LexResult {
                 &mut parse_tokens,
                 &mut builder,
                 TokenKind::String(value),
+                span,
+                text,
+                true,
+            );
+            pos = end;
+        } else if ch == '`' {
+            let (end, _terminated) = scan_backtick_column(source, pos);
+            let span = Span::new(pos, end);
+            let text = &source[pos..end];
+            let (value, column_diagnostics) = parse_backtick_column(text, span);
+            diagnostics.extend(column_diagnostics);
+            push_token(
+                &mut tokens,
+                &mut parse_tokens,
+                &mut builder,
+                TokenKind::BacktickColumn(value),
                 span,
                 text,
                 true,
@@ -297,6 +315,25 @@ fn scan_quoted(source: &str, start: usize) -> (usize, bool) {
     (source.len(), false)
 }
 
+fn scan_backtick_column(source: &str, start: usize) -> (usize, bool) {
+    let mut pos = start + 1;
+    let mut escaped = false;
+    while pos < source.len() {
+        let Some(ch) = source[pos..].chars().next() else {
+            break;
+        };
+        pos += ch.len_utf8();
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '`' {
+            return (pos, true);
+        }
+    }
+    (source.len(), false)
+}
+
 fn scan_number(source: &str, start: usize) -> usize {
     let mut pos = scan_ascii_digits(source, start);
     if source[pos..].starts_with('.') {
@@ -411,6 +448,48 @@ fn parse_quoted_token(text: &str, span: Span) -> (String, Vec<Diagnostic>) {
                     Span::new(escape_start, span.end.min(escape_start + 8)),
                 )),
             },
+            _ => diagnostics.push(Diagnostic::error(
+                codes::E0004,
+                format!("invalid escape sequence `\\{escaped}`"),
+                Span::new(escape_start, escape_start + 1 + escaped.len_utf8()),
+            )),
+        }
+    }
+
+    (value, diagnostics)
+}
+
+fn parse_backtick_column(text: &str, span: Span) -> (String, Vec<Diagnostic>) {
+    let mut diagnostics = Vec::new();
+    if !text.ends_with('`') || text.len() < 2 {
+        diagnostics.push(Diagnostic::error(
+            codes::E0002,
+            "unterminated backtick column reference",
+            span,
+        ));
+        return (text.trim_matches('`').to_string(), diagnostics);
+    }
+
+    let mut value = String::new();
+    let mut chars = text[1..text.len() - 1].char_indices();
+    while let Some((offset, ch)) = chars.next() {
+        if ch != '\\' {
+            value.push(ch);
+            continue;
+        }
+
+        let escape_start = span.start + 1 + offset;
+        let Some((_, escaped)) = chars.next() else {
+            diagnostics.push(Diagnostic::error(
+                codes::E0004,
+                "invalid escape sequence",
+                Span::new(escape_start, span.end),
+            ));
+            break;
+        };
+        match escaped {
+            '`' => value.push('`'),
+            '\\' => value.push('\\'),
             _ => diagnostics.push(Diagnostic::error(
                 codes::E0004,
                 format!("invalid escape sequence `\\{escaped}`"),

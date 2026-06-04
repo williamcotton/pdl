@@ -420,10 +420,10 @@ mod tests {
     #[test]
     fn check_json_with_schemas_uses_shared_schema_aware_editor_diagnostics() {
         let source = r#"load "sales.csv"
-  | filter "sttus" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age", count() as "orders"
-  | sort "total_revenue" desc
+  | filter sttus == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age), orders = count()
+  | sort total_revenue desc
   | limit 3"#;
         let schemas = serde_json::json!([
             {
@@ -446,7 +446,7 @@ mod tests {
             "unknown column `sttus`"
         );
 
-        let corrected = source.replace("\"sttus\"", "\"status\"");
+        let corrected = source.replace("sttus", "status");
         let corrected_payload: serde_json::Value = serde_json::from_str(&check_json_with_schemas(
             &corrected,
             "memory/main.pdl",
@@ -464,12 +464,11 @@ mod tests {
     #[test]
     fn format_json_uses_shared_formatter() {
         let payload: serde_json::Value =
-            serde_json::from_str(&format_json(r#"load "sales.csv"|select "region""#))
-                .expect("json");
+            serde_json::from_str(&format_json(r#"load "sales.csv"|select region"#)).expect("json");
 
         assert_eq!(
             payload["formatted"],
-            "load \"sales.csv\"\n  | select \"region\""
+            "load \"sales.csv\"\n  | select region"
         );
     }
 
@@ -477,10 +476,10 @@ mod tests {
     fn run_json_executes_against_in_memory_csv_bytes() {
         let request = serde_json::json!({
             "source": r#"load "sales.csv"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue"
-  | sort "total_revenue" desc
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount)
+  | sort total_revenue desc
   | limit 2"#,
             "files": {
                 "sales.csv": "region,status,amount\nNorth,completed,120\nSouth,pending,75\nWest,completed,200\n"
@@ -503,9 +502,9 @@ mod tests {
     fn run_json_executes_against_in_memory_json_lines_bytes() {
         let request = serde_json::json!({
             "source": r#"load "sales.jsonl"
-  | filter "status" == "completed"
-  | select "region", "amount"
-  | sort "amount" desc"#,
+  | filter status == "completed"
+  | select region, amount
+  | sort amount desc"#,
             "files": {
                 "sales.jsonl": "{\"region\":\"North\",\"status\":\"completed\",\"amount\":120}\n{\"region\":\"South\",\"status\":\"pending\",\"amount\":75}\n{\"region\":\"West\",\"status\":\"completed\",\"amount\":200}\n"
             },
@@ -531,11 +530,11 @@ mod tests {
 
 output west =
   sales
-  | filter "region" == "West"
+  | filter region == "West"
 
 output totals =
   sales
-  | agg sum("amount") as "total""#,
+  | agg total = sum(amount)"#,
             "files": {
                 "sales.csv": "region,amount\nWest,30\nEast,10\n"
             },
@@ -555,12 +554,12 @@ output totals =
 
 output west =
   sales
-  | filter "region" == "West"
+  | filter region == "West"
   | save "west.csv"
 
 output totals =
   sales
-  | agg sum("amount") as "total"
+  | agg total = sum(amount)
   | save "totals.csv""#,
             "files": {
                 "sales.csv": "region,amount\nWest,30\nEast,10\n"
@@ -610,7 +609,7 @@ output totals =
     #[test]
     fn editor_service_json_uses_in_memory_csv_schema_for_diagnostics() {
         let request = serde_json::json!({
-            "source": r#"load "sales.csv" | filter "sttus" == "completed""#,
+            "source": r#"load "sales.csv" | filter sttus == "completed""#,
             "files": {
                 "sales.csv": "region,status,amount\nNorth,completed,120\n"
             },
@@ -631,7 +630,7 @@ output totals =
     #[test]
     fn editor_service_json_uses_in_memory_csv_bytes_for_hover_preview() {
         let request = serde_json::json!({
-            "source": "load \"sales.csv\"\n  | group_by \"region\"",
+            "source": "load \"sales.csv\"\n  | group_by region",
             "files": {
                 "sales.csv": "region,status,amount\nNorth,completed,120\nSouth,pending,75\nWest,completed,200\n"
             },

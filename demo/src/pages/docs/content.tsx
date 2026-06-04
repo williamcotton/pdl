@@ -78,10 +78,10 @@ export const DOC_TOPICS: DocTopic[] = [
           id: "overview-top-regions",
           files: SALES_FILES,
           source: `load "sales.csv"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", count() as "orders"
-  | sort "total_revenue" desc
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), orders = count()
+  | sort total_revenue desc
 `,
         },
       },
@@ -123,9 +123,9 @@ export const DOC_TOPICS: DocTopic[] = [
           id: "loading-csv",
           files: SALES_FILES,
           source: `load "sales.csv"
-  | filter "status" == "completed"
-  | select "region", "customer_id", "amount"
-  | sort "amount" desc
+  | filter status == "completed"
+  | select region, customer_id, amount
+  | sort amount desc
 `,
         },
       },
@@ -142,9 +142,9 @@ export const DOC_TOPICS: DocTopic[] = [
           id: "loading-jsonl",
           files: JSONL_FILES,
           source: `load "orders.jsonl"
-  | filter "status" == "completed"
-  | select "order_id", "region", "amount"
-  | sort "order_id"
+  | filter status == "completed"
+  | select order_id, region, amount
+  | sort order_id
 `,
           stdoutFormat: "jsonl",
         },
@@ -176,14 +176,14 @@ export const DOC_TOPICS: DocTopic[] = [
           id: "transform-clean-orders",
           files: ORDERS_FILES,
           source: `load "orders_raw.csv"
-  | filter lower(trim("status")) == "completed"
+  | filter lower(trim(status)) == "completed"
   | mutate
-      "net_amount" = "gross_amount" - coalesce("discount", 0),
-      "region_channel" = concat(upper(trim("region")), lit(":"), lower(trim("channel"))),
-      "priority" = if_else("gross_amount" >= 150, lit("high"), lit("standard"))
-  | distinct "order_id"
-  | select "order_id", "region_channel", "net_amount", "priority"
-  | sort "order_id"
+      net_amount = gross_amount - coalesce(discount, 0),
+      region_channel = concat(upper(trim(region)), ":", lower(trim(channel))),
+      priority = if_else(gross_amount >= 150, "high", "standard")
+  | distinct order_id
+  | select order_id, region_channel, net_amount, priority
+  | sort order_id
 `,
         },
       },
@@ -214,14 +214,14 @@ export const DOC_TOPICS: DocTopic[] = [
           files: CUSTOMER_FILES,
           source: `let customers =
   load "customers.csv"
-  | select "customer_id", "segment"
+  | select customer_id, segment
 
 load "sales.csv"
-  | filter "status" == "completed"
-  | join customers on "customer_id" kind left
-  | group_by "segment"
-  | agg sum("amount") as "revenue", count() as "orders"
-  | sort "revenue" desc
+  | filter status == "completed"
+  | join customers on customer_id kind left
+  | group_by segment
+  | agg revenue = sum(amount), orders = count()
+  | sort revenue desc
 `,
         },
       },
@@ -242,7 +242,7 @@ load "sales.csv"
 
 load "daily_orders_2026_02_01.csv"
   | union day2 by_name true distinct true
-  | sort "order_id"
+  | sort order_id
 `,
         },
       },
@@ -280,7 +280,7 @@ load "daily_orders_2026_02_01.csv"
                 function.
               </li>
               <li>
-                <Code>order_by "amount" desc</Code> tells the window how to rank the rows: largest sale
+                <Code>order_by amount desc</Code> tells the window how to rank the rows: largest sale
                 first.
               </li>
               <li>
@@ -288,7 +288,7 @@ load "daily_orders_2026_02_01.csv"
               </li>
             </ol>
             <p>
-              Notice the final <Code>sort "sale_rank"</Code>. The window's <Code>order_by</Code> controls
+              Notice the final <Code>sort sale_rank</Code>. The window's <Code>order_by</Code> controls
               the calculation, while a pipeline <Code>sort</Code> controls how the output is displayed.
             </p>
           </>
@@ -297,14 +297,14 @@ load "daily_orders_2026_02_01.csv"
           id: "windows-one-table-rank",
           files: SALES_FILES,
           source: `load "sales.csv"
-  | filter "status" == "completed"
+  | filter status == "completed"
   | mutate
-      "sale_rank" =
+      sale_rank =
         row_number() over (
-          order_by "amount" desc
+          order_by amount desc
         )
-  | select "region", "customer_id", "amount", "sale_rank"
-  | sort "sale_rank"
+  | select region, customer_id, amount, sale_rank
+  | sort sale_rank
 `,
         },
       },
@@ -323,7 +323,7 @@ load "daily_orders_2026_02_01.csv"
                 and so on.
               </li>
               <li>
-                Inside each customer partition, <Code>order_by "amount" desc</Code> puts that customer's
+                Inside each customer partition, <Code>order_by amount desc</Code> puts that customer's
                 largest completed sale first.
               </li>
               <li>
@@ -341,15 +341,15 @@ load "daily_orders_2026_02_01.csv"
           id: "windows-partitioned-rank",
           files: SALES_FILES,
           source: `load "sales.csv"
-  | filter "status" == "completed"
+  | filter status == "completed"
   | mutate
-      "customer_sale_number" =
+      customer_sale_number =
         row_number() over (
-          partition_by "customer_id"
-          order_by "amount" desc
+          partition_by customer_id
+          order_by amount desc
         )
-  | select "customer_id", "amount", "customer_sale_number"
-  | sort "customer_id", "customer_sale_number"
+  | select customer_id, amount, customer_sale_number
+  | sort customer_id, customer_sale_number
 `,
         },
       },
@@ -365,11 +365,11 @@ load "daily_orders_2026_02_01.csv"
             </p>
             <ol>
               <li>
-                <Code>sum("amount") over (partition_by "customer_id")</Code> gives each row that
+                <Code>sum(amount) over (partition_by customer_id)</Code> gives each row that
                 customer's total completed revenue.
               </li>
               <li>
-                <Code>sum("amount") over (partition_by "region")</Code> gives each row that region's total
+                <Code>sum(amount) over (partition_by region)</Code> gives each row that region's total
                 completed revenue.
               </li>
               <li>
@@ -387,23 +387,23 @@ load "daily_orders_2026_02_01.csv"
           id: "windows-partition-totals",
           files: SALES_FILES,
           source: `load "sales.csv"
-  | filter "status" == "completed"
+  | filter status == "completed"
   | mutate
-      "customer_revenue" =
-        sum("amount") over (
-          partition_by "customer_id"
+      customer_revenue =
+        sum(amount) over (
+          partition_by customer_id
         ),
-      "region_revenue" =
-        sum("amount") over (
-          partition_by "region"
+      region_revenue =
+        sum(amount) over (
+          partition_by region
         )
   | select
-      "region",
-      "customer_id",
-      "amount",
-      "customer_revenue",
-      "region_revenue"
-  | sort "region", "customer_id", "amount" desc
+      region,
+      customer_id,
+      amount,
+      customer_revenue,
+      region_revenue
+  | sort region, customer_id, amount desc
 `,
         },
       },
@@ -433,24 +433,24 @@ load "daily_orders_2026_02_01.csv"
           id: "windows-rank-derived-total",
           files: SALES_FILES,
           source: `load "sales.csv"
-  | filter "status" == "completed"
+  | filter status == "completed"
   | mutate
-      "region_revenue" =
-        sum("amount") over (
-          partition_by "region"
+      region_revenue =
+        sum(amount) over (
+          partition_by region
         )
   | mutate
-      "region_revenue_rank" =
+      region_revenue_rank =
         dense_rank() over (
-          order_by "region_revenue" desc
+          order_by region_revenue desc
         )
   | select
-      "region",
-      "customer_id",
-      "amount",
-      "region_revenue",
-      "region_revenue_rank"
-  | sort "region_revenue_rank", "customer_id", "amount" desc
+      region,
+      customer_id,
+      amount,
+      region_revenue,
+      region_revenue_rank
+  | sort region_revenue_rank, customer_id, amount desc
 `,
         },
       },
@@ -465,17 +465,17 @@ load "daily_orders_2026_02_01.csv"
             </p>
             <ol>
               <li>
-                <Code>partition_by "customer_id"</Code> keeps each customer's running total separate.
+                <Code>partition_by customer_id</Code> keeps each customer's running total separate.
               </li>
               <li>
-                <Code>order_by "amount" desc</Code> gives each customer a stable sequence.
+                <Code>order_by amount desc</Code> gives each customer a stable sequence.
               </li>
               <li>
                 <Code>rows between unbounded_preceding and current_row</Code> means "from the first row in
                 this ordered customer partition through this row."
               </li>
               <li>
-                <Code>lag("amount")</Code> uses the same partition and order, then reads the previous row's
+                <Code>lag(amount)</Code> uses the same partition and order, then reads the previous row's
                 amount.
               </li>
             </ol>
@@ -489,31 +489,31 @@ load "daily_orders_2026_02_01.csv"
           id: "windows-running-frames",
           files: SALES_FILES,
           source: `load "sales.csv"
-  | filter "status" == "completed"
+  | filter status == "completed"
   | mutate
-      "sale_rank" =
+      sale_rank =
         row_number() over (
-          partition_by "customer_id"
-          order_by "amount" desc
+          partition_by customer_id
+          order_by amount desc
         ),
-      "running_customer_revenue" =
-        sum("amount") over (
-          partition_by "customer_id"
-          order_by "amount" desc
+      running_customer_revenue =
+        sum(amount) over (
+          partition_by customer_id
+          order_by amount desc
           rows between unbounded_preceding and current_row
         ),
-      "previous_sale_amount" =
-        lag("amount") over (
-          partition_by "customer_id"
-          order_by "amount" desc
+      previous_sale_amount =
+        lag(amount) over (
+          partition_by customer_id
+          order_by amount desc
         )
   | select
-      "customer_id",
-      "amount",
-      "sale_rank",
-      "running_customer_revenue",
-      "previous_sale_amount"
-  | sort "customer_id", "sale_rank"
+      customer_id,
+      amount,
+      sale_rank,
+      running_customer_revenue,
+      previous_sale_amount
+  | sort customer_id, sale_rank
 `,
         },
       },

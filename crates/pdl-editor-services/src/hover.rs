@@ -663,7 +663,7 @@ fn apply_stage_to_preview(preview: &mut TablePreview, stage: &Stage) {
                     "min" | "max" => item
                         .args
                         .first()
-                        .and_then(quoted_expr_value)
+                        .and_then(column_expr_value)
                         .and_then(|name| preview.column(name))
                         .map_or(LogicalType::Unknown, |column| column.logical_type.clone()),
                     _ => LogicalType::Unknown,
@@ -705,9 +705,9 @@ fn apply_stage_to_preview(preview: &mut TablePreview, stage: &Stage) {
     }
 }
 
-fn quoted_expr_value(expr: &Expr) -> Option<&str> {
+fn column_expr_value(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Quoted(value) => Some(&value.value),
+        Expr::Ident(value) => Some(&value.value),
         _ => None,
     }
 }
@@ -840,7 +840,7 @@ fn expr_function_spans(expr: &Expr) -> Vec<(String, Span)> {
 
 fn expr_column_spans(expr: &Expr) -> Vec<Span> {
     match expr {
-        Expr::Quoted(value) => vec![value.span],
+        Expr::Ident(value) => vec![value.span],
         Expr::Call { args, .. } => args.iter().flat_map(expr_column_spans).collect(),
         Expr::Window { args, spec, .. } => {
             let mut spans = args.iter().flat_map(expr_column_spans).collect::<Vec<_>>();
@@ -854,7 +854,7 @@ fn expr_column_spans(expr: &Expr) -> Vec<Span> {
             spans.extend(expr_column_spans(right));
             spans
         }
-        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => Vec::new(),
+        Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) => Vec::new(),
     }
 }
 
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn source_hover_uses_driver_csv_preview() {
-        let source = r#"load "sales.csv" | group_by "region""#;
+        let source = r#"load "sales.csv" | group_by region"#;
         let io = InMemoryDriverIo::default().with_file_bytes(
             "memory/sales.csv",
             "region,status,amount\nNorth,completed,120\nSouth,pending,75\nWest,completed,200\n",
@@ -945,7 +945,7 @@ mod tests {
     #[test]
     fn column_hover_uses_driver_csv_preview() {
         let source = r#"load "sales.csv"
-  | group_by "region""#;
+  | group_by region"#;
         let io = InMemoryDriverIo::default().with_file_bytes(
             "memory/sales.csv",
             "region,status,amount\nNorth,completed,120\nSouth,pending,75\nWest,completed,200\n",
@@ -973,7 +973,7 @@ mod tests {
         .expect("write sales csv");
         let program_path = root.join("main.pdl");
         let source = r#"load "sales.csv"
-  | group_by "region""#;
+  | group_by region"#;
 
         let hover = hover(
             source,

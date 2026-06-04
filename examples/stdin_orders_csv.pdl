@@ -1,4 +1,4 @@
 load stdin format "csv"
-  | filter "status" == "completed"
-  | select "order_id", "region", "amount"
-  | sort "order_id"
+  | filter status == "completed"
+  | select order_id, region, amount
+  | sort order_id

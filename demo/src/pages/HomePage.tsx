@@ -23,10 +23,10 @@ East,completed,90,28,C005
 `;
 
 const STARTER_SOURCE = `load "sales.csv"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", count() as "orders"
-  | sort "total_revenue" desc
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), orders = count()
+  | sort total_revenue desc
 `;
 
 const HOMEBREW_INSTALL_COMMANDS = `brew tap williamcotton/pdl

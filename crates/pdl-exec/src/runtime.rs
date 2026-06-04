@@ -301,7 +301,7 @@ impl Runtime<'_> {
                 StageIr::Unsupported { name, span } => {
                     return Err(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{name}` is deferred in 0.25.0"),
+                        format!("stage `{name}` is deferred in 0.26.0"),
                         *span,
                     ));
                 }
@@ -875,7 +875,7 @@ fn resolve_input_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1215,
-                format!("format `{format}` is not supported in 0.25.0"),
+                format!("format `{format}` is not supported in 0.26.0"),
                 span,
             )
         });
@@ -885,7 +885,7 @@ fn resolve_input_format(
             return DataFormat::from_name(format).ok_or_else(|| {
                 Diagnostic::error(
                     codes::E1215,
-                    format!("stdin format `{format}` is not supported in 0.25.0"),
+                    format!("stdin format `{format}` is not supported in 0.26.0"),
                     input.span,
                 )
             });
@@ -909,7 +909,7 @@ fn resolve_output_format(
         return DataFormat::from_name(format).ok_or_else(|| {
             Diagnostic::error(
                 codes::E1705,
-                format!("output format `{format}` is not supported in 0.25.0"),
+                format!("output format `{format}` is not supported in 0.26.0"),
                 span,
             )
         });
@@ -1181,26 +1181,13 @@ fn eval_row_expr(
     role: ExprRole,
     window_row_index: Option<usize>,
 ) -> Result<Value, Diagnostic> {
+    let _ = role;
     match expr {
-        ExprIr::Quoted { value, span } => match role {
-            ExprRole::ComparisonLeft => column_value(table, row, value, *span),
-            ExprRole::PredicateRoot | ExprRole::Default => {
-                if table.column_index(value).is_some() {
-                    column_value(table, row, value, *span)
-                } else {
-                    Ok(Value::String(value.clone()))
-                }
-            }
-            ExprRole::ComparisonRight => Ok(Value::String(value.clone())),
-        },
+        ExprIr::Quoted { value, .. } => Ok(Value::String(value.clone())),
         ExprIr::Number { value, .. } => Ok(Value::Number(*value)),
         ExprIr::Bool { value, .. } => Ok(Value::Bool(*value)),
         ExprIr::Null { .. } => Ok(Value::Null),
-        ExprIr::Ident { value, span } => Err(Diagnostic::error(
-            codes::E0008,
-            format!("unexpected bare identifier `{value}` in expression"),
-            *span,
-        )),
+        ExprIr::Ident { value, span } => column_value(table, row, value, *span),
         ExprIr::Call { name, args, span } => {
             eval_call(name, args, table, row, *span, window_row_index)
         }
@@ -1257,26 +1244,6 @@ fn eval_call(
     window_row_index: Option<usize>,
 ) -> Result<Value, Diagnostic> {
     match name {
-        "col" => match args {
-            [ExprIr::Quoted {
-                value: column,
-                span,
-            }] => column_value(table, row, column, *span),
-            _ => Err(Diagnostic::error(
-                codes::E1402,
-                "col() expects one quoted column name",
-                span,
-            )),
-        },
-        "lit" => match args {
-            [ExprIr::Quoted { value, .. }] => Ok(Value::String(value.clone())),
-            [expr] => eval_row_expr(expr, table, row, ExprRole::Default, window_row_index),
-            _ => Err(Diagnostic::error(
-                codes::E1402,
-                "lit() expects one argument",
-                span,
-            )),
-        },
         "is_null" => match args {
             [expr] => Ok(Value::Bool(matches!(
                 eval_row_expr(expr, table, row, ExprRole::Default, window_row_index)?,
@@ -2080,29 +2047,7 @@ fn aggregate_arg_values(
 }
 
 fn eval_aggregate_expr(expr: &ExprIr, table: &Table, row: &Row) -> Result<Value, Diagnostic> {
-    match expr {
-        ExprIr::Quoted { value, span } => column_value(table, row, value, *span),
-        ExprIr::Call { name, args, span } if name == "lit" => match args.as_slice() {
-            [ExprIr::Quoted { value, .. }] => Ok(Value::String(value.clone())),
-            _ => Err(Diagnostic::error(
-                codes::E1402,
-                "lit() expects one quoted value",
-                *span,
-            )),
-        },
-        ExprIr::Call { name, args, span } if name == "col" => match args.as_slice() {
-            [ExprIr::Quoted {
-                value: column,
-                span,
-            }] => column_value(table, row, column, *span),
-            _ => Err(Diagnostic::error(
-                codes::E1402,
-                "col() expects one quoted column name",
-                *span,
-            )),
-        },
-        _ => eval_row_expr(expr, table, row, ExprRole::Default, None),
-    }
+    eval_row_expr(expr, table, row, ExprRole::Default, None)
 }
 
 fn is_comparison_op(op: BinaryOpIr) -> bool {
@@ -2130,8 +2075,8 @@ mod tests {
         let prepared = prepare_source_for_run_with_io(
             "memory/main.pdl",
             r#"load stdin format "csv"
-  | filter "status" == "completed"
-  | select "amount""#,
+  | filter status == "completed"
+  | select amount"#,
             None,
             &io,
         );
@@ -2172,7 +2117,7 @@ mod tests {
         let prepared = prepare_source_for_run_with_io(
             "memory/main.pdl",
             r#"load stdin
-  | sort "amount" desc"#,
+  | sort amount desc"#,
             None,
             &io,
         );
@@ -2226,7 +2171,7 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "sales.csv"
-  | sort "amount" desc"#,
+  | sort amount desc"#,
             &io,
         );
 
@@ -2311,11 +2256,11 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "orders.csv"
-  | filter "status" == "completed"
-  | mutate "net_amount" = "gross" - "discount", "region_channel" = concat(upper("region"), lit(":"), lower("channel")), "priority" = if_else("gross" >= 150, lit("high"), lit("standard"))
-  | distinct "order_id"
-  | select "order_id", "region_channel", "net_amount", "priority"
-  | sort "order_id""#,
+  | filter status == "completed"
+  | mutate net_amount = gross - discount, region_channel = concat(upper(region), ":", lower(channel)), priority = if_else(gross >= 150, "high", "standard")
+  | distinct order_id
+  | select order_id, region_channel, net_amount, priority
+  | sort order_id"#,
             &io,
         );
 
@@ -2345,10 +2290,10 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "events.csv"
-  | group_by "group"
-  | agg count_distinct("user") as "users", sum("amount") as "total"
-  | mutate "rounded" = round("total", 2), "nearest" = round("total")
-  | sort "group""#,
+  | group_by `group`
+  | agg users = count_distinct(user), total = sum(amount)
+  | mutate rounded = round(total, 2), nearest = round(total)
+  | sort `group`"#,
             &io,
         );
 
@@ -2376,8 +2321,8 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "values.csv"
-  | mutate "rounded" = round("value", 2)
-  | sort "id""#,
+  | mutate rounded = round(value, 2)
+  | sort id"#,
             &io,
         );
 
@@ -2404,7 +2349,7 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "values.csv"
-  | mutate "rounded" = round("value", 13)"#,
+  | mutate rounded = round(value, 13)"#,
             &io,
         );
         let diagnostics = prepared.diagnostics();
@@ -2427,7 +2372,7 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "wide.csv"
-  | pivot_longer "Share of rides", "Share of revenue" names_to "metric" values_to "share""#,
+  | pivot_longer `Share of rides`, `Share of revenue` names_to metric values_to share"#,
             &io,
         );
 
@@ -2457,7 +2402,7 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "daily.csv"
-  | complete "trip_date", "rider_type" fill "trips" = 0, "revenue" = 0"#,
+  | complete trip_date, rider_type fill trips = 0, revenue = 0"#,
             &io,
         );
 
@@ -2487,7 +2432,7 @@ mod tests {
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "daily.csv"
-  | complete "trip_date", "rider_type" fill "trips" = 0"#,
+  | complete trip_date, rider_type fill trips = 0"#,
             &io,
         );
 
@@ -2519,12 +2464,12 @@ mod tests {
 
 output west =
   sales
-  | filter "region" == "West"
+  | filter region == "West"
   | save "west.csv"
 
 output totals =
   sales
-  | agg sum("amount") as "total"
+  | agg total = sum(amount)
   | save "totals.csv""#,
             &io,
         );
@@ -2597,45 +2542,45 @@ output two =
             "memory/main.pdl",
             r#"let cleaned =
   load "trips.csv"
-  | filter "trip_status" == "valid"
-  | mutate "revenue" = round("fare" + "tip", 2)
+  | filter trip_status == "valid"
+  | mutate revenue = round(fare + tip, 2)
 
 output daily_rider_trips =
   cleaned
-  | group_by "trip_date", "rider_type"
-  | agg count() as "trips", sum("revenue") as "revenue"
-  | complete "trip_date", "rider_type" fill "trips" = 0, "revenue" = 0
-  | sort "trip_date", "rider_type"
+  | group_by trip_date, rider_type
+  | agg trips = count(), revenue = sum(revenue)
+  | complete trip_date, rider_type fill trips = 0, revenue = 0
+  | sort trip_date, rider_type
   | save "daily_rider_trips.csv"
 
 output valid_trips =
   cleaned
-  | select "trip_id", "trip_date", "rider_type", "weather", "dock_id", "revenue"
-  | sort "trip_id"
+  | select trip_id, trip_date, rider_type, weather, dock_id, revenue
+  | sort trip_id
   | save "valid_trips.csv"
 
 output revenue_inversion =
   cleaned
-  | group_by "rider_type"
-  | agg count() as "trips", sum("revenue") as "revenue"
-  | mutate "Share of rides" = round("trips", 2), "Share of revenue" = round("revenue", 2)
-  | select "rider_type", "Share of rides", "Share of revenue"
-  | pivot_longer "Share of rides", "Share of revenue" names_to "metric" values_to "value"
+  | group_by rider_type
+  | agg trips = count(), revenue = sum(revenue)
+  | mutate `Share of rides` = round(trips, 2), `Share of revenue` = round(revenue, 2)
+  | select rider_type, `Share of rides`, `Share of revenue`
+  | pivot_longer `Share of rides`, `Share of revenue` names_to metric values_to value
   | save "revenue_inversion.csv"
 
 output weather_split =
   cleaned
-  | group_by "weather", "rider_type"
-  | agg count() as "trips"
-  | sort "weather", "rider_type"
+  | group_by weather, rider_type
+  | agg trips = count()
+  | sort weather, rider_type
   | save "weather_split.csv"
 
 output dock_priority =
   cleaned
-  | group_by "dock_id"
-  | agg count() as "trips", count_distinct("bike_id") as "bikes", sum("revenue") as "revenue"
-  | mutate "revenue" = round("revenue", 2)
-  | sort "dock_id"
+  | group_by dock_id
+  | agg trips = count(), bikes = count_distinct(bike_id), revenue = sum(revenue)
+  | mutate revenue = round(revenue, 2)
+  | sort dock_id
   | save "dock_priority.csv""#,
             &io,
         );
@@ -2709,8 +2654,8 @@ output dock_priority =
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "orders.csv"
-  | mutate "customer_row" = row_number() over (partition_by "customer_id" order_by "order_date"), "customer_running_amount" = sum("amount") over (partition_by "customer_id" order_by "order_date" rows between unbounded_preceding and current_row), "previous_amount" = lag("amount") over (partition_by "customer_id" order_by "order_date"), "region_amount_rank" = dense_rank() over (partition_by "region" order_by "amount" desc)
-  | select "order_id", "customer_id", "amount", "customer_row", "customer_running_amount", "previous_amount", "region_amount_rank""#,
+  | mutate customer_row = row_number() over (partition_by customer_id order_by order_date), customer_running_amount = sum(amount) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row), previous_amount = lag(amount) over (partition_by customer_id order_by order_date), region_amount_rank = dense_rank() over (partition_by region order_by amount desc)
+  | select order_id, customer_id, amount, customer_row, customer_running_amount, previous_amount, region_amount_rank"#,
             &io,
         );
 
@@ -2740,8 +2685,8 @@ output dock_priority =
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "orders.csv"
-  | mutate "region_count" = count() over (partition_by "region"), "region_top_order" = first_value("order_id") over (partition_by "region" order_by "amount" desc), "region_low_order" = last_value("order_id") over (partition_by "region" order_by "amount" desc rows between unbounded_preceding and unbounded_following), "next_amount" = lead("amount", 1, lit("none")) over (partition_by "customer_id" order_by "order_date"), "region_percent_rank" = percent_rank() over (partition_by "region" order_by "amount" desc)
-  | select "order_id", "region_count", "region_top_order", "region_low_order", "next_amount", "region_percent_rank""#,
+  | mutate region_count = count() over (partition_by region), region_top_order = first_value(order_id) over (partition_by region order_by amount desc), region_low_order = last_value(order_id) over (partition_by region order_by amount desc rows between unbounded_preceding and unbounded_following), next_amount = lead(amount, 1, "none") over (partition_by customer_id order_by order_date), region_percent_rank = percent_rank() over (partition_by region order_by amount desc)
+  | select order_id, region_count, region_top_order, region_low_order, next_amount, region_percent_rank"#,
             &io,
         );
 
@@ -2779,9 +2724,9 @@ output dock_priority =
   load "customers.csv"
 
 load "sales.csv"
-  | join customers on "customer_id" kind left
-  | select "sale_id", "customer_id", "segment", "segment_right"
-  | sort "sale_id""#,
+  | join customers on customer_id kind left
+  | select sale_id, customer_id, segment, segment_right
+  | sort sale_id"#,
             &io,
         );
 
@@ -2816,7 +2761,7 @@ load "sales.csv"
   load "right.csv"
 
 load "left.csv"
-  | join right_side on "id" kind full"#,
+  | join right_side on id kind full"#,
             &io,
         );
 
@@ -2855,7 +2800,7 @@ load "left.csv"
 
 load "day1.csv"
   | union day2 by_name true distinct true
-  | sort "order_id""#,
+  | sort order_id"#,
             &io,
         );
 
@@ -2887,7 +2832,7 @@ load "day1.csv"
   load "right.csv"
 
 load "left.csv"
-  | join right_side on "id""#,
+  | join right_side on id"#,
             &io,
         );
 

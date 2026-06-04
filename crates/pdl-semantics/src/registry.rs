@@ -50,7 +50,7 @@ pub const STAGES: &[StageInfo] = &[
     },
     StageInfo {
         name: "select",
-        documentation: "Keep and order columns, optionally assigning aliases.",
+        documentation: "Keep and order columns, optionally assigning output names.",
         can_start_pipeline: false,
         implemented: true,
     },
@@ -62,7 +62,7 @@ pub const STAGES: &[StageInfo] = &[
     },
     StageInfo {
         name: "rename",
-        documentation: "Rename one or more columns with `as`.",
+        documentation: "Rename one or more columns with assignment-form items.",
         can_start_pipeline: false,
         implemented: true,
     },
@@ -138,22 +138,6 @@ pub const STAGES: &[StageInfo] = &[
 ];
 
 pub const SCALAR_FUNCTIONS: &[FunctionInfo] = &[
-    FunctionInfo {
-        name: "col",
-        documentation: "`col(\"name\")`: force a quoted value to resolve as a column.",
-        kind: FunctionKind::Scalar,
-        min_args: 1,
-        max_args: Some(1),
-        expected_arity: "one quoted column name",
-    },
-    FunctionInfo {
-        name: "lit",
-        documentation: "`lit(value)`: force a value to be interpreted as a literal.",
-        kind: FunctionKind::Scalar,
-        min_args: 1,
-        max_args: Some(1),
-        expected_arity: "one argument",
-    },
     FunctionInfo {
         name: "is_null",
         documentation: "`is_null(value)`: true when the value is null.",
@@ -468,7 +452,6 @@ pub const KEYWORDS: &[&str] = &[
     "complete",
     "let",
     "output",
-    "as",
     "on",
     "kind",
     "by_name",

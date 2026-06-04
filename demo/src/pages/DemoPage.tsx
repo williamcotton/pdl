@@ -111,13 +111,13 @@ const PRESETS: PipelinePreset[] = [
     dataset: "sales",
     summary: "Filter, aggregate, sort",
     source: `load "sales.csv"
-  | filter "status" == "completed"
-  | group_by "region"
+  | filter status == "completed"
+  | group_by region
   | agg
-      sum("amount") as "total_revenue",
-      mean("customer_age") as "avg_age",
-      count() as "orders"
-  | sort "total_revenue" desc
+      total_revenue = sum(amount),
+      avg_age = mean(customer_age),
+      orders = count()
+  | sort total_revenue desc
   | limit 3
 `,
   },
@@ -128,14 +128,14 @@ const PRESETS: PipelinePreset[] = [
     summary: "Binding, join, aggregate",
     source: `let customers =
   load "customers.csv"
-  | select "customer_id", "segment"
+  | select customer_id, segment
 
 load "sales.csv"
-  | filter "status" == "completed"
-  | join customers on "customer_id" kind left
-  | group_by "segment"
-  | agg sum("amount") as "revenue", count() as "orders"
-  | sort "revenue" desc
+  | filter status == "completed"
+  | join customers on customer_id kind left
+  | group_by segment
+  | agg revenue = sum(amount), orders = count()
+  | sort revenue desc
 `,
   },
   {
@@ -144,14 +144,14 @@ load "sales.csv"
     dataset: "orders",
     summary: "String cleanup, mutate",
     source: `load "orders_raw.csv"
-  | filter lower(trim("status")) == "completed"
+  | filter lower(trim(status)) == "completed"
   | mutate
-      "net_amount" = "gross_amount" - coalesce("discount", 0),
-      "region_channel" = concat(upper(trim("region")), lit(":"), lower(trim("channel"))),
-      "priority" = if_else("gross_amount" >= 150, lit("high"), lit("standard"))
-  | distinct "order_id"
-  | select "order_id", "region_channel", "net_amount", "priority"
-  | sort "order_id"
+      net_amount = gross_amount - coalesce(discount, 0),
+      region_channel = concat(upper(trim(region)), ":", lower(trim(channel))),
+      priority = if_else(gross_amount >= 150, "high", "standard")
+  | distinct order_id
+  | select order_id, region_channel, net_amount, priority
+  | sort order_id
 `,
   },
   {
@@ -161,16 +161,16 @@ load "sales.csv"
     summary: "Reusable cleanup binding",
     source: `let cleaned =
   load "orders_raw.csv"
-  | filter lower(trim("status")) == "completed"
+  | filter lower(trim(status)) == "completed"
   | mutate
-      "net_amount" = "gross_amount" - coalesce("discount", 0),
-      "region_channel" = concat(upper(trim("region")), lit(":"), lower(trim("channel")))
-  | distinct "order_id"
+      net_amount = gross_amount - coalesce(discount, 0),
+      region_channel = concat(upper(trim(region)), ":", lower(trim(channel)))
+  | distinct order_id
 
 cleaned
-  | group_by "region_channel"
-  | agg count() as "orders", sum("net_amount") as "revenue"
-  | sort "revenue" desc
+  | group_by region_channel
+  | agg orders = count(), revenue = sum(net_amount)
+  | sort revenue desc
 `,
   },
   {
@@ -179,34 +179,34 @@ cleaned
     dataset: "sales",
     summary: "Row-preserving analytics",
     source: `load "sales.csv"
-  | filter "status" == "completed"
+  | filter status == "completed"
   | mutate
-      "customer_sale_number" =
+      customer_sale_number =
         row_number() over (
-          partition_by "customer_id"
-          order_by "amount" desc
+          partition_by customer_id
+          order_by amount desc
         ),
-      "customer_revenue" =
-        sum("amount") over (
-          partition_by "customer_id"
+      customer_revenue =
+        sum(amount) over (
+          partition_by customer_id
         ),
-      "region_revenue" =
-        sum("amount") over (
-          partition_by "region"
+      region_revenue =
+        sum(amount) over (
+          partition_by region
         )
   | mutate
-      "region_revenue_rank" =
+      region_revenue_rank =
         dense_rank() over (
-          order_by "region_revenue" desc
+          order_by region_revenue desc
         )
   | select
-      "region",
-      "customer_id",
-      "amount",
-      "customer_sale_number",
-      "customer_revenue",
-      "region_revenue_rank"
-  | sort "region_revenue_rank", "customer_id", "amount" desc
+      region,
+      customer_id,
+      amount,
+      customer_sale_number,
+      customer_revenue,
+      region_revenue_rank
+  | sort region_revenue_rank, customer_id, amount desc
 `,
   },
   {
@@ -219,7 +219,7 @@ cleaned
 
 load "daily_orders_2026_02_01.csv"
   | union day2 by_name true distinct true
-  | sort "order_id"
+  | sort order_id
 `,
   },
   {
@@ -229,9 +229,9 @@ load "daily_orders_2026_02_01.csv"
     summary: "JSONL input and output",
     stdoutFormat: "jsonl",
     source: `load "orders.jsonl"
-  | filter "status" == "completed"
-  | select "order_id", "region", "amount"
-  | sort "order_id"
+  | filter status == "completed"
+  | select order_id, region, amount
+  | sort order_id
 `,
   },
 ];

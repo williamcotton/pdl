@@ -1,4 +1,4 @@
 load "sales.csv"
-  | filter "status" == "completed"
-  | select "region", "amount"
-  | sort "amount" desc
+  | filter status == "completed"
+  | select region, amount
+  | sort amount desc

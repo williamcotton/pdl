@@ -63,11 +63,11 @@ fn format_pipeline_start(start: &PipelineStart) -> String {
     match start {
         PipelineStart::Load(load) => {
             let mut text = match &load.source {
-                SourceRef::Path(path) => format!("load {}", quote(&path.value)),
+                SourceRef::Path(path) => format!("load {}", format_string_literal(&path.value)),
                 SourceRef::Stdin(_) => "load stdin".to_string(),
             };
             if let Some(format) = &load.format {
-                text.push_str(&format!(" format {}", quote(&format.value)));
+                text.push_str(&format!(" format {}", format_string_literal(&format.value)));
             }
             text
         }
@@ -79,16 +79,7 @@ fn format_stage_lines(stage: &Stage, pipe_indent: &str) -> Vec<String> {
     let inline = format_stage_inline(stage);
     match stage {
         Stage::Select { items, .. } if should_multiline_item_stage(&inline, items.len()) => {
-            let items = items
-                .iter()
-                .map(|item| {
-                    let mut text = quote(&item.column.value);
-                    if let Some(alias) = &item.alias {
-                        text.push_str(&format!(" as {}", quote(&alias.value)));
-                    }
-                    text
-                })
-                .collect::<Vec<_>>();
+            let items = items.iter().map(format_select_item).collect::<Vec<_>>();
             format_item_stage_lines("select", items, pipe_indent)
         }
         Stage::Drop { columns, .. } if should_multiline_item_stage(&inline, columns.len()) => {
@@ -97,7 +88,13 @@ fn format_stage_lines(stage: &Stage, pipe_indent: &str) -> Vec<String> {
         Stage::Rename { items, .. } if should_multiline_item_stage(&inline, items.len()) => {
             let items = items
                 .iter()
-                .map(|item| format!("{} as {}", quote(&item.old.value), quote(&item.new.value)))
+                .map(|item| {
+                    format!(
+                        "{} = {}",
+                        format_column_reference(&item.new.value),
+                        format_column_reference(&item.old.value)
+                    )
+                })
                 .collect::<Vec<_>>();
             format_item_stage_lines("rename", items, pipe_indent)
         }
@@ -138,13 +135,7 @@ fn format_stage_inline(stage: &Stage) -> String {
             "select {}",
             items
                 .iter()
-                .map(|item| {
-                    let mut text = quote(&item.column.value);
-                    if let Some(alias) = &item.alias {
-                        text.push_str(&format!(" as {}", quote(&alias.value)));
-                    }
-                    text
-                })
+                .map(format_select_item)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -153,7 +144,13 @@ fn format_stage_inline(stage: &Stage) -> String {
             "rename {}",
             items
                 .iter()
-                .map(|item| format!("{} as {}", quote(&item.old.value), quote(&item.new.value)))
+                .map(|item| {
+                    format!(
+                        "{} = {}",
+                        format_column_reference(&item.new.value),
+                        format_column_reference(&item.old.value)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -215,8 +212,8 @@ fn format_stage_inline(stage: &Stage) -> String {
         } => format!(
             "pivot_longer {} names_to {} values_to {}",
             format_columns(columns),
-            quote(&names_to.value),
-            quote(&values_to.value)
+            format_column_reference(&names_to.value),
+            format_column_reference(&values_to.value)
         ),
         Stage::Complete { keys, fills, .. } => {
             let mut text = format!("complete {}", format_columns(keys));
@@ -234,11 +231,11 @@ fn format_stage_inline(stage: &Stage) -> String {
         }
         Stage::Save(save) => {
             let mut text = match &save.sink {
-                SinkRef::Path(path) => format!("save {}", quote(&path.value)),
+                SinkRef::Path(path) => format!("save {}", format_string_literal(&path.value)),
                 SinkRef::Stdout(_) => "save stdout".to_string(),
             };
             if let Some(format) = &save.format {
-                text.push_str(&format!(" format {}", quote(&format.value)));
+                text.push_str(&format!(" format {}", format_string_literal(&format.value)));
             }
             text
         }
@@ -269,11 +266,26 @@ fn format_item_stage_lines(stage_name: &str, items: Vec<String>, pipe_indent: &s
 }
 
 fn format_column_items(columns: &[Spanned<String>]) -> Vec<String> {
-    columns.iter().map(|column| quote(&column.value)).collect()
+    columns
+        .iter()
+        .map(|column| format_column_reference(&column.value))
+        .collect()
+}
+
+fn format_select_item(item: &crate::SelectItem) -> String {
+    if let Some(alias) = &item.alias {
+        format!(
+            "{} = {}",
+            format_column_reference(&alias.value),
+            format_column_reference(&item.column.value)
+        )
+    } else {
+        format_column_reference(&item.column.value)
+    }
 }
 
 fn format_sort_item(item: &SortItem) -> String {
-    let mut text = quote(&item.column.value);
+    let mut text = format_column_reference(&item.column.value);
     if item.direction == SortDirection::Desc {
         text.push_str(" desc");
     }
@@ -288,9 +300,13 @@ fn format_sort_item(item: &SortItem) -> String {
 
 fn format_join_on(on: &JoinOn) -> String {
     match on {
-        JoinOn::Same(column) => quote(&column.value),
+        JoinOn::Same(column) => format_column_reference(&column.value),
         JoinOn::Pair { left, right, .. } => {
-            format!("({}, {})", quote(&left.value), quote(&right.value))
+            format!(
+                "({}, {})",
+                format_column_reference(&left.value),
+                format_column_reference(&right.value)
+            )
         }
     }
 }
@@ -298,7 +314,7 @@ fn format_join_on(on: &JoinOn) -> String {
 fn format_columns(columns: &[Spanned<String>]) -> String {
     columns
         .iter()
-        .map(|column| quote(&column.value))
+        .map(|column| format_column_reference(&column.value))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -306,7 +322,7 @@ fn format_columns(columns: &[Spanned<String>]) -> String {
 fn format_mutate_item(item: &MutateItem) -> String {
     format!(
         "{} = {}",
-        quote(&item.column.value),
+        format_column_reference(&item.column.value),
         format_expr(&item.expr)
     )
 }
@@ -314,7 +330,7 @@ fn format_mutate_item(item: &MutateItem) -> String {
 fn format_complete_fill_item(item: &CompleteFillItem) -> String {
     format!(
         "{} = {}",
-        quote(&item.column.value),
+        format_column_reference(&item.column.value),
         format_expr(&item.expr)
     )
 }
@@ -332,12 +348,15 @@ fn format_pivot_longer_stage_lines(stage: &Stage, pipe_indent: &str) -> Vec<Stri
     let item_indent = format!("{pipe_indent}    ");
     let mut lines = vec![format!("{pipe_indent}| pivot_longer")];
     for column in columns {
-        lines.push(format!("{item_indent}{},", quote(&column.value)));
+        lines.push(format!(
+            "{item_indent}{},",
+            format_column_reference(&column.value)
+        ));
     }
     lines.push(format!(
         "{item_indent}names_to {} values_to {}",
-        quote(&names_to.value),
-        quote(&values_to.value)
+        format_column_reference(&names_to.value),
+        format_column_reference(&values_to.value)
     ));
     lines
 }
@@ -350,7 +369,10 @@ fn format_complete_stage_lines(
     let item_indent = format!("{pipe_indent}    ");
     let mut lines = vec![format!("{pipe_indent}| complete")];
     for key in keys {
-        lines.push(format!("{item_indent}{},", quote(&key.value)));
+        lines.push(format!(
+            "{item_indent}{},",
+            format_column_reference(&key.value)
+        ));
     }
     if !fills.is_empty() {
         let last_index = fills.len().saturating_sub(1);
@@ -359,7 +381,7 @@ fn format_complete_stage_lines(
             let comma = if index == last_index { "" } else { "," };
             lines.push(format!(
                 "{item_indent}  {} = {}{}",
-                quote(&item.column.value),
+                format_column_reference(&item.column.value),
                 format_expr(&item.expr),
                 comma
             ));
@@ -377,7 +399,11 @@ fn format_mutate_stage_lines(items: &[MutateItem], pipe_indent: &str) -> Vec<Str
     for (index, item) in items.iter().enumerate() {
         let comma = if index == last_index { "" } else { "," };
         if matches!(&item.expr, Expr::Window { .. }) {
-            lines.push(format!("{}{} =", item_indent, quote(&item.column.value)));
+            lines.push(format!(
+                "{}{} =",
+                item_indent,
+                format_column_reference(&item.column.value)
+            ));
             let mut expr_lines = format_expr_lines(&item.expr, &expr_indent);
             append_suffix_to_last_line(&mut expr_lines, comma);
             lines.extend(expr_lines);
@@ -385,7 +411,7 @@ fn format_mutate_stage_lines(items: &[MutateItem], pipe_indent: &str) -> Vec<Str
             lines.push(format!(
                 "{}{} = {}{}",
                 item_indent,
-                quote(&item.column.value),
+                format_column_reference(&item.column.value),
                 format_expr(&item.expr),
                 comma
             ));
@@ -397,24 +423,24 @@ fn format_mutate_stage_lines(items: &[MutateItem], pipe_indent: &str) -> Vec<Str
 
 fn format_agg_item(item: &AggItem) -> String {
     format!(
-        "{}({}) as {}",
+        "{} = {}({})",
+        format_column_reference(&item.alias.value),
         item.function.value,
         item.args
             .iter()
             .map(format_expr)
             .collect::<Vec<_>>()
-            .join(", "),
-        quote(&item.alias.value)
+            .join(", ")
     )
 }
 
 fn format_expr(expr: &Expr) -> String {
     match expr {
-        Expr::Quoted(value) => quote(&value.value),
+        Expr::Quoted(value) => format_string_literal(&value.value),
         Expr::Number(value) => format_number(value.value),
         Expr::Bool(value) => value.value.to_string(),
         Expr::Null(_) => "null".to_string(),
-        Expr::Ident(value) => value.value.clone(),
+        Expr::Ident(value) => format_column_reference(&value.value),
         Expr::Call { name, args, .. } => format!(
             "{}({})",
             name.value,
@@ -524,7 +550,7 @@ fn format_window_spec_lines(spec: &WindowSpec, indent: &str) -> Vec<String> {
 }
 
 fn format_window_sort_item(item: &SortItem) -> String {
-    let mut text = quote(&item.column.value);
+    let mut text = format_column_reference(&item.column.value);
     if item.direction == SortDirection::Desc {
         text.push_str(" desc");
     }
@@ -555,7 +581,7 @@ fn format_frame_bound(bound: &FrameBound) -> String {
     }
 }
 
-fn quote(value: &str) -> String {
+fn format_string_literal(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -563,6 +589,78 @@ fn quote(value: &str) -> String {
         .replace('\r', "\\r")
         .replace('\t', "\\t");
     format!("\"{escaped}\"")
+}
+
+fn format_column_reference(value: &str) -> String {
+    if is_simple_column_name(value) && !is_reserved_keyword(value) {
+        return value.to_string();
+    }
+    let escaped = value.replace('\\', "\\\\").replace('`', "\\`");
+    format!("`{escaped}`")
+}
+
+fn is_simple_column_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(is_ident_start) && chars.all(is_ident_char)
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn is_reserved_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "load"
+            | "save"
+            | "filter"
+            | "select"
+            | "drop"
+            | "rename"
+            | "mutate"
+            | "group_by"
+            | "agg"
+            | "sort"
+            | "limit"
+            | "join"
+            | "union"
+            | "distinct"
+            | "pivot_longer"
+            | "complete"
+            | "let"
+            | "output"
+            | "on"
+            | "kind"
+            | "by_name"
+            | "names_to"
+            | "values_to"
+            | "fill"
+            | "format"
+            | "over"
+            | "partition_by"
+            | "order_by"
+            | "rows"
+            | "between"
+            | "unbounded_preceding"
+            | "current_row"
+            | "unbounded_following"
+            | "preceding"
+            | "following"
+            | "stdin"
+            | "stdout"
+            | "true"
+            | "false"
+            | "null"
+            | "and"
+            | "or"
+            | "not"
+            | "asc"
+            | "desc"
+    )
 }
 
 fn binary_op_text(op: BinaryOp) -> &'static str {
@@ -613,41 +711,41 @@ mod tests {
     #[test]
     fn formats_window_heavy_pipeline_readably() {
         let source = r#"load "sales.csv"
-  | filter "status" == "completed"
-  | mutate "customer_sale_number" = row_number() over (partition_by "customer_id" order_by "amount" desc), "customer_revenue" = sum("amount") over (partition_by "customer_id"), "region_revenue" = sum("amount") over (partition_by "region")
-  | mutate "region_revenue_rank" = dense_rank() over (order_by "region_revenue" desc)
-  | select "region", "customer_id", "amount", "customer_sale_number", "customer_revenue", "region_revenue_rank"
-  | sort "region_revenue_rank", "customer_id", "amount" desc"#;
+  | filter status == "completed"
+  | mutate customer_sale_number = row_number() over (partition_by customer_id order_by amount desc), customer_revenue = sum(amount) over (partition_by customer_id), region_revenue = sum(amount) over (partition_by region)
+  | mutate region_revenue_rank = dense_rank() over (order_by region_revenue desc)
+  | select region, customer_id, amount, customer_sale_number, customer_revenue, region_revenue_rank
+  | sort region_revenue_rank, customer_id, amount desc"#;
 
         let expected = r#"load "sales.csv"
-  | filter "status" == "completed"
+  | filter status == "completed"
   | mutate
-      "customer_sale_number" =
+      customer_sale_number =
         row_number() over (
-          partition_by "customer_id"
-          order_by "amount" desc
+          partition_by customer_id
+          order_by amount desc
         ),
-      "customer_revenue" =
-        sum("amount") over (
-          partition_by "customer_id"
+      customer_revenue =
+        sum(amount) over (
+          partition_by customer_id
         ),
-      "region_revenue" =
-        sum("amount") over (
-          partition_by "region"
+      region_revenue =
+        sum(amount) over (
+          partition_by region
         )
   | mutate
-      "region_revenue_rank" =
+      region_revenue_rank =
         dense_rank() over (
-          order_by "region_revenue" desc
+          order_by region_revenue desc
         )
   | select
-      "region",
-      "customer_id",
-      "amount",
-      "customer_sale_number",
-      "customer_revenue",
-      "region_revenue_rank"
-  | sort "region_revenue_rank", "customer_id", "amount" desc"#;
+      region,
+      customer_id,
+      amount,
+      customer_sale_number,
+      customer_revenue,
+      region_revenue_rank
+  | sort region_revenue_rank, customer_id, amount desc"#;
 
         assert_eq!(format_source(source).expect("formatted"), expected);
         assert_eq!(format_source(expected).expect("formatted"), expected);
@@ -655,13 +753,13 @@ mod tests {
 
     #[test]
     fn keeps_short_item_stages_inline() {
-        let source = r#"load "sales.csv"|select "region", "amount"|sort "amount" desc"#;
+        let source = r#"load "sales.csv"|select region, amount|sort amount desc"#;
 
         assert_eq!(
             format_source(source).expect("formatted"),
             r#"load "sales.csv"
-  | select "region", "amount"
-  | sort "amount" desc"#
+  | select region, amount
+  | sort amount desc"#
         );
     }
 }

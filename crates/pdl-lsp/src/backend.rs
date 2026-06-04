@@ -481,14 +481,14 @@ mod tests {
                 },
             },
             severity: pdl_core::Severity::Hint,
-            code: "H3001".to_string(),
-            message: "use col(...)".to_string(),
+            code: "H3011".to_string(),
+            message: "write a bare column reference".to_string(),
         };
 
         let lsp = lsp_diagnostic(diagnostic);
 
         assert_eq!(lsp.severity, Some(DiagnosticSeverity::HINT));
-        assert_eq!(lsp.code, Some(NumberOrString::String("H3001".to_string())));
+        assert_eq!(lsp.code, Some(NumberOrString::String("H3011".to_string())));
         assert_eq!(lsp.source.as_deref(), Some("pdl"));
         assert_eq!(lsp.range.start.line, 1);
         assert_eq!(lsp.range.start.character, 2);
@@ -498,10 +498,10 @@ mod tests {
     #[test]
     fn lsp_diagnostics_reuse_editor_schema_diagnostics() {
         let source = r#"load "sales.csv"
-  | filter "sttus" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age", count() as "orders"
-  | sort "total_revenue" desc
+  | filter sttus == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age), orders = count()
+  | sort total_revenue desc
   | limit 3"#;
 
         let document = pdl_editor_services::analyze_document_with_schemas(
@@ -529,7 +529,7 @@ mod tests {
         let lsp = lsp_diagnostic(diagnostic.clone());
         assert_eq!(lsp.code, Some(NumberOrString::String("E1005".to_string())));
 
-        let corrected = source.replace("\"sttus\"", "\"status\"");
+        let corrected = source.replace("sttus", "status");
         let corrected_document = pdl_editor_services::analyze_document_with_schemas(
             &corrected,
             Path::new("memory/top_regions.pdl"),

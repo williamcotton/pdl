@@ -37,6 +37,7 @@ pub enum SyntaxKind {
     BlockComment,
     Ident,
     String,
+    BacktickColumn,
     Number,
     Pipe,
     Comma,
@@ -81,39 +82,40 @@ impl SyntaxKind {
             3 => SyntaxKind::BlockComment,
             4 => SyntaxKind::Ident,
             5 => SyntaxKind::String,
-            6 => SyntaxKind::Number,
-            7 => SyntaxKind::Pipe,
-            8 => SyntaxKind::Comma,
-            9 => SyntaxKind::Equal,
-            10 => SyntaxKind::LParen,
-            11 => SyntaxKind::RParen,
-            12 => SyntaxKind::Plus,
-            13 => SyntaxKind::Minus,
-            14 => SyntaxKind::Star,
-            15 => SyntaxKind::Slash,
-            16 => SyntaxKind::Percent,
-            17 => SyntaxKind::EqEq,
-            18 => SyntaxKind::NotEq,
-            19 => SyntaxKind::Lt,
-            20 => SyntaxKind::Lte,
-            21 => SyntaxKind::Gt,
-            22 => SyntaxKind::Gte,
-            23 => SyntaxKind::Bang,
-            24 => SyntaxKind::Eof,
-            25 => SyntaxKind::Error,
-            26 => SyntaxKind::BindingDecl,
-            27 => SyntaxKind::PipelineExpr,
-            28 => SyntaxKind::LoadStageNode,
-            29 => SyntaxKind::BindingRefNode,
-            30 => SyntaxKind::StageNode,
-            31 => SyntaxKind::SaveStageNode,
-            32 => SyntaxKind::SelectItemNode,
-            33 => SyntaxKind::RenameItemNode,
-            34 => SyntaxKind::AggItemNode,
-            35 => SyntaxKind::SortItemNode,
-            36 => SyntaxKind::MutateItemNode,
-            37 => SyntaxKind::ExprNode,
-            38 => SyntaxKind::OutputDecl,
+            6 => SyntaxKind::BacktickColumn,
+            7 => SyntaxKind::Number,
+            8 => SyntaxKind::Pipe,
+            9 => SyntaxKind::Comma,
+            10 => SyntaxKind::Equal,
+            11 => SyntaxKind::LParen,
+            12 => SyntaxKind::RParen,
+            13 => SyntaxKind::Plus,
+            14 => SyntaxKind::Minus,
+            15 => SyntaxKind::Star,
+            16 => SyntaxKind::Slash,
+            17 => SyntaxKind::Percent,
+            18 => SyntaxKind::EqEq,
+            19 => SyntaxKind::NotEq,
+            20 => SyntaxKind::Lt,
+            21 => SyntaxKind::Lte,
+            22 => SyntaxKind::Gt,
+            23 => SyntaxKind::Gte,
+            24 => SyntaxKind::Bang,
+            25 => SyntaxKind::Eof,
+            26 => SyntaxKind::Error,
+            27 => SyntaxKind::BindingDecl,
+            28 => SyntaxKind::PipelineExpr,
+            29 => SyntaxKind::LoadStageNode,
+            30 => SyntaxKind::BindingRefNode,
+            31 => SyntaxKind::StageNode,
+            32 => SyntaxKind::SaveStageNode,
+            33 => SyntaxKind::SelectItemNode,
+            34 => SyntaxKind::RenameItemNode,
+            35 => SyntaxKind::AggItemNode,
+            36 => SyntaxKind::SortItemNode,
+            37 => SyntaxKind::MutateItemNode,
+            38 => SyntaxKind::ExprNode,
+            39 => SyntaxKind::OutputDecl,
             _ => SyntaxKind::Error,
         }
     }
@@ -901,11 +903,16 @@ impl<'a> Parser<'a> {
     fn parse_select(&mut self, name_span: Span) -> Option<Stage> {
         let mut items = Vec::new();
         loop {
-            let column = self.expect_column_name()?;
-            let alias = if self.consume_ident("as") {
-                Some(self.expect_column_name()?)
+            let first = self.expect_column_name()?;
+            let (column, alias) = if self.consume_equal() {
+                let source = self.expect_column_name()?;
+                (source, Some(first))
+            } else if self.consume_ident("as") {
+                self.legacy_as_diagnostic(self.previous_span());
+                let output = self.expect_column_name()?;
+                (first, Some(output))
             } else {
-                None
+                (first, None)
             };
             items.push(SelectItem { column, alias });
             if !self.consume_comma() {
@@ -936,15 +943,26 @@ impl<'a> Parser<'a> {
     fn parse_rename(&mut self, name_span: Span) -> Option<Stage> {
         let mut items = Vec::new();
         loop {
-            let old = self.expect_column_name()?;
-            if !self.consume_ident("as") {
-                self.diagnostics.push(Diagnostic::error(
-                    codes::E1203,
-                    "rename items require `as`",
-                    self.current().span,
-                ));
-            }
-            let new = self.expect_column_name()?;
+            let first = self.expect_column_name()?;
+            let (old, new) = if self.consume_equal() {
+                let old = self.expect_column_name()?;
+                (old, first)
+            } else if self.consume_ident("as") {
+                self.legacy_as_diagnostic(self.previous_span());
+                let new = self.expect_column_name()?;
+                (first, new)
+            } else {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::E0015,
+                        "rename items require `=`",
+                        self.current().span,
+                    )
+                    .with_help("write rename items as `new_name = old_name`"),
+                );
+                let old = self.expect_column_name()?;
+                (old, first)
+            };
             items.push(RenameItem { old, new });
             if !self.consume_comma() {
                 break;
@@ -996,39 +1014,48 @@ impl<'a> Parser<'a> {
     fn parse_agg(&mut self, name_span: Span) -> Option<Stage> {
         let mut items = Vec::new();
         loop {
-            let function = self.expect_identifier("aggregate function")?;
-            self.expect_lparen();
-            let mut args = Vec::new();
-            if !self.at_rparen() {
-                loop {
-                    args.push(self.parse_expr(0)?);
-                    if !self.consume_comma() {
-                        break;
-                    }
-                }
-            }
-            let close_span = self
-                .expect_rparen()
-                .map_or(function.span, |token| token.span);
-            if !self.consume_ident("as") {
-                let diagnostic_span = if self.at_ident_followed_by_column_name() {
-                    self.advance().span
+            let (alias, function, args, call_span) = if self.at_ident_followed_by_lparen() {
+                let (function, args, call_span) = self.parse_agg_call()?;
+                if self.consume_ident("as") {
+                    self.legacy_as_diagnostic(self.previous_span());
                 } else {
-                    close_span
-                };
-                self.diagnostics.push(Diagnostic::error(
-                    codes::E1213,
-                    "aggregate items require `as`",
-                    diagnostic_span,
-                ));
-            }
-            let alias = self.expect_column_name()?;
+                    let diagnostic_span = if self.at_ident_followed_by_column_name() {
+                        self.advance().span
+                    } else {
+                        call_span
+                    };
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            codes::E1417,
+                            "aggregate items require assignment",
+                            diagnostic_span,
+                        )
+                        .with_help("write aggregate items as `output_name = aggregate_call(...)`"),
+                    );
+                }
+                let alias = self.expect_column_name()?;
+                (alias, function, args, call_span)
+            } else {
+                let alias = self.expect_column_name()?;
+                if !self.consume_equal() {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            codes::E1417,
+                            "aggregate items require assignment",
+                            self.current().span,
+                        )
+                        .with_help("write aggregate items as `output_name = aggregate_call(...)`"),
+                    );
+                }
+                let (function, args, call_span) = self.parse_agg_call()?;
+                (alias, function, args, call_span)
+            };
             let span = function.span.join(alias.span);
             items.push(AggItem {
                 function,
                 args,
                 alias,
-                span,
+                span: span.join(call_span),
             });
             if !self.consume_comma() {
                 break;
@@ -1649,6 +1676,7 @@ impl<'a> Parser<'a> {
         let token = self.advance().clone();
         match token.kind {
             TokenKind::String(value) => Some(Expr::Quoted(Spanned::new(value, token.span))),
+            TokenKind::BacktickColumn(value) => Some(Expr::Ident(Spanned::new(value, token.span))),
             TokenKind::Number(raw) => match raw.parse::<f64>() {
                 Ok(value) => Some(Expr::Number(Spanned::new(value, token.span))),
                 Err(_) => {
@@ -1721,6 +1749,19 @@ impl<'a> Parser<'a> {
                         Some(Expr::Call { name, args, span })
                     }
                 } else {
+                    if is_reserved_keyword(&name.value) {
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                codes::E0009,
+                                format!(
+                                    "reserved keyword `{}` must be escaped with backticks",
+                                    name.value
+                                ),
+                                name.span,
+                            )
+                            .with_help("use backticks for keyword column names"),
+                        );
+                    }
                     Some(Expr::Ident(name))
                 }
             }
@@ -1792,16 +1833,51 @@ impl<'a> Parser<'a> {
     fn expect_column_name(&mut self) -> Option<Spanned<String>> {
         let token = self.advance().clone();
         match token.kind {
-            TokenKind::String(value) => Some(Spanned::new(value, token.span)),
+            TokenKind::Ident(value) => {
+                if is_reserved_keyword(&value) {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            codes::E0009,
+                            format!("reserved keyword `{value}` must be escaped with backticks"),
+                            token.span,
+                        )
+                        .with_help("use backticks for keyword column names"),
+                    );
+                }
+                Some(Spanned::new(value, token.span))
+            }
+            TokenKind::BacktickColumn(value) => Some(Spanned::new(value, token.span)),
+            TokenKind::String(value) => {
+                self.quoted_column_diagnostic(&value, token.span);
+                Some(Spanned::new(value, token.span))
+            }
             _ => {
-                self.diagnostics.push(Diagnostic::error(
-                    codes::E0009,
-                    "expected quoted column name",
-                    token.span,
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(codes::E0009, "expected column name", token.span)
+                        .with_help("use a bare identifier or backticks for a column reference"),
+                );
                 None
             }
         }
+    }
+
+    fn parse_agg_call(&mut self) -> Option<(Spanned<String>, Vec<Expr>, Span)> {
+        let function = self.expect_identifier("aggregate function")?;
+        self.expect_lparen();
+        let mut args = Vec::new();
+        if !self.at_rparen() {
+            loop {
+                args.push(self.parse_expr(0)?);
+                if !self.consume_comma() {
+                    break;
+                }
+            }
+        }
+        let close_span = self
+            .expect_rparen()
+            .map_or(function.span, |token| token.span);
+        let span = function.span.join(close_span);
+        Some((function, args, span))
     }
 
     fn expect_identifier(&mut self, label: &str) -> Option<Spanned<String>> {
@@ -1817,6 +1893,31 @@ impl<'a> Parser<'a> {
                 None
             }
         }
+    }
+
+    fn legacy_as_diagnostic(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error(
+                codes::E0027,
+                "legacy `as` alias syntax is not valid in v0.26 syntax",
+                span,
+            )
+            .with_help("write aliases as `new_name = expression`"),
+        );
+    }
+
+    fn quoted_column_diagnostic(&mut self, value: &str, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error(
+                codes::E0026,
+                "double-quoted tokens are string literals, not column references",
+                span,
+            )
+            .with_help(format!(
+                "write this column reference as `{}`",
+                format_column_reference(value)
+            )),
+        );
     }
 
     fn expect_ident(&mut self, expected: &str) -> Option<Token> {
@@ -1932,10 +2033,20 @@ impl<'a> Parser<'a> {
 
     fn at_ident_followed_by_column_name(&self) -> bool {
         matches!(self.current().kind, TokenKind::Ident(_))
+            && self.tokens.get(self.pos + 1).is_some_and(|token| {
+                matches!(
+                    token.kind,
+                    TokenKind::Ident(_) | TokenKind::BacktickColumn(_) | TokenKind::String(_)
+                )
+            })
+    }
+
+    fn at_ident_followed_by_lparen(&self) -> bool {
+        matches!(self.current().kind, TokenKind::Ident(_))
             && self
                 .tokens
                 .get(self.pos + 1)
-                .is_some_and(|token| matches!(token.kind, TokenKind::String(_)))
+                .is_some_and(|token| token.kind == TokenKind::LParen)
     }
 
     fn at_expr_boundary(&self) -> bool {
@@ -2075,7 +2186,6 @@ fn is_reserved_keyword(value: &str) -> bool {
             | "complete"
             | "let"
             | "output"
-            | "as"
             | "on"
             | "kind"
             | "by_name"
@@ -2106,6 +2216,27 @@ fn is_reserved_keyword(value: &str) -> bool {
     )
 }
 
+fn format_column_reference(value: &str) -> String {
+    if is_simple_column_name(value) && !is_reserved_keyword(value) {
+        return value.to_string();
+    }
+    let escaped = value.replace('\\', "\\\\").replace('`', "\\`");
+    format!("`{escaped}`")
+}
+
+fn is_simple_column_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(is_ident_start) && chars.all(is_ident_char)
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2114,10 +2245,10 @@ mod tests {
     fn parses_top_regions_shape() {
         let result = parse(
             r#"load "sales.csv"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total"
-  | sort "total" desc
+  | filter status == "completed"
+  | group_by region
+  | agg total = sum(amount)
+  | sort total desc
   | limit 5
   | save "out.csv""#,
         );
@@ -2136,10 +2267,10 @@ mod tests {
     #[test]
     fn reports_invalid_sort_direction() {
         let source = r#"load "sales.csv"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue"
-  | sort "total_revenue" des"#;
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount)
+  | sort total_revenue des"#;
         let result = parse(source);
 
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
@@ -2155,11 +2286,11 @@ mod tests {
         let result = parse(
             r#"let cleaned =
   load "orders_raw.csv"
-    | sort "order_date"
+    | sort order_date
 
 cleaned
-  | group_by "region"
-  | agg count() as "orders""#,
+  | group_by region
+  | agg orders = count()"#,
         );
 
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
@@ -2183,8 +2314,8 @@ cleaned
     #[test]
     fn reports_missing_filter_operator_and_recovers_to_next_stage() {
         let source = r#"load "sales.csv"
-  | filter "status" "completed"
-  | sort "status" desc"#;
+  | filter status "completed"
+  | sort status desc"#;
         let result = parse(source);
 
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
@@ -2199,7 +2330,7 @@ cleaned
 
     #[test]
     fn reports_single_equal_filter_operator_and_recovers_comparison() {
-        let source = r#"load "sales.csv" | filter "staus" = "completed""#;
+        let source = r#"load "sales.csv" | filter staus = "completed""#;
         let result = parse(source);
 
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
@@ -2224,9 +2355,9 @@ cleaned
     #[test]
     fn reports_missing_pipe_before_stage_and_recovers() {
         let source = r#"load "sales.csv"
-  filter "staus" == "completed"
-  | group_by "region"
-  | agg count() as "orders""#;
+  filter staus == "completed"
+  | group_by region
+  | agg orders = count()"#;
         let result = parse(source);
 
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
@@ -2244,8 +2375,8 @@ cleaned
     fn parses_mutate_and_distinct_stages() {
         let result = parse(
             r#"load "orders.csv"
-  | mutate "net_amount" = "gross_amount" - "discount", "label" = concat(upper("region"), lit(":"), lower("channel"))
-  | distinct "order_id""#,
+  | mutate net_amount = gross_amount - discount, label = concat(upper(region), ":", lower(channel))
+  | distinct order_id"#,
         );
 
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
@@ -2266,7 +2397,7 @@ cleaned
     fn parses_window_expressions() {
         let result = parse(
             r#"load "orders.csv"
-  | mutate "running_amount" = sum("amount") over (partition_by "customer_id" order_by "order_date" asc rows between unbounded_preceding and current_row), "rank" = dense_rank() over (partition_by "region" order_by "amount" desc nulls_last)"#,
+  | mutate running_amount = sum(amount) over (partition_by customer_id order_by order_date asc rows between unbounded_preceding and current_row), rank = dense_rank() over (partition_by region order_by amount desc nulls_last)"#,
         );
 
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
@@ -2293,7 +2424,7 @@ cleaned
   load "customers.csv"
 
 load "sales.csv"
-  | join customers on ("customer_id", "id") kind left
+  | join customers on (customer_id, id) kind left
   | union customers by_name true distinct false"#,
         );
 
@@ -2325,28 +2456,58 @@ load "sales.csv"
 
     #[test]
     fn invalid_join_kind_uses_join_kind_diagnostic() {
-        let result = parse(r#"load "sales.csv" | join customers on "id" kind outer"#);
+        let result = parse(r#"load "sales.csv" | join customers on id kind outer"#);
 
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
         assert_eq!(result.diagnostics[0].code, "E1223");
     }
 
     #[test]
-    fn reports_mistyped_aggregate_as_without_extra_alias_error() {
-        let source = r#"load "sales.csv" | agg sum("amount") a "total_revenue""#;
+    fn reports_missing_aggregate_assignment_without_extra_alias_error() {
+        let source = r#"load "sales.csv" | agg total_revenue sum(amount)"#;
         let result = parse(source);
 
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
-        assert_eq!(result.diagnostics[0].code, "E1213");
+        assert_eq!(result.diagnostics[0].code, "E1417");
         assert_eq!(
             result.diagnostics[0].span.start,
-            source.find(" a ").expect("mistyped as offset") + 1
+            source.find("sum").expect("aggregate function offset")
         );
         let main = result.program.main.expect("main pipeline");
         let Stage::Agg { items, .. } = &main.stages[0] else {
             panic!("agg stage");
         };
         assert_eq!(items[0].alias.value, "total_revenue");
+    }
+
+    #[test]
+    fn reports_legacy_aggregate_as_and_recovers_alias() {
+        let source = r#"load "sales.csv" | agg sum(amount) as total_revenue"#;
+        let result = parse(source);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "E0027");
+        let main = result.program.main.expect("main pipeline");
+        let Stage::Agg { items, .. } = &main.stages[0] else {
+            panic!("agg stage");
+        };
+        assert_eq!(items[0].alias.value, "total_revenue");
+    }
+
+    #[test]
+    fn parses_as_as_column_name_when_not_alias_syntax() {
+        let result = parse(r#"load "sales.csv" | select as | agg as = count()"#);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let main = result.program.main.expect("main pipeline");
+        let Stage::Select { items, .. } = &main.stages[0] else {
+            panic!("select stage");
+        };
+        assert_eq!(items[0].column.value, "as");
+        let Stage::Agg { items, .. } = &main.stages[1] else {
+            panic!("agg stage");
+        };
+        assert_eq!(items[0].alias.value, "as");
     }
 
     #[test]

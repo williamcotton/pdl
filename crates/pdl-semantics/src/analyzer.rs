@@ -456,7 +456,7 @@ where
                 Stage::Unsupported { name, .. } => {
                     self.diagnostics.push(Diagnostic::error(
                         codes::E1211,
-                        format!("stage `{}` is deferred in 0.25.0", name.value),
+                        format!("stage `{}` is deferred in 0.26.0", name.value),
                         name.span,
                     ));
                 }
@@ -482,7 +482,7 @@ where
             if !format_info(&format.value).is_some_and(|info| info.save_supported) {
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1215,
-                    format!("format `{}` is not supported in 0.25.0", format.value),
+                    format!("format `{}` is not supported in 0.26.0", format.value),
                     format.span,
                 ));
             }
@@ -511,6 +511,7 @@ where
         }
         for arg in &item.args {
             self.analyze_scalar_expr(arg, WindowContext::Disallowed);
+            self.diagnose_legacy_quoted_columns(arg, schema, ExprRole::Default);
             for column in aggregate_expr_column_refs(arg) {
                 self.require_column(schema, &column.value, column.span);
             }
@@ -519,6 +520,7 @@ where
 
     fn analyze_row_expr(&mut self, schema: &[String], expr: &Expr, role: ExprRole) {
         self.analyze_scalar_expr(expr, WindowContext::Disallowed);
+        self.diagnose_legacy_quoted_columns(expr, schema, role);
         for column in row_expr_column_refs(expr, schema, role) {
             self.require_column(schema, &column.value, column.span);
         }
@@ -526,6 +528,7 @@ where
 
     fn analyze_mutate_expr(&mut self, schema: &[String], expr: &Expr) {
         self.analyze_scalar_expr(expr, WindowContext::Allowed);
+        self.diagnose_legacy_quoted_columns(expr, schema, ExprRole::Default);
         for column in row_expr_column_refs(expr, schema, ExprRole::Default) {
             self.require_column(schema, &column.value, column.span);
         }
@@ -664,6 +667,22 @@ where
         }
     }
 
+    fn diagnose_legacy_quoted_columns(&mut self, expr: &Expr, schema: &[String], role: ExprRole) {
+        for column in legacy_quoted_column_refs(expr, schema, role) {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::E0026,
+                    "double-quoted tokens are string literals, not column references",
+                    column.span,
+                )
+                .with_help(format!(
+                    "write this column reference as `{}`",
+                    format_column_reference(&column.value)
+                )),
+            );
+        }
+    }
+
     fn push_trace(
         &mut self,
         stage: &Stage,
@@ -730,7 +749,7 @@ fn union_schema_compatible(left_schema: &[String], right_schema: &[String], by_n
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum ExprRole {
     PredicateRoot,
     Default,
@@ -747,26 +766,11 @@ enum WindowContext {
 fn row_expr_column_refs(
     expr: &Expr,
     schema: &[String],
-    role: ExprRole,
+    _role: ExprRole,
 ) -> Vec<pdl_syntax::Spanned<String>> {
     match expr {
-        Expr::Quoted(value) => match role {
-            ExprRole::ComparisonLeft => vec![value.clone()],
-            ExprRole::Default | ExprRole::PredicateRoot
-                if schema.iter().any(|column| column == &value.value) =>
-            {
-                vec![value.clone()]
-            }
-            _ => Vec::new(),
-        },
-        Expr::Call { name, args, .. } if name.value == "col" => args
-            .first()
-            .and_then(|arg| match arg {
-                Expr::Quoted(value) => Some(vec![value.clone()]),
-                _ => None,
-            })
-            .unwrap_or_default(),
-        Expr::Call { name, .. } if name.value == "lit" => Vec::new(),
+        Expr::Ident(value) => vec![value.clone()],
+        Expr::Quoted(_) => Vec::new(),
         Expr::Call { args, .. } => args
             .iter()
             .flat_map(|arg| row_expr_column_refs(arg, schema, ExprRole::Default))
@@ -789,27 +793,62 @@ fn row_expr_column_refs(
             refs.extend(row_expr_column_refs(right, schema, ExprRole::Default));
             refs
         }
-        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => Vec::new(),
+        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) => Vec::new(),
     }
 }
 
 fn aggregate_expr_column_refs(expr: &Expr) -> Vec<pdl_syntax::Spanned<String>> {
     match expr {
-        Expr::Quoted(value) => vec![value.clone()],
-        Expr::Call { name, .. } if name.value == "lit" => Vec::new(),
-        Expr::Call { name, args, .. } if name.value == "col" => args
-            .first()
-            .and_then(|arg| match arg {
-                Expr::Quoted(value) => Some(vec![value.clone()]),
-                _ => None,
-            })
-            .unwrap_or_default(),
+        Expr::Ident(value) => vec![value.clone()],
+        Expr::Quoted(_) => Vec::new(),
         Expr::Call { args, .. } => args.iter().flat_map(aggregate_expr_column_refs).collect(),
         Expr::Window { args, spec, .. } => window_expr_column_refs(args, spec, &[]),
         Expr::Unary { expr, .. } => aggregate_expr_column_refs(expr),
         Expr::Binary { left, right, .. } => {
             let mut refs = aggregate_expr_column_refs(left);
             refs.extend(aggregate_expr_column_refs(right));
+            refs
+        }
+        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) => Vec::new(),
+    }
+}
+
+fn legacy_quoted_column_refs(
+    expr: &Expr,
+    schema: &[String],
+    role: ExprRole,
+) -> Vec<pdl_syntax::Spanned<String>> {
+    match expr {
+        Expr::Quoted(value)
+            if role != ExprRole::ComparisonRight
+                && schema.iter().any(|column| column == &value.value) =>
+        {
+            vec![value.clone()]
+        }
+        Expr::Quoted(_) => Vec::new(),
+        Expr::Call { args, .. } => args
+            .iter()
+            .flat_map(|arg| legacy_quoted_column_refs(arg, schema, ExprRole::Default))
+            .collect(),
+        Expr::Window { args, .. } => args
+            .iter()
+            .flat_map(|arg| legacy_quoted_column_refs(arg, schema, ExprRole::Default))
+            .collect(),
+        Expr::Unary { expr, .. } => legacy_quoted_column_refs(expr, schema, ExprRole::Default),
+        Expr::Binary {
+            left, op, right, ..
+        } if is_comparison_op(*op) => {
+            let mut refs = legacy_quoted_column_refs(left, schema, ExprRole::ComparisonLeft);
+            refs.extend(legacy_quoted_column_refs(
+                right,
+                schema,
+                ExprRole::ComparisonRight,
+            ));
+            refs
+        }
+        Expr::Binary { left, right, .. } => {
+            let mut refs = legacy_quoted_column_refs(left, schema, ExprRole::Default);
+            refs.extend(legacy_quoted_column_refs(right, schema, ExprRole::Default));
             refs
         }
         Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => Vec::new(),
@@ -848,6 +887,82 @@ fn is_non_negative_integer_literal(expr: &Expr) -> bool {
 
 fn is_round_digits_literal(expr: &Expr) -> bool {
     matches!(expr, Expr::Number(value) if (0.0..=12.0).contains(&value.value) && value.value.fract() == 0.0)
+}
+
+fn format_column_reference(value: &str) -> String {
+    if is_simple_column_name(value) && !is_reserved_keyword(value) {
+        return value.to_string();
+    }
+    let escaped = value.replace('\\', "\\\\").replace('`', "\\`");
+    format!("`{escaped}`")
+}
+
+fn is_simple_column_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(is_ident_start) && chars.all(is_ident_char)
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn is_reserved_keyword(value: &str) -> bool {
+    pdl_semantics_keyword(value)
+}
+
+fn pdl_semantics_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "load"
+            | "save"
+            | "filter"
+            | "select"
+            | "drop"
+            | "rename"
+            | "mutate"
+            | "group_by"
+            | "agg"
+            | "sort"
+            | "limit"
+            | "join"
+            | "union"
+            | "distinct"
+            | "pivot_longer"
+            | "complete"
+            | "let"
+            | "output"
+            | "on"
+            | "kind"
+            | "by_name"
+            | "names_to"
+            | "values_to"
+            | "fill"
+            | "format"
+            | "over"
+            | "partition_by"
+            | "order_by"
+            | "rows"
+            | "between"
+            | "unbounded_preceding"
+            | "current_row"
+            | "unbounded_following"
+            | "preceding"
+            | "following"
+            | "stdin"
+            | "stdout"
+            | "true"
+            | "false"
+            | "null"
+            | "and"
+            | "or"
+            | "not"
+            | "asc"
+            | "desc"
+    )
 }
 
 fn requires_order_by(function: &str) -> bool {
@@ -912,8 +1027,8 @@ mod tests {
     fn analysis_builds_ir_and_stage_traces() {
         let parse = pdl_syntax::parse(
             r#"load "sales.csv"
-  | filter "amount" > 0
-  | select "region""#,
+  | filter amount > 0
+  | select region"#,
         );
 
         let analysis = analyze_program(&parse.program, |_| {
@@ -938,8 +1053,8 @@ mod tests {
     fn mutate_adds_columns_and_distinct_preserves_schema() {
         let parse = pdl_syntax::parse(
             r#"load "orders.csv"
-  | mutate "net_amount" = "gross" - "discount", "region_channel" = concat(upper("region"), lit(":"), lower("channel"))
-  | distinct "order_id""#,
+  | mutate net_amount = gross - discount, region_channel = concat(upper(region), ":", lower(channel))
+  | distinct order_id"#,
         );
 
         let analysis = analyze_program(&parse.program, |_| {
@@ -981,7 +1096,7 @@ mod tests {
     fn mutate_assignments_are_parallel() {
         let parse = pdl_syntax::parse(
             r#"load "orders.csv"
-  | mutate "net_amount" = "gross" - "discount", "is_large" = "net_amount" > 100"#,
+  | mutate net_amount = gross - discount, is_large = net_amount > 100"#,
         );
 
         let analysis = analyze_program(&parse.program, |_| {
@@ -998,7 +1113,7 @@ mod tests {
     fn window_mutate_adds_columns_and_checks_referenced_columns() {
         let parse = pdl_syntax::parse(
             r#"load "orders.csv"
-  | mutate "running_amount" = sum("amount") over (partition_by "customer_id" order_by "order_date" rows between unbounded_preceding and current_row), "rank" = dense_rank() over (partition_by "region" order_by "amount" desc)"#,
+  | mutate running_amount = sum(amount) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row), rank = dense_rank() over (partition_by region order_by amount desc)"#,
         );
 
         let analysis = analyze_program(&parse.program, |_| {
@@ -1035,8 +1150,8 @@ mod tests {
     fn window_context_errors_are_diagnostics() {
         let parse = pdl_syntax::parse(
             r#"load "orders.csv"
-  | filter row_number() over (order_by "order_date") > 1
-  | mutate "bad_rank" = rank() over (partition_by "customer_id")"#,
+  | filter row_number() over (order_by order_date) > 1
+  | mutate bad_rank = rank() over (partition_by customer_id)"#,
         );
 
         let analysis = analyze_program(&parse.program, |_| {
@@ -1064,7 +1179,7 @@ mod tests {
   load "customers.csv"
 
 load "sales.csv"
-  | join customers on "customer_id" kind left"#,
+  | join customers on customer_id kind left"#,
         );
 
         let analysis = analyze_program(&parse.program, |request| match &request.load.source {
@@ -1132,7 +1247,7 @@ load "sales.csv"
   load "missing.csv"
 
 load "sales.csv"
-  | select "amount""#,
+  | select amount"#,
         );
 
         let analysis = analyze_program(&parse.program, |request| match &request.load.source {

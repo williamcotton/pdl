@@ -1,45 +1,50 @@
 # PDL Detailed Specification
 
-Status: Draft 0.25.0
+Status: Draft 0.26.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.25.0`.
+The current repository implementation is `0.26.0`.
 
-This release keeps the existing language, runtime, editor, LSP, native CLI
+Version 0.26.0 is a breaking pre-1.0 syntax cleanup tracked in
+`docs/V0_26_PLAN.md`. It removes context-sensitive quoted column references,
+reserves double quotes for string/path literals, introduces backtick-escaped
+column references, removes the `as`, `col(...)`, and `lit(...)` authoring
+surfaces, and changes all column-producing stages to left-hand assignment.
+
+The v0.26 implementation keeps the runtime, editor, LSP, native CLI
 introspection, formatter, browser demo, browser WASM ABI, and window analytics
-slices stable while refreshing public installation and overview surfaces. The
-README now follows the Algraf project shape with the PDL brand mark, public
-links, a concise example tour, Homebrew install and upgrade commands, browser
-notes, and workspace layout. The browser demo homepage shows the Homebrew CLI
-install commands directly below the live editor. It retains the v0.24 browser
-WASM virtual text files for path-backed named-output `save` sinks and the v0.23
-story-table preparation surface: decimal-place `round(value, digits)`,
-`count_distinct`, `pivot_longer`, `complete`, and named top-level `output`
-declarations. It publishes GitHub Release assets for the VS Code extension
-`.vsix` and standalone browser `pdl.wasm` runtime, with both versioned filenames
-and `latest` aliases. It retains the recoverable syntax diagnostics for
-malformed filter, aggregate, sort, missing-pipe, and trailing-token cases. It
-implements the `pdl` CLI commands `run`, `check`,
-`fmt`, `schema`, `plan`, `ast`, `ir`, `manifest`, `lsp`, and `version`; CSV,
-JSON Lines, Parquet, Arrow IPC file, and Arrow IPC stream file loading and
-saving in native execution; CSV and JSON Lines text stdout; binary Parquet,
-Arrow IPC file, and Arrow IPC stream stdout where the host permits binary
-stdout; stdin format overrides and sniffing for native execution; deterministic
-in-memory execution for `load`, `filter`,
+slices aligned with the new syntax. The README follows the Algraf project shape
+with the PDL brand mark, public links, a concise example tour, Homebrew install
+and upgrade commands, browser notes, and workspace layout. The browser demo
+homepage shows the Homebrew CLI install commands directly below the live editor.
+It retains the v0.24 browser WASM virtual text files for path-backed
+named-output `save` sinks and the v0.23 story-table preparation surface:
+decimal-place `round(value, digits)`, `count_distinct`, `pivot_longer`,
+`complete`, and named top-level `output` declarations. It publishes GitHub
+Release assets for the VS Code extension `.vsix` and standalone browser
+`pdl.wasm` runtime, with both versioned filenames and `latest` aliases. It
+retains recoverable syntax diagnostics for malformed filter, aggregate, sort,
+missing-pipe, trailing-token, quoted-column, and legacy-`as` cases. It
+implements the `pdl` CLI commands `run`, `check`, `fmt`, `schema`, `plan`,
+`ast`, `ir`, `manifest`, `lsp`, and `version`; CSV, JSON Lines, Parquet, Arrow
+IPC file, and Arrow IPC stream file loading and saving in native execution; CSV
+and JSON Lines text stdout; binary Parquet, Arrow IPC file, and Arrow IPC stream
+stdout where the host permits binary stdout; stdin format overrides and sniffing
+for native execution; deterministic in-memory execution for `load`, `filter`,
 `select`, `drop`, `rename`, `mutate`, `group_by`, `agg`, `sort`, `limit`,
 `join`, `union`, `distinct`, `pivot_longer`, `complete`, and `save`; named
 binding evaluation with lazy dependency resolution and cycle diagnostics; named
-output evaluation in source order; the scalar functions `col`, `lit`,
-`is_null`, `not_null`, `coalesce`, `concat`, `lower`, `upper`, `trim`,
-`to_number`, `abs`, `round`, and `if_else`; and the aggregate functions
-`count`, `count_distinct`, `sum`, `mean`, `min`, and `max`. It implements window expressions
-with `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `lag`,
-`lead`, `first_value`, `last_value`, `count`, `sum`, `mean`, `min`, and `max`
-over explicit `partition_by`, `order_by`, and `rows between ... and ...`
-clauses in `mutate`. It also
+output evaluation in source order; the scalar functions `is_null`, `not_null`,
+`coalesce`, `concat`, `lower`, `upper`, `trim`, `to_number`, `abs`, `round`, and
+`if_else`; and the aggregate functions `count`, `count_distinct`, `sum`, `mean`,
+`min`, and `max`. It implements window expressions with `row_number`, `rank`,
+`dense_rank`, `percent_rank`, `cume_dist`, `lag`, `lead`, `first_value`,
+`last_value`, `count`, `sum`, `mean`, `min`, and `max` over explicit
+`partition_by`, `order_by`, and `rows between ... and ...` clauses in `mutate`.
+It also
 implements registered lettered diagnostic codes in `pdl-core`, a `codes::*`
 registry, `related` spans and `help` diagnostic payload fields, diagnostic
 catalog drift tests, a lossless lexer with trivia and EOF, a rowan CST with
@@ -66,11 +71,11 @@ GitHub Actions workflows for the Rust test suite and GitHub Pages demo
 deployment, plus GitHub Release asset publication for packaged editor and
 browser outputs.
 
-Version 0.25.0 does not yet implement configurable CSV dialect options, full
+Version 0.26.0 does not yet implement configurable CSV dialect options, full
 LSP code actions or cross-document navigation, Arrow IPC browser output,
 output selectors or full multi-output browser controls.
 Those features are tracked as deferred or planned work in successor release
-plans after `docs/V0_25_PLAN.md`.
+plans after `docs/V0_26_PLAN.md`.
 
 ## 0. Document Contract
 
@@ -89,10 +94,10 @@ PDL is built around one core idea:
 
 ```pdl
 load "sales.parquet"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age"
-  | sort "total_revenue" desc
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age)
+  | sort total_revenue desc
   | limit 5
   | save "top_regions.csv"
 ```
@@ -150,8 +155,8 @@ The keyword `table` means an ordered, typed, rectangular relation with named col
 The keyword `row` means one record in a table.
 
 The keyword `window expression` means a row-preserving expression that evaluates
-over a partition and order of rows. Version 0.25.0 implements window
-expressions in `mutate` assignments.
+over a partition and order of rows. Version 0.26.0 specifies window expressions
+in `mutate` assignments.
 
 The keyword `column` means a named field with a static PDL type and nullability.
 
@@ -223,8 +228,8 @@ The smallest useful program loads data, transforms it, and writes it:
 
 ```pdl
 load "orders.csv"
-  | filter "amount" > 0
-  | select "order_id", "region", "amount"
+  | filter amount > 0
+  | select order_id, region, amount
   | save "orders_clean.csv"
 ```
 
@@ -240,10 +245,10 @@ PDL supports aggregation:
 
 ```pdl
 load "sales.parquet"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age"
-  | sort "total_revenue" desc
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age)
+  | sort total_revenue desc
   | limit 5
   | save "top_regions.csv"
 ```
@@ -253,13 +258,13 @@ PDL supports named pipeline bindings for reuse and joins:
 ```pdl
 let customers =
   load "customers.parquet"
-  | select "customer_id", "segment"
+  | select customer_id, segment
 
 load "sales.parquet"
-  | filter "status" == "completed"
-  | join customers on "customer_id" kind left
-  | group_by "segment"
-  | agg sum("amount") as "revenue"
+  | filter status == "completed"
+  | join customers on customer_id kind left
+  | group_by segment
+  | agg revenue = sum(amount)
   | save "segment_revenue.csv"
 ```
 
@@ -274,9 +279,9 @@ PDL supports stdout for Unix composition:
 
 ```pdl
 load "sales.parquet"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue"
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount)
 ```
 
 When run with stdout enabled, the final table can be streamed:
@@ -420,10 +425,10 @@ This pass-through rule allows multiple saves:
 
 ```pdl
 load "sales.parquet"
-  | filter "status" == "completed"
+  | filter status == "completed"
   | save "completed.parquet"
-  | group_by "region"
-  | agg sum("amount") as "revenue"
+  | group_by region
+  | agg revenue = sum(amount)
   | save "regional_revenue.csv"
 ```
 
@@ -444,10 +449,10 @@ Stage arguments follow the stage name.
 Examples:
 
 ```pdl
-filter "amount" > 0
-group_by "region", "channel"
-agg sum("amount") as "revenue"
-sort "revenue" desc
+filter amount > 0
+group_by region, channel
+agg revenue = sum(amount)
+sort revenue desc
 limit 10
 save "out.csv"
 ```
@@ -472,63 +477,52 @@ Column order is significant for file output and editor display.
 
 ### 4.4 Column Reference
 
-Columns are usually referenced by double-quoted column names.
+Simple column names are referenced as bare identifiers.
 
-Example:
+Column names that contain spaces, punctuation, or reserved words are referenced
+with backticks.
+
+Examples:
 
 ```pdl
-filter "status" == "completed"
-group_by "region"
-agg sum("amount") as "total"
+filter status == "completed"
+group_by region
+agg total = sum(amount)
+sort `sort` desc
 ```
 
-PDL uses context to distinguish column references from string literals.
+Double-quoted tokens are string/path literals, not column references.
 
-In column-argument positions, a quoted token is a column reference.
+In expression context, an identifier followed immediately by `(` is a function
+call. An identifier that is not followed by `(` is a column reference.
 
 Examples of column-argument positions:
 
-- `select "a", "b"`
-- `drop "a"`
-- `group_by "region"`
-- `sort "amount" desc`
-- `sum("amount")`
-- `join customers on "customer_id"`
+- `select a, b`
+- `drop a`
+- `group_by region`
+- `sort amount desc`
+- `sum(amount)`
+- `join customers on customer_id`
 
-In simple comparison predicates, the left operand SHOULD resolve as a column reference when it matches a known column.
-
-The right operand SHOULD resolve as a literal unless explicitly wrapped with `col(...)`.
-
-Example:
-
-```pdl
-filter "status" == "completed"
-filter "region" == col("home_region")
-```
-
-When a schema is unavailable, the analyzer MAY treat quoted atoms in filter-left position as provisional column references.
-
-Ambiguous quoted atoms SHOULD produce `W2002` with suggested `col("...")` or
-`lit("...")` disambiguation.
+If a v0.26 implementation sees a double-quoted token in a column position, it
+SHOULD diagnose likely old syntax and suggest either a bare identifier or a
+backtick-escaped column reference.
 
 ### 4.5 Literal
 
 Literals include strings, numbers, booleans, and null.
 
-String literals use double quotes in value positions.
+String literals use double quotes.
 
-`lit("text")` forces a quoted value to be a string literal.
-
-`col("name")` forces a quoted value to be a column reference.
+Column references do not use double quotes.
 
 Examples:
 
 ```pdl
-filter col("status") == lit("completed")
-mutate "label" = concat(col("region"), lit(": "), col("channel"))
+filter status == "completed"
+mutate label = concat(region, ": ", channel)
 ```
-
-The short form remains preferred for ordinary filters.
 
 ### 4.6 Binding
 
@@ -541,11 +535,11 @@ Example:
 ```pdl
 let completed =
   load "sales.parquet"
-  | filter "status" == "completed"
+  | filter status == "completed"
 
 completed
-  | group_by "region"
-  | agg sum("amount") as "revenue"
+  | group_by region
+  | agg revenue = sum(amount)
 ```
 
 Binding names are identifiers.
@@ -603,7 +597,7 @@ Runtime diagnostics without a source span MUST still include phase and context.
 
 ```pdl
 load "sales.csv"
-  | filter "amount" > 0
+  | filter amount > 0
   | save "sales_clean.csv"
 ```
 
@@ -615,10 +609,10 @@ The output format is inferred from `.csv`.
 
 ```pdl
 load "sales.parquet"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age"
-  | sort "total_revenue" desc
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age)
+  | sort total_revenue desc
   | limit 5
   | save "top_regions.csv"
 ```
@@ -635,20 +629,20 @@ load "sales.parquet"
 
 ```pdl
 load "orders.csv"
-  | select "Order ID" as "order_id", "Order Date" as "order_date", "Amount" as "amount"
+  | select order_id = `Order ID`, order_date = `Order Date`, amount = `Amount`
   | save "orders_normalized.csv"
 ```
 
-`select` may rename selected columns with `as`.
+`select` may rename selected columns with left-hand assignment.
 
-Column names with spaces are ordinary quoted column names.
+Column names with spaces use backtick-escaped column references.
 
 ### 5.4 Mutation
 
 ```pdl
 load "orders.parquet"
-  | mutate "net_amount" = "gross_amount" - "discount"
-  | mutate "is_large" = "net_amount" >= 1000
+  | mutate net_amount = gross_amount - discount
+  | mutate is_large = net_amount >= 1000
   | save "orders_with_net.parquet"
 ```
 
@@ -658,7 +652,7 @@ Assignments in one `mutate` stage are evaluated against the input schema in para
 
 Later stages see newly created columns.
 
-The version 0.25.0 implementation supports scalar row expressions and window
+The version 0.26.0 target language supports scalar row expressions and window
 expressions in `mutate` assignments. New columns append in assignment order.
 Replacing an existing column preserves that column's position. Duplicate
 assignment targets in one stage MUST produce `E1207`.
@@ -668,12 +662,12 @@ assignment targets in one stage MUST produce `E1207`.
 ```pdl
 let customers =
   load "customers.parquet"
-  | select "customer_id", "segment"
+  | select customer_id, segment
 
 load "sales.parquet"
-  | join customers on "customer_id" kind left
-  | group_by "segment"
-  | agg sum("amount") as "revenue"
+  | join customers on customer_id kind left
+  | group_by segment
+  | agg revenue = sum(amount)
   | save "segment_revenue.csv"
 ```
 
@@ -687,9 +681,9 @@ Inline join pipelines MAY be deferred.
 
 ```pdl
 load stdin
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "revenue"
+  | filter status == "completed"
+  | group_by region
+  | agg revenue = sum(amount)
 ```
 
 Run:
@@ -710,9 +704,9 @@ PDL source:
 
 ```pdl
 load "sales.parquet"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "revenue"
+  | filter status == "completed"
+  | group_by region
+  | agg revenue = sum(amount)
 ```
 
 Command:
@@ -731,7 +725,7 @@ PDL MUST NOT mutate consumer-owned files.
 
 ```pdl
 load stdin format "csv"
-  | filter "status" == "completed"
+  | filter status == "completed"
   | save stdout format "arrow-stream"
 ```
 
@@ -790,7 +784,8 @@ Identifiers continue with ASCII letters, ASCII digits, or underscore.
 
 Identifiers are case-sensitive.
 
-Identifiers name bindings and bare stage selectors.
+Identifiers name bindings, bare stage selectors, stage options, and simple
+column references where grammar permits columns.
 
 Examples:
 
@@ -823,7 +818,6 @@ Reserved stage and declaration words in version 0.1 are:
 - `complete`
 - `let`
 - `output`
-- `as`
 - `on`
 - `kind`
 - `by_name`
@@ -844,7 +838,7 @@ Reserved stage and declaration words in version 0.1 are:
 
 Reserved words MUST NOT be used as binding or output identifiers.
 
-Column names may match reserved words because quoted column references are strings.
+Column names may match reserved words only when referenced with backticks.
 
 Window expression syntax uses additional clause words:
 
@@ -859,13 +853,15 @@ Window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are reserved by the version 0.25.0 implementation.
+These words are reserved by the version 0.26.0 target language.
 
-### 6.6 Quoted Tokens
+### 6.6 String Tokens And Escaped Column References
 
-Double-quoted tokens are used for both column names and string literals.
+Double-quoted tokens are string literals in expression context and path literals
+in path context.
 
-Context determines interpretation.
+Double-quoted tokens MUST NOT be interpreted as column references in v0.26
+syntax.
 
 The escape sequences are:
 
@@ -876,9 +872,26 @@ The escape sequences are:
 - `\t`
 - `\u{HEX}`
 
-Unterminated quoted tokens MUST produce `E0002`.
+Unterminated string tokens MUST produce `E0002`.
 
 Invalid escapes MUST produce `E0004`.
+
+Backtick-delimited tokens are escaped column references.
+
+They preserve all UTF-8 text between the delimiters except escaped backticks and
+escaped backslashes.
+
+Backticks are required when a column name contains spaces or punctuation, or
+when a column name collides with a reserved word:
+
+```pdl
+select `Order ID`, `Gross Amount`
+sort `sort` desc
+```
+
+Unterminated backtick column references MUST produce `E0002`.
+
+Invalid backtick escapes MUST produce `E0004`.
 
 ### 6.7 Number Literals
 
@@ -1045,17 +1058,23 @@ available.
 
 ```ebnf
 SelectStage   ::= "select" SelectItem ("," SelectItem)* ;
-SelectItem    ::= ColumnRef ("as" ColumnName)? ;
+SelectItem    ::= ColumnRef | ColumnName "=" ColumnRef ;
 DropStage     ::= "drop" ColumnRef ("," ColumnRef)* ;
 RenameStage   ::= "rename" RenameItem ("," RenameItem)* ;
-RenameItem    ::= ColumnRef "as" ColumnName ;
+RenameItem    ::= ColumnName "=" ColumnRef ;
 ```
 
 `select` keeps columns in listed order.
 
+Assignment-form `select` items put the output column name on the left and the
+source column on the right.
+
 `drop` removes columns.
 
 `rename` preserves order.
+
+`rename` items put the new column name on the left and the existing source
+column on the right.
 
 ### 7.7 Mutate
 
@@ -1074,7 +1093,7 @@ NOT reference a column created earlier in the same `mutate` stage.
 ```ebnf
 GroupByStage  ::= "group_by" ColumnRef ("," ColumnRef)* ;
 AggStage      ::= "agg" AggItem ("," AggItem)* ;
-AggItem       ::= AggCall "as" ColumnName ;
+AggItem       ::= ColumnName "=" AggCall ;
 AggCall       ::= Ident "(" AggArgList? ")" ;
 AggArgList    ::= ValueExpr ("," ValueExpr)* ;
 ```
@@ -1082,6 +1101,9 @@ AggArgList    ::= ValueExpr ("," ValueExpr)* ;
 `agg` consumes active group state.
 
 If there is no active group state, `agg` aggregates the whole table into one row.
+
+Aggregate items put the output column name on the left and the aggregate call on
+the right.
 
 ### 7.9 Sort And Limit
 
@@ -1117,9 +1139,9 @@ JoinKind      ::= "kind" JoinKindName ;
 JoinKindName  ::= "inner" | "left" | "right" | "full" | "semi" | "anti" ;
 ```
 
-`join customers on "customer_id"` joins the current table to the `customers` binding.
+`join customers on customer_id` joins the current table to the `customers` binding.
 
-`on ("left_id", "right_id")` joins differently named keys.
+`on (left_id, right_id)` joins differently named keys.
 
 The default kind is `inner`.
 
@@ -1173,10 +1195,9 @@ AddExpr       ::= MulExpr (("+" | "-") MulExpr)* ;
 MulExpr       ::= UnaryExpr (("*" | "/" | "%") UnaryExpr)* ;
 UnaryExpr     ::= ("not" | "!" | "-") UnaryExpr | PrimaryExpr ;
 PrimaryExpr   ::= Literal
-                | ColumnToken
-                | Ident
                 | WindowExpr
                 | CallExpr
+                | ColumnRef
                 | "(" ValueExpr ")" ;
 WindowExpr      ::= CallExpr "over" "(" WindowSpec ")" ;
 WindowSpec      ::= PartitionClause? OrderClause? WindowFrame? ;
@@ -1190,14 +1211,16 @@ FrameBound      ::= "unbounded_preceding"
                   | "unbounded_following" ;
 CallExpr        ::= Ident "(" ArgList? ")" ;
 ArgList         ::= ValueExpr ("," ValueExpr)* ;
+ColumnRef       ::= Ident | EscapedColumnRef ;
+ColumnName      ::= Ident | EscapedColumnRef ;
 ```
 
 Comparison chaining is not supported.
 
-`"a" < "b" < "c"` MUST produce `E1408` or a type error with help suggesting
-`"a" < "b" and "b" < "c"`.
+`a < b < c` MUST produce `E1408` or a type error with help suggesting
+`a < b and b < c`.
 
-Window expressions are implemented in version 0.25.0 for `mutate`
+Window expressions are specified in version 0.26.0 for `mutate`
 assignments. Using a window expression outside `mutate`, nesting one window
 expression inside another, or using a window function without `over (...)` MUST
 produce `E1226`.
@@ -1254,7 +1277,8 @@ Each stage sees the schema produced by the previous stage.
 
 Column references resolve against that current schema.
 
-Columns introduced by `mutate`, `select as`, `rename`, or `agg as` are available to later stages.
+Columns introduced by `mutate`, assignment-form `select`, `rename`, or `agg`
+are available to later stages.
 
 Dropped columns are unavailable to later stages.
 
@@ -1282,9 +1306,10 @@ Bindings and stage keywords occupy different syntactic positions.
 
 A binding may not use a reserved keyword.
 
-Column names may match reserved keywords.
+Column names may match reserved keywords when referenced with backticks.
 
-Column names may match binding names because column references are quoted and binding references are bare identifiers.
+Column names may match binding names. Grammar position distinguishes pipeline
+binding references from column references.
 
 ## 9. Type System
 
@@ -1417,7 +1442,7 @@ CSV loading MUST support:
 - comma delimiter by default
 
 Configurable CSV delimiters, quote characters, and null tokens remain deferred
-in version 0.25.0. A future release MAY promote them with source or CLI option
+in version 0.26.0. A future release MAY promote them with source or CLI option
 syntax, diagnostics, examples, and tests.
 
 CSV output MUST be deterministic.
@@ -1473,7 +1498,7 @@ Arrow streams begin with a continuation marker and schema message.
 
 The v0.15.0 native implementation supports `arrow-stream` for `--stdout-format`,
 `--stdin-format`, `load stdin`, `save stdout`, and explicit-format file
-loads/saves. The v0.25.0 WASM browser run ABI continues to reject binary stdout
+loads/saves. The v0.26.0 WASM browser run ABI continues to reject binary stdout
 formats because its current stdout field is UTF-8 text.
 
 The runtime SHOULD read and write record batches without unnecessary conversion.
@@ -1602,13 +1627,13 @@ Predicate type must be boolean or nullable boolean.
 
 `filter` preserves row order.
 
-`filter` may refine nullability after checks such as `"col" != null`.
+`filter` may refine nullability after checks such as `amount != null`.
 
 ### 11.3 Select
 
 `select` keeps columns in listed order.
 
-`select "a" as "b"` renames a selected column.
+`select b = a` renames a selected column.
 
 Unknown selected columns MUST produce `E1005`.
 
@@ -1626,7 +1651,7 @@ Dropping all columns is legal but SHOULD produce `W2003`.
 
 ### 11.5 Rename
 
-`rename "old" as "new"` renames columns.
+`rename new = old` renames columns.
 
 Rename preserves column order.
 
@@ -1634,7 +1659,7 @@ Renaming to an existing column MUST produce `E1207` unless overwrite behavior is
 
 ### 11.6 Mutate
 
-`mutate "name" = expression` adds or replaces columns.
+`mutate name = expression` adds or replaces columns.
 
 Assignments in one stage are parallel.
 
@@ -1646,7 +1671,7 @@ New columns append in assignment order.
 
 Duplicate assignment targets in one `mutate` stage MUST produce `E1207`.
 
-The version 0.25.0 implementation supports scalar row expressions and window
+The version 0.26.0 target language supports scalar row expressions and window
 expressions in `mutate`.
 
 ### 11.7 Group By
@@ -1669,11 +1694,11 @@ With active group state, one output row is produced per group.
 
 Without active group state, one output row is produced for the whole table.
 
-Every aggregate item MUST use `as`.
+Every aggregate item MUST use left-hand assignment.
 
-A misspelled aggregate alias introducer followed by a quoted alias SHOULD
-produce only the aggregate `as` diagnostic and recover the alias for later
-schema-backed diagnostics.
+A v0.25 aggregate alias form such as `sum(amount) as revenue` SHOULD produce a
+targeted migration diagnostic and recover the output name for later
+schema-backed diagnostics where practical.
 
 Aggregate output column names MUST be unique.
 
@@ -1705,9 +1730,9 @@ Using `limit` after a stage with unstable order SHOULD produce `W2004`.
 
 ### 11.11 Join
 
-`join binding on "key"` joins the current table with a named binding.
+`join binding on key` joins the current table with a named binding.
 
-`join binding on ("left_key", "right_key")` joins differently named keys.
+`join binding on (left_key, right_key)` joins differently named keys.
 
 Supported kinds:
 
@@ -1766,7 +1791,7 @@ first row in left-then-right order is retained.
 
 `distinct` removes duplicate rows using all columns.
 
-`distinct "a", "b"` removes duplicates using selected key columns.
+`distinct a, b` removes duplicates using selected key columns.
 
 The first row in current order is retained.
 
@@ -1838,8 +1863,31 @@ They are valid in `mutate` assignments:
 
 ```pdl
 load "sales.parquet"
-  | mutate "region_revenue" = sum("amount") over (partition_by "region")
-  | mutate "region_rank" = dense_rank() over (partition_by "region" order_by "amount" desc)
+  | mutate region_revenue = sum(amount) over (partition_by region)
+  | mutate region_rank = dense_rank() over (partition_by region order_by amount desc)
+```
+
+Running calculations use an explicit `rows between` frame:
+
+```pdl
+load "sales.csv"
+  | mutate running_region_revenue =
+      sum(amount) over (
+        partition_by region
+        order_by order_date
+        rows between unbounded_preceding and current_row
+      )
+```
+
+Offset calculations use `lag` or `lead` over an ordered partition:
+
+```pdl
+load "sales.csv"
+  | mutate previous_amount =
+      lag(amount) over (
+        partition_by customer_id
+        order_by order_date, order_id
+      )
 ```
 
 Window expressions MUST NOT use active `group_by` state.
@@ -1865,8 +1913,9 @@ Assignments in a `mutate` stage containing window expressions remain parallel:
 one assignment MUST NOT see another assignment from the same stage.
 
 The default frame for aggregate-style and value window functions is the whole
-partition. Running calculations require an explicit frame such as
-`rows between unbounded_preceding and current_row`.
+partition. Running calculations require an explicit frame. The frame
+`rows between unbounded_preceding and current_row` MUST remain valid v0.26
+syntax and means the first row in the partition through the current row.
 
 Window execution MAY require materializing the current table or partition.
 
@@ -1882,34 +1931,32 @@ Aggregate expressions can reference aggregate functions and group keys.
 
 Window expressions are a row-expression form valid in `mutate` assignments.
 They do not introduce aggregate context, and they are not valid inside `agg`,
-`filter`, `sort`, or other non-`mutate` expression positions in version 0.25.0.
+`filter`, `sort`, or other non-`mutate` expression positions in version 0.26.0.
 
 Path context accepts string literals and future path functions.
 
 Format context accepts canonical format names.
 
-### 12.2 Column And Literal Disambiguation
+### 12.2 Column And Literal Resolution
 
-Because PDL uses double quotes for the concise column syntax, expression analysis MUST be deterministic.
+Expression analysis MUST be deterministic.
 
 Rules:
 
-1. In declared column positions, quoted tokens are column references.
-2. In aggregate function arguments, quoted tokens are column references unless wrapped by `lit`.
-3. In the left operand of a simple comparison predicate, quoted tokens are column references when matching or provisionally matching the current schema.
-4. In the right operand of a simple comparison predicate, quoted tokens are string literals unless wrapped by `col`.
-5. `col("name")` always means column reference.
-6. `lit("value")` always means string literal.
+1. In expression and column positions, a bare identifier is a column reference
+   unless it is followed by `(` and parsed as a function call.
+2. A backtick-delimited token is always an escaped column reference.
+3. A double-quoted token is always a string literal in expression context.
+4. Path context accepts double-quoted path literals.
+5. Format context accepts canonical format names.
 
-Implementations SHOULD emit helpful diagnostics when a quoted token could plausibly mean the other interpretation.
+Implementations SHOULD emit helpful diagnostics when source text appears to use
+v0.25 quoted-column syntax or `as` aliases.
 
 ### 12.3 Scalar Functions
 
-The version 0.25.0 implementation supports these scalar functions in row
+The version 0.26.0 target language supports these scalar functions in row
 expressions:
-
-- `col(name)`: resolves a quoted value as a column reference.
-- `lit(value)`: resolves a quoted value as a literal string.
 - `is_null(value)`: returns true when the value is null.
 - `not_null(value)`: returns true when the value is not null.
 - `coalesce(value, ...)`: returns the first non-null value, or null if all
@@ -1988,7 +2035,7 @@ Aggregating an empty group returns null except for `count`, which returns zero.
 
 ### 12.5 Window Functions
 
-Window function syntax is implemented in version 0.25.0 for `mutate`
+Window function syntax is specified in version 0.26.0 for `mutate`
 assignments.
 
 Window functions use ordinary function-call syntax followed by an `over` clause.
@@ -1997,23 +2044,32 @@ Examples:
 
 ```pdl
 load "orders.csv"
-  | mutate "customer_total" = sum("amount") over (partition_by "customer_id")
-  | mutate "running_total" =
-      sum("amount") over (
-        partition_by "customer_id"
-        order_by "order_date" asc
+  | mutate customer_total = sum(amount) over (partition_by customer_id)
+  | mutate running_total =
+      sum(amount) over (
+        partition_by customer_id
+        order_by order_date asc
         rows between unbounded_preceding and current_row
       )
 ```
 
 ```pdl
 load "orders.csv"
-  | mutate "rn" =
+  | mutate rn =
       row_number() over (
-        partition_by "customer_id"
-        order_by "order_date" desc, "order_id" asc
+        partition_by customer_id
+        order_by order_date desc, order_id asc
       )
-  | filter "rn" == 1
+  | filter rn == 1
+```
+
+```pdl
+load "orders.csv"
+  | mutate previous_order_amount =
+      lag(amount) over (
+        partition_by customer_id
+        order_by order_date asc, order_id asc
+      )
 ```
 
 Implemented ranking and distribution functions:
@@ -2044,6 +2100,8 @@ Implemented aggregate-style window functions:
 - `min(value)`
 - `max(value)`
 
+`lag(value)` and `lead(value)` use an offset of `1`.
+
 `offset` must be a non-negative integer literal. If `lag` or `lead` moves
 outside the partition, the function returns the `default` expression when
 provided and `null` otherwise.
@@ -2055,7 +2113,11 @@ when `order_by` is present. Running calculations require an explicit frame:
 rows between unbounded_preceding and current_row
 ```
 
-Ranking, distribution, and offset functions ignore frames in version 0.25.0.
+This frame includes the current row and every preceding row in the current
+partition according to the window `order_by` order, or the current partition
+order when no `order_by` is present.
+
+Ranking, distribution, and offset functions ignore frames in version 0.26.0.
 
 For `rank` and `dense_rank`, peer rows are rows with equal `order_by` values.
 
@@ -2087,7 +2149,7 @@ Non-deterministic function not allowed MUST produce `E1405`.
 
 Divide by zero detected statically MUST produce `E1407`.
 
-Invalid window specifications MUST produce stable diagnostics; version 0.25.0
+Invalid window specifications MUST produce stable diagnostics; version 0.26.0
 uses `E1203`, `E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1401`, or
 `E1402` depending on the malformed clause.
 
@@ -2218,7 +2280,7 @@ provided.
 
 `pdl schema file.pdl --json` prints deterministic JSON.
 
-The version 0.25.0 implementation emits column names, unknown logical types,
+The version 0.26.0 implementation emits column names, unknown logical types,
 nullability, stage traces, named output schemas, and diagnostics in JSON mode.
 
 `--binding name` MUST inspect the requested binding without changing normal
@@ -2234,7 +2296,7 @@ It SHOULD show source reads, transform stages, format decisions, and sinks.
 
 `pdl plan file.pdl --json` prints deterministic JSON.
 
-The version 0.25.0 implementation accepts `--stdin-format <format>` and
+The version 0.26.0 implementation accepts `--stdin-format <format>` and
 `--stdout-format <format>` so stream choices are reflected in the plan. It MUST
 NOT read stdin or execute transforms while planning. Plans for named-output
 documents MUST include output boundaries in declaration order.
@@ -2247,7 +2309,7 @@ documents MUST include output boundaries in declaration order.
 
 The formatter MUST preserve semantics.
 
-The version 0.25.0 implementation rewrites files in place in the stable
+The version 0.26.0 implementation rewrites files in place in the stable
 leading-pipe style when formatting is available. It keeps short item lists
 inline, expands long item-list stages, and expands top-level window assignments
 in `mutate`. It returns a non-zero exit code without writing when parse errors
@@ -2259,7 +2321,7 @@ are present or when comments make safe rewriting unavailable.
 
 It MUST NOT execute data pipelines or read table data.
 
-The version 0.25.0 implementation exits non-zero on parse errors. When parsing
+The version 0.26.0 implementation exits non-zero on parse errors. When parsing
 succeeds, its JSON payload includes the parsed program, output declarations, and
 parse diagnostics.
 
@@ -2269,7 +2331,7 @@ parse diagnostics.
 
 It MUST NOT execute data pipelines or write output artifacts.
 
-The version 0.25.0 implementation exits non-zero when syntax, schema, or
+The version 0.26.0 implementation exits non-zero when syntax, schema, or
 semantic errors prevent IR construction. Successful IR JSON includes output
 declarations when present.
 
@@ -2279,7 +2341,7 @@ declarations when present.
 
 It MUST NOT execute transforms or write output artifacts.
 
-The version 0.25.0 implementation accepts `--stdin-format <format>` and
+The version 0.26.0 implementation accepts `--stdin-format <format>` and
 `--stdout-format <format>`, includes source, driver, stream, execution-plan,
 final-schema, output schemas, diagnostics, and Arrow-stdout stream hint fields, and exits
 non-zero when planning fails.
@@ -2375,7 +2437,7 @@ Strict mode MUST fail on row-level parse errors.
 
 The runtime SHOULD emit a run manifest when requested.
 
-The version 0.25.0 native CLI implements `pdl manifest file.pdl` as a
+The version 0.26.0 native CLI implements `pdl manifest file.pdl` as a
 deterministic dry-run manifest inspection command. It plans but does not execute
 the pipeline, and it does not write output artifacts.
 
@@ -2440,8 +2502,8 @@ PDL can materialize a file:
 
 ```pdl
 load "sales.parquet"
-  | group_by "region"
-  | agg sum("amount") as "revenue"
+  | group_by region
+  | agg revenue = sum(amount)
   | save "build/revenue.csv"
 ```
 
@@ -2487,7 +2549,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.25.0` LSP implementation provides diagnostics,
+The current `0.26.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, semantic tokens, document symbols,
 schema-aware output declarations, and same-document binding go-to-definition,
 references, and rename. Code actions, output selectors, and cross-document
@@ -2556,9 +2618,9 @@ Example formatted style:
 
 ```pdl
 load "sales.parquet"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue"
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount)
   | save "out.csv"
 ```
 
@@ -2566,16 +2628,16 @@ Example expanded window style:
 
 ```pdl
 load "sales.csv"
-  | filter "status" == "completed"
+  | filter status == "completed"
   | mutate
-      "customer_sale_number" =
+      customer_sale_number =
         row_number() over (
-          partition_by "customer_id"
-          order_by "amount" desc
+          partition_by customer_id
+          order_by amount desc
         ),
-      "customer_revenue" =
-        sum("amount") over (
-          partition_by "customer_id"
+      customer_revenue =
+        sum(amount) over (
+          partition_by customer_id
         )
 ```
 
@@ -2630,6 +2692,12 @@ The extension MAY include:
 - packaging metadata
 
 The TextMate grammar is only for static highlighting before semantic tokens arrive.
+
+When static highlighting assets are shipped, the TextMate grammar SHOULD scope
+implemented scalar, aggregate, and window function names under
+`support.function.*.pdl`. Aggregate-style window calls such as
+`sum(amount) over (...)` SHOULD receive a window function scope when the grammar
+can identify the following `over` clause.
 
 The language configuration is only for editor behaviors such as brackets, comments, indentation, and word patterns.
 
@@ -2693,12 +2761,12 @@ The v0.24 WASM implementation MUST expose packed JSON calls for:
 
 The browser run request's host file map is format-neutral and MAY contain
 multiple files: keys are logical file paths and values are host-supplied file
-contents. Version 0.25.0 requires CSV and JSON Lines host file contents to
+contents. Version 0.26.0 requires CSV and JSON Lines host file contents to
 execute successfully through this JSON ABI because host files are supplied as
 UTF-8 strings. Binary host-file contents remain deferred until the ABI accepts
 byte payloads. The ABI MUST NOT special-case CSV at the TypeScript editor layer.
 
-`pdl_run_json` in version 0.25.0 MUST support CSV and JSON Lines stdout for the
+`pdl_run_json` in version 0.26.0 MUST support CSV and JSON Lines stdout for the
 resulting table when a stdout format is requested or when the document has no
 named outputs and no stdout format is supplied. For documents with named output
 declarations and no requested stdout format, `pdl_run_json` MUST return an
@@ -2706,7 +2774,7 @@ declarations and no requested stdout format, `pdl_run_json` MUST return an
 contains `columns` and string-rendered `rows`. The browser run facade MUST NOT
 write path-backed `save` sinks to the native filesystem.
 
-In version 0.25.0, `pdl_run_json` MUST additionally return a `files` object for
+In version 0.26.0, `pdl_run_json` MUST additionally return a `files` object for
 text path-backed `save` sinks inside named outputs. The object keys are logical
 save paths as written by the PDL document, and the values are UTF-8 text
 contents encoded with the sink's effective format. CSV and JSON Lines saves MUST
@@ -2716,7 +2784,7 @@ work. Binary virtual file payloads, Arrow IPC byte output, and binary dataframe
 decoders remain deferred until a later plan promotes a byte-oriented browser
 ABI.
 
-For hover requests, `pdl_editor_service_json` in version 0.25.0 MUST use the
+For hover requests, `pdl_editor_service_json` in version 0.26.0 MUST use the
 same host file map through in-memory driver I/O so Monaco/WASM hover previews
 match native LSP hover behavior for text-backed paths and columns.
 
@@ -2735,6 +2803,11 @@ The demo host SHOULD use Monaco.
 The demo host MUST call the WASM editor-service ABI for language features.
 
 The demo host MUST NOT implement a separate PDL parser or analyzer.
+
+The demo host SHOULD reuse the VS Code TextMate grammar for static Monaco
+highlighting and SHOULD style the full `support.function.*.pdl` scope family so
+scalar, aggregate, ranking, and aggregate-style window functions are highlighted
+consistently.
 
 The v0.7 demo host MUST be a single-page React/Vite workbench with one PDL
 Monaco editor, one host-supplied dataframe input display, one dataframe output
@@ -2818,7 +2891,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.25.0"
+version = "0.26.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3395,7 +3468,7 @@ PDL parser recovery SHOULD synchronize at:
 - top-level `let`
 - stage keywords
 - commas in argument lists
-- `as` aliases
+- assignment targets
 - join `on` clauses
 - newline boundaries where a new pipeline can begin
 - EOF
@@ -3886,7 +3959,7 @@ stage-argument error.
 
 `E0001` unexpected token.
 
-`E0002` unterminated quoted token.
+`E0002` unterminated string token or escaped column reference.
 
 `E0003` unterminated block comment.
 
@@ -3910,7 +3983,7 @@ stage-argument error.
 
 `E0013` expected comma or closing delimiter.
 
-`E0014` expected alias after `as`.
+`E0014` expected assignment target.
 
 `E0015` expected `=`.
 
@@ -3933,6 +4006,10 @@ stage-argument error.
 `E0024` expected source or sink target.
 
 `E0025` required language feature is not enabled.
+
+`E0026` double-quoted token is not a column reference in v0.26 syntax.
+
+`E0027` legacy `as` alias syntax is not valid in v0.26 syntax.
 
 ### 20.3 Binding, Scope, Column, And Schema Diagnostics
 
@@ -4082,7 +4159,7 @@ stage-argument error.
 
 `E1416` window function is not allowed in aggregate context.
 
-`E1417` aggregate item requires `as`.
+`E1417` aggregate item requires assignment.
 
 ### 20.7 Planning Diagnostics
 
@@ -4206,7 +4283,8 @@ stage-argument error.
 
 `W2001` active grouping state was not consumed by `agg`.
 
-`W2002` ambiguous quoted token.
+`W2002` ambiguous quoted token. Retired from active v0.26 syntax; reserved for
+pre-v0.26 compatibility diagnostics.
 
 `W2003` dropping all columns.
 
@@ -4230,7 +4308,12 @@ stage-argument error.
 
 ### 20.13 Hint Diagnostics
 
-`H3001` use `col(...)` or `lit(...)` to disambiguate a quoted token.
+`H3001` use `col(...)` or `lit(...)` to disambiguate a quoted token. Retired
+from active v0.26 syntax; reserved for pre-v0.26 compatibility diagnostics.
+
+`H3011` write a simple column reference as a bare identifier.
+
+`H3012` write a non-simple or reserved column reference with backticks.
 
 `H3002` add `agg` after `group_by`.
 
@@ -4244,11 +4327,15 @@ stage-argument error.
 
 `H3007` use `--stdout-format` when piping data.
 
-`H3008` add `as` to avoid an output column collision.
+`H3008` add an explicit assignment target to avoid an output column collision.
 
 `H3009` use the canonical lowercase format name.
 
 `H3010` add an explicit overwrite option when replacing files.
+
+`H3011` use a bare identifier or backticks for a column reference.
+
+`H3012` write aliases as `new_name = expression`.
 
 ### 20.14 Internal Runtime Diagnostics
 
@@ -4383,7 +4470,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.25.0.
+PDL source does not require an explicit version declaration in draft 0.26.0.
 
 The implementation SHOULD report supported language version.
 
@@ -4431,15 +4518,15 @@ FormatName       ::= StringToken | Ident ;
 
 FilterStage      ::= "filter" PredicateExpr ;
 SelectStage      ::= "select" SelectItem ("," SelectItem)* ;
-SelectItem       ::= ColumnRef ("as" ColumnName)? ;
+SelectItem       ::= ColumnRef | ColumnName "=" ColumnRef ;
 DropStage        ::= "drop" ColumnRef ("," ColumnRef)* ;
 RenameStage      ::= "rename" RenameItem ("," RenameItem)* ;
-RenameItem       ::= ColumnRef "as" ColumnName ;
+RenameItem       ::= ColumnName "=" ColumnRef ;
 MutateStage      ::= "mutate" Assignment ("," Assignment)* ;
 Assignment       ::= ColumnName "=" ValueExpr ;
 GroupByStage     ::= "group_by" ColumnRef ("," ColumnRef)* ;
 AggStage         ::= "agg" AggItem ("," AggItem)* ;
-AggItem          ::= AggCall "as" ColumnName ;
+AggItem          ::= ColumnName "=" AggCall ;
 AggCall          ::= Ident "(" ArgList? ")" ;
 SortStage        ::= "sort" SortItem ("," SortItem)* ;
 SortItem         ::= ColumnRef SortDirection? NullsOrder? ;
@@ -4472,10 +4559,9 @@ AddExpr          ::= MulExpr (("+" | "-") MulExpr)* ;
 MulExpr          ::= UnaryExpr (("*" | "/" | "%") UnaryExpr)* ;
 UnaryExpr        ::= ("not" | "!" | "-") UnaryExpr | PrimaryExpr ;
 PrimaryExpr      ::= Literal
-                   | ColumnToken
-                   | Ident
                    | WindowExpr
                    | CallExpr
+                   | ColumnRef
                    | "(" ValueExpr ")" ;
 WindowExpr       ::= CallExpr "over" "(" WindowSpec ")" ;
 WindowSpec       ::= PartitionClause? OrderClause? WindowFrame? ;
@@ -4489,8 +4575,8 @@ FrameBound       ::= "unbounded_preceding"
                    | "unbounded_following" ;
 CallExpr         ::= Ident "(" ArgList? ")" ;
 ArgList          ::= ValueExpr ("," ValueExpr)* ;
-ColumnRef        ::= StringToken | CallExpr ;
-ColumnName       ::= StringToken ;
+ColumnRef        ::= Ident | EscapedColumnRef ;
+ColumnName       ::= Ident | EscapedColumnRef ;
 Literal          ::= StringToken | NumberLiteral | BoolLiteral | "null" ;
 BoolLiteral      ::= "true" | "false" ;
 ```
@@ -4501,10 +4587,10 @@ BoolLiteral      ::= "true" | "false" ;
 
 ```pdl
 load "sales.parquet"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age"
-  | sort "total_revenue" desc
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age)
+  | sort total_revenue desc
   | limit 5
   | save "top_regions.csv"
 ```
@@ -4513,8 +4599,8 @@ load "sales.parquet"
 
 ```pdl
 load "raw_orders.csv"
-  | select "Order ID" as "order_id", "Customer ID" as "customer_id", "Amount" as "amount"
-  | filter "amount" > 0
+  | select order_id = `Order ID`, customer_id = `Customer ID`, amount = `Amount`
+  | filter amount > 0
   | save "orders.csv"
 ```
 
@@ -4522,11 +4608,14 @@ load "raw_orders.csv"
 
 ```pdl
 load "orders_raw.csv"
-  | filter lower(trim("status")) == "completed"
-  | mutate "net_amount" = "gross_amount" - coalesce("discount", 0), "region_channel" = concat(upper(trim("region")), lit(":"), lower(trim("channel"))), "priority" = if_else("gross_amount" >= 150, lit("high"), lit("standard"))
-  | distinct "order_id"
-  | select "order_id", "region_channel", "net_amount", "priority"
-  | sort "order_id"
+  | filter lower(trim(status)) == "completed"
+  | mutate
+      net_amount = gross_amount - coalesce(discount, 0),
+      region_channel = concat(upper(trim(region)), ":", lower(trim(channel))),
+      priority = if_else(gross_amount >= 150, "high", "standard")
+  | distinct order_id
+  | select order_id, region_channel, net_amount, priority
+  | sort order_id
 ```
 
 The runnable repository example is `examples/orders_cleaned.pdl`.
@@ -4535,9 +4624,9 @@ The runnable repository example is `examples/orders_cleaned.pdl`.
 
 ```pdl
 load "sales.parquet"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "revenue"
+  | filter status == "completed"
+  | group_by region
+  | agg revenue = sum(amount)
 ```
 
 Run:
@@ -4551,21 +4640,22 @@ pdl run sales_for_stream.pdl --stdout-format arrow-stream > sales.arrow
 ```pdl
 let customers =
   load "customers.csv"
-  | select "customer_id", "segment"
+  | select customer_id, segment
 
 load "sales.csv"
-  | filter "status" == "completed"
-  | join customers on "customer_id" kind left
-  | group_by "segment"
-  | agg sum("amount") as "revenue", count() as "orders"
-  | sort "revenue" desc
+  | filter status == "completed"
+  | join customers on customer_id kind left
+  | group_by segment
+  | agg revenue = sum(amount), orders = count()
+  | sort revenue desc
 ```
 
 ## 27. Appendix C: Implementation Checklist
 
 Syntax:
 
-- Lexer supports UTF-8, comments, quoted tokens, numbers, identifiers, operators, and spans.
+- Lexer supports UTF-8, comments, string tokens, backtick column references,
+  numbers, identifiers, operators, and spans.
 - Parser supports resilient pipeline parsing.
 - Parser supports `let` bindings, named `output` declarations, and main pipeline.
 - Formatter emits stable leading-pipe style.

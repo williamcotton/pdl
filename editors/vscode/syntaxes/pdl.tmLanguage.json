@@ -10,6 +10,9 @@
       "include": "#strings"
     },
     {
+      "include": "#backtickColumns"
+    },
+    {
       "include": "#numbers"
     },
     {
@@ -51,6 +54,21 @@
         }
       ]
     },
+    "backtickColumns": {
+      "patterns": [
+        {
+          "name": "variable.other.column.pdl",
+          "begin": "`",
+          "end": "`",
+          "patterns": [
+            {
+              "name": "constant.character.escape.pdl",
+              "match": "\\\\(?:[`\\\\])"
+            }
+          ]
+        }
+      ]
+    },
     "numbers": {
       "patterns": [
         {
@@ -79,7 +97,7 @@
       "patterns": [
         {
           "name": "keyword.control.pdl",
-          "match": "\\b(?:let|output|load|filter|select|drop|rename|mutate|group_by|agg|sort|limit|join|union|distinct|pivot_longer|complete|save|as|on|kind|by_name|names_to|values_to|fill|format|over|partition_by|order_by|rows|between|unbounded_preceding|current_row|unbounded_following|preceding|following|stdin|stdout|and|or|not|asc|desc|inner|left|right|full|semi|anti|nulls_first|nulls_last)\\b"
+          "match": "\\b(?:let|output|load|filter|select|drop|rename|mutate|group_by|agg|sort|limit|join|union|distinct|pivot_longer|complete|save|on|kind|by_name|names_to|values_to|fill|format|over|partition_by|order_by|rows|between|unbounded_preceding|current_row|unbounded_following|preceding|following|stdin|stdout|and|or|not|asc|desc|inner|left|right|full|semi|anti|nulls_first|nulls_last)\\b"
         },
         {
           "name": "constant.language.pdl",
@@ -90,12 +108,16 @@
     "functions": {
       "patterns": [
         {
+          "name": "support.function.window.pdl",
+          "match": "\\b(?:count|count_distinct|sum|mean|min|max)\\b(?=\\s*\\([^)]*\\)\\s*over\\b)"
+        },
+        {
           "name": "support.function.aggregate.pdl",
           "match": "\\b(?:count|count_distinct|sum|mean|min|max)\\b(?=\\s*\\()"
         },
         {
           "name": "support.function.scalar.pdl",
-          "match": "\\b(?:col|lit|is_null|not_null|coalesce|concat|lower|upper|trim|to_number|abs|round|if_else)\\b(?=\\s*\\()"
+          "match": "\\b(?:is_null|not_null|coalesce|concat|lower|upper|trim|to_number|abs|round|if_else)\\b(?=\\s*\\()"
         },
         {
           "name": "support.function.window.pdl",
