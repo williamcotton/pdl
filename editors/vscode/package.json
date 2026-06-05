@@ -2,7 +2,7 @@
   "name": "pdl-vscode",
   "displayName": "PDL",
   "description": "Language support for the Pipeline Data Language.",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "publisher": "pdl",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -38,6 +38,51 @@
         "language": "pdl",
         "scopeName": "source.pdl",
         "path": "./syntaxes/pdl.tmLanguage.json"
+      }
+    ],
+    "semanticTokenTypes": [
+      {
+        "id": "pdlBindingDeclaration",
+        "superType": "namespace",
+        "description": "PDL table binding declaration."
+      },
+      {
+        "id": "pdlBindingReference",
+        "superType": "namespace",
+        "description": "PDL table binding reference."
+      },
+      {
+        "id": "pdlColumnDefinition",
+        "superType": "parameter",
+        "description": "PDL column definition."
+      },
+      {
+        "id": "pdlColumnReference",
+        "superType": "variable",
+        "description": "PDL column reference."
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "pdl",
+        "scopes": {
+          "pdlBindingDeclaration": [
+            "entity.name.namespace.pdl",
+            "variable.other.declaration.pdl"
+          ],
+          "pdlBindingReference": [
+            "support.type.namespace.pdl",
+            "variable.other.binding.pdl"
+          ],
+          "pdlColumnDefinition": [
+            "variable.parameter.pdl",
+            "variable.other.column.definition.pdl"
+          ],
+          "pdlColumnReference": [
+            "variable.other.readwrite.pdl",
+            "variable.other.column.pdl"
+          ]
+        }
       }
     ],
     "configuration": {

@@ -1,6 +1,6 @@
 {
   "name": "pdl-wasm",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "description": "Browser runtime loader and TypeScript ABI types for PDL.",
   "license": "MIT OR Apache-2.0",
   "type": "module",

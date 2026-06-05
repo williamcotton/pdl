@@ -79,6 +79,10 @@ pub enum SemanticTokenKind {
     String,
     Number,
     Operator,
+    BindingDeclaration,
+    BindingReference,
+    ColumnDefinition,
+    ColumnReference,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -254,6 +258,8 @@ pub fn formatting_edit(source: &str) -> Option<EditorTextEdit> {
 
 pub fn semantic_tokens(source: &str) -> Vec<EditorSemanticToken> {
     let mut tokens = Vec::new();
+    let parse = pdl_syntax::parse(source);
+    let semantic_names = semantic_name_overrides(source, &parse.program);
     let mut pos = 0usize;
 
     while pos < source.len() {
@@ -274,7 +280,11 @@ pub fn semantic_tokens(source: &str) -> Vec<EditorSemanticToken> {
             pos = end;
         } else if ch == '`' {
             let end = scan_backtick_column(source, pos);
-            push_semantic_token(source, &mut tokens, pos, end, SemanticTokenKind::Variable);
+            let token_type = semantic_names
+                .get(&(pos, end))
+                .copied()
+                .unwrap_or(SemanticTokenKind::Variable);
+            push_semantic_token(source, &mut tokens, pos, end, token_type);
             pos = end;
         } else if ch.is_ascii_digit() {
             let end = scan_number(source, pos);
@@ -293,6 +303,10 @@ pub fn semantic_tokens(source: &str) -> Vec<EditorSemanticToken> {
             } else {
                 SemanticTokenKind::Variable
             };
+            let token_type = semantic_names
+                .get(&(pos, end))
+                .copied()
+                .unwrap_or(token_type);
             push_semantic_token(source, &mut tokens, pos, end, token_type);
             pos = end;
         } else if let Some(end) = scan_operator(source, pos) {
@@ -304,6 +318,209 @@ pub fn semantic_tokens(source: &str) -> Vec<EditorSemanticToken> {
     }
 
     tokens
+}
+
+fn semantic_name_overrides(
+    source: &str,
+    program: &Program,
+) -> BTreeMap<(usize, usize), SemanticTokenKind> {
+    let mut names = BTreeMap::new();
+    for binding in &program.bindings {
+        push_semantic_name(
+            source,
+            &mut names,
+            binding.name.span,
+            SemanticTokenKind::BindingDeclaration,
+        );
+        collect_pipeline_semantic_names(source, &binding.pipeline, &mut names);
+    }
+    for output in &program.outputs {
+        collect_pipeline_semantic_names(source, &output.pipeline, &mut names);
+    }
+    if let Some(main) = &program.main {
+        collect_pipeline_semantic_names(source, main, &mut names);
+    }
+    names
+}
+
+fn collect_pipeline_semantic_names(
+    source: &str,
+    pipeline: &Pipeline,
+    names: &mut BTreeMap<(usize, usize), SemanticTokenKind>,
+) {
+    if let PipelineStart::Binding(name) = &pipeline.start {
+        push_semantic_name(
+            source,
+            names,
+            name.span,
+            SemanticTokenKind::BindingReference,
+        );
+    }
+    for stage in &pipeline.stages {
+        collect_stage_semantic_names(source, stage, names);
+    }
+}
+
+fn collect_stage_semantic_names(
+    source: &str,
+    stage: &Stage,
+    names: &mut BTreeMap<(usize, usize), SemanticTokenKind>,
+) {
+    match stage {
+        Stage::Filter { expr, .. } => collect_expr_column_references(source, expr, names),
+        Stage::Select { items, .. } => {
+            for item in items {
+                push_column_reference(source, names, item.column.span);
+                if let Some(alias) = &item.alias {
+                    push_column_definition(source, names, alias.span);
+                }
+            }
+        }
+        Stage::Drop { columns, .. } | Stage::GroupBy { columns, .. } => {
+            push_column_references(source, names, columns);
+        }
+        Stage::Rename { items, .. } => {
+            for item in items {
+                push_column_reference(source, names, item.old.span);
+                push_column_definition(source, names, item.new.span);
+            }
+        }
+        Stage::Mutate { items, .. } => {
+            for item in items {
+                push_column_definition(source, names, item.column.span);
+                collect_expr_column_references(source, &item.expr, names);
+            }
+        }
+        Stage::Agg { items, .. } => {
+            for item in items {
+                push_column_definition(source, names, item.alias.span);
+                for arg in &item.args {
+                    collect_expr_column_references(source, arg, names);
+                }
+            }
+        }
+        Stage::Sort { items, .. } => {
+            for item in items {
+                push_column_reference(source, names, item.column.span);
+            }
+        }
+        Stage::Join {
+            source: binding,
+            on,
+            ..
+        } => {
+            push_semantic_name(
+                source,
+                names,
+                binding.span,
+                SemanticTokenKind::BindingReference,
+            );
+            push_column_reference(source, names, on.left().span);
+            if on.right().span != on.left().span {
+                push_column_reference(source, names, on.right().span);
+            }
+        }
+        Stage::Union {
+            source: binding, ..
+        } => {
+            push_semantic_name(
+                source,
+                names,
+                binding.span,
+                SemanticTokenKind::BindingReference,
+            );
+        }
+        Stage::Distinct { columns, .. } => push_column_references(source, names, columns),
+        Stage::PivotLonger {
+            columns,
+            names_to,
+            values_to,
+            ..
+        } => {
+            push_column_references(source, names, columns);
+            push_column_definition(source, names, names_to.span);
+            push_column_definition(source, names, values_to.span);
+        }
+        Stage::Complete { keys, fills, .. } => {
+            push_column_references(source, names, keys);
+            for fill in fills {
+                push_column_definition(source, names, fill.column.span);
+                collect_expr_column_references(source, &fill.expr, names);
+            }
+        }
+        Stage::Limit { .. } | Stage::Save(_) | Stage::Unsupported { .. } => {}
+    }
+}
+
+fn collect_expr_column_references(
+    source: &str,
+    expr: &Expr,
+    names: &mut BTreeMap<(usize, usize), SemanticTokenKind>,
+) {
+    match expr {
+        Expr::Ident(value) => push_column_reference(source, names, value.span),
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_column_references(source, arg, names);
+            }
+        }
+        Expr::Window { args, spec, .. } => {
+            for arg in args {
+                collect_expr_column_references(source, arg, names);
+            }
+            push_column_references(source, names, &spec.partition_by);
+            for item in &spec.order_by {
+                push_column_reference(source, names, item.column.span);
+            }
+        }
+        Expr::Unary { expr, .. } => collect_expr_column_references(source, expr, names),
+        Expr::Binary { left, right, .. } => {
+            collect_expr_column_references(source, left, names);
+            collect_expr_column_references(source, right, names);
+        }
+        Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) => {}
+    }
+}
+
+fn push_column_references(
+    source: &str,
+    names: &mut BTreeMap<(usize, usize), SemanticTokenKind>,
+    columns: &[pdl_syntax::Spanned<String>],
+) {
+    for column in columns {
+        push_column_reference(source, names, column.span);
+    }
+}
+
+fn push_column_reference(
+    source: &str,
+    names: &mut BTreeMap<(usize, usize), SemanticTokenKind>,
+    span: Span,
+) {
+    push_semantic_name(source, names, span, SemanticTokenKind::ColumnReference);
+}
+
+fn push_column_definition(
+    source: &str,
+    names: &mut BTreeMap<(usize, usize), SemanticTokenKind>,
+    span: Span,
+) {
+    push_semantic_name(source, names, span, SemanticTokenKind::ColumnDefinition);
+}
+
+fn push_semantic_name(
+    source: &str,
+    names: &mut BTreeMap<(usize, usize), SemanticTokenKind>,
+    span: Span,
+    token_type: SemanticTokenKind,
+) {
+    let Some(text) = source.get(span.start..span.end) else {
+        return;
+    };
+    if text.is_empty() || text.starts_with('"') {
+        return;
+    }
+    names.insert((span.start, span.end), token_type);
 }
 
 pub fn document_symbols(source: &str) -> Vec<EditorDocumentSymbol> {
@@ -1576,17 +1793,198 @@ load "sales.csv"
                 "missing intact semantic token for {text}"
             );
         }
-        for text in ["status", "`group`", "total_revenue"] {
+        for text in ["status", "`group`"] {
             let start = source.find(text).expect("sample variable");
             let end = start + text.len();
             assert!(
                 tokens.iter().any(|token| {
-                    token.token_type == SemanticTokenKind::Variable
+                    token.token_type == SemanticTokenKind::ColumnReference
                         && token.range == range_for_span(source, Span::new(start, end))
                 }),
                 "missing intact semantic token for {text}"
             );
         }
+        let start = source.rfind("total_revenue").expect("sort key");
+        let end = start + "total_revenue".len();
+        assert!(
+            tokens.iter().any(|token| {
+                token.token_type == SemanticTokenKind::ColumnReference
+                    && token.range == range_for_span(source, Span::new(start, end))
+            }),
+            "missing intact semantic token for total_revenue sort key"
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_classify_bindings_and_columns_from_parsed_structure() {
+        let source = r#"let cleaned =
+  load "orders_raw.csv"
+  | filter lower(trim(status)) == "completed"
+  | mutate
+      net_amount = gross_amount - coalesce(discount, 0),
+      region_channel = concat(upper(trim(region)), ":", lower(trim(channel)))
+  | distinct order_id
+
+cleaned
+  | group_by region_channel
+  | agg orders = count(), revenue = sum(net_amount)
+  | sort revenue desc"#;
+        let tokens = semantic_tokens(source);
+
+        assert_token_kind(
+            source,
+            &tokens,
+            source.find("cleaned").expect("binding declaration"),
+            "cleaned",
+            SemanticTokenKind::BindingDeclaration,
+        );
+        assert_token_kind(
+            source,
+            &tokens,
+            source.rfind("cleaned").expect("binding reference"),
+            "cleaned",
+            SemanticTokenKind::BindingReference,
+        );
+
+        for name in ["net_amount", "region_channel"] {
+            assert_token_kind(
+                source,
+                &tokens,
+                source.find(name).expect("column definition"),
+                name,
+                SemanticTokenKind::ColumnDefinition,
+            );
+        }
+        for name in ["orders", "revenue"] {
+            assert_token_kind(
+                source,
+                &tokens,
+                source.find(&format!("{name} =")).expect("aggregate alias"),
+                name,
+                SemanticTokenKind::ColumnDefinition,
+            );
+        }
+
+        for name in ["status", "gross_amount", "discount", "order_id"] {
+            assert_token_kind(
+                source,
+                &tokens,
+                source.find(name).expect("column reference"),
+                name,
+                SemanticTokenKind::ColumnReference,
+            );
+        }
+        assert_token_kind(
+            source,
+            &tokens,
+            source.find("trim(region)").expect("region reference") + "trim(".len(),
+            "region",
+            SemanticTokenKind::ColumnReference,
+        );
+        assert_token_kind(
+            source,
+            &tokens,
+            source.find("trim(channel)").expect("channel reference") + "trim(".len(),
+            "channel",
+            SemanticTokenKind::ColumnReference,
+        );
+        for name in ["region_channel", "net_amount", "revenue"] {
+            assert_token_kind(
+                source,
+                &tokens,
+                source.rfind(name).expect("later column reference"),
+                name,
+                SemanticTokenKind::ColumnReference,
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_tokens_classify_stage_specific_column_positions() {
+        let source = r#"let customers =
+  load "customers.csv"
+
+load "orders.csv"
+  | join customers on (customer_id, id) kind left
+  | mutate row_num = row_number() over (partition_by region order_by order_date desc rows between unbounded_preceding and current_row)
+  | select final_region = region
+  | rename customer_key = id
+  | pivot_longer jan, feb names_to month values_to amount
+  | complete final_region fill amount = coalesce(amount, 0)"#;
+        let tokens = semantic_tokens(source);
+
+        assert_token_kind(
+            source,
+            &tokens,
+            source.find("customers on").expect("join binding source"),
+            "customers",
+            SemanticTokenKind::BindingReference,
+        );
+
+        for name in ["row_num", "final_region", "customer_key", "month", "amount"] {
+            assert_token_kind(
+                source,
+                &tokens,
+                source.find(name).expect("column definition"),
+                name,
+                SemanticTokenKind::ColumnDefinition,
+            );
+        }
+
+        assert_token_kind(
+            source,
+            &tokens,
+            source.find("customer_id").expect("join left key"),
+            "customer_id",
+            SemanticTokenKind::ColumnReference,
+        );
+        assert_token_kind(
+            source,
+            &tokens,
+            source.rfind("= id").expect("rename source") + "= ".len(),
+            "id",
+            SemanticTokenKind::ColumnReference,
+        );
+        assert_token_kind(
+            source,
+            &tokens,
+            source
+                .find("partition_by region")
+                .expect("window partition")
+                + "partition_by ".len(),
+            "region",
+            SemanticTokenKind::ColumnReference,
+        );
+        assert_token_kind(
+            source,
+            &tokens,
+            source.find("order_by order_date").expect("window order") + "order_by ".len(),
+            "order_date",
+            SemanticTokenKind::ColumnReference,
+        );
+        for name in ["jan", "feb"] {
+            assert_token_kind(
+                source,
+                &tokens,
+                source.find(name).expect("pivot source"),
+                name,
+                SemanticTokenKind::ColumnReference,
+            );
+        }
+        assert_token_kind(
+            source,
+            &tokens,
+            source.rfind("complete final_region").expect("complete key") + "complete ".len(),
+            "final_region",
+            SemanticTokenKind::ColumnReference,
+        );
+        assert_token_kind(
+            source,
+            &tokens,
+            source.rfind("amount").expect("complete fill expression"),
+            "amount",
+            SemanticTokenKind::ColumnReference,
+        );
     }
 
     #[test]
@@ -1622,5 +2020,21 @@ cleaned
 
     fn position_lte(left: TextPosition, right: TextPosition) -> bool {
         left.line < right.line || (left.line == right.line && left.character <= right.character)
+    }
+
+    fn assert_token_kind(
+        source: &str,
+        tokens: &[EditorSemanticToken],
+        start: usize,
+        text: &str,
+        token_type: SemanticTokenKind,
+    ) {
+        let span = Span::new(start, start + text.len());
+        assert!(
+            tokens.iter().any(|token| {
+                token.token_type == token_type && token.range == range_for_span(source, span)
+            }),
+            "missing {token_type:?} semantic token for {text:?} at {span:?}"
+        );
     }
 }

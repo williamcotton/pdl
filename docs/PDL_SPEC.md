@@ -1,14 +1,23 @@
 # PDL Detailed Specification
 
-Status: Draft 0.27.0
+Status: Draft 0.28.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.27.0`.
+The current repository implementation is `0.28.0`.
 
-Version 0.27.0 is a packaging and browser-editor integration release tracked in
+Version 0.28.0 is an editor semantic-token readability release tracked in
+`docs/V0_28_PLAN.md`. It keeps the v0.27 source language, runtime, CLI, LSP
+transport, and WASM execution semantics while adding parser-backed semantic
+token categories for table binding declarations, table binding references,
+column definitions, and column references. The token contract is exposed through
+`pdl-editor-services`, the LSP semantic-token legend, the browser WASM JSON ABI,
+the `pdl-wasm` TypeScript types, and the `pdl-editor` Monaco legend and default
+theme.
+
+Version 0.27.0 was a packaging and browser-editor integration release tracked in
 `docs/V0_27_PLAN.md`. It keeps the v0.26 source language, runtime, CLI, LSP,
 and WASM JSON ABI semantics while adding canonical editor assets under
 `editors/assets/`, a package-shaped `pdl-wasm` browser runtime loader under
@@ -79,7 +88,7 @@ GitHub Actions workflows for the Rust test suite and GitHub Pages demo
 deployment, plus GitHub Release asset publication for packaged editor and
 browser outputs.
 
-Version 0.27.0 does not yet implement configurable CSV dialect options, full
+Version 0.28.0 does not yet implement configurable CSV dialect options, full
 LSP code actions or cross-document navigation, Arrow IPC browser output,
 output selectors or full multi-output browser controls.
 Those features are tracked as deferred or planned work in successor release
@@ -2557,11 +2566,11 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.27.0` LSP implementation provides diagnostics,
-completion, driver-backed hover, formatting, semantic tokens, document symbols,
-schema-aware output declarations, and same-document binding go-to-definition,
-references, and rename. Code actions, output selectors, and cross-document
-navigation remain deferred.
+The current `0.28.0` LSP implementation provides diagnostics,
+completion, driver-backed hover, formatting, parser-backed semantic tokens,
+document symbols, schema-aware output declarations, and same-document binding
+go-to-definition, references, and rename. Code actions, output selectors, and
+cross-document navigation remain deferred.
 
 The current formatter withholds edits for documents containing comments because
 comment attachment is not yet source-preserving. The lexer and CST preserve
@@ -2609,7 +2618,61 @@ editor-service implementation. VS Code clients, Monaco hosts, and other editor
 adapters MUST NOT implement independent PDL parsing, semantic analysis, or CSV
 type inference.
 
-### 17.4 Formatting
+### 17.4 Semantic Tokens
+
+Editor semantic tokens MUST be produced by the shared Rust editor-service
+implementation. LSP, WASM, Monaco, VS Code clients, Studio, and other browser
+hosts MUST NOT reimplement PDL parsing or semantic token classification in
+TypeScript or other host-side adapter code.
+
+The editor-service token contract MUST include these token kinds:
+
+- `Keyword`
+- `Function`
+- `Variable`
+- `String`
+- `Number`
+- `Operator`
+- `BindingDeclaration`
+- `BindingReference`
+- `ColumnDefinition`
+- `ColumnReference`
+
+`BindingDeclaration` MUST classify the name introduced by a top-level `let`
+binding. `BindingReference` MUST classify table binding references at pipeline
+starts and in stages that consume named table bindings, such as `join` and
+`union`.
+
+`ColumnDefinition` MUST classify column names introduced or rewritten by output
+positions, including `mutate` assignment targets, aggregate aliases, select
+aliases, rename destination names, `pivot_longer` `names_to` and `values_to`
+names, and `complete fill` targets.
+
+`ColumnReference` MUST classify parsed column read positions, including filter
+expressions, select source columns, drop columns, rename source columns, mutate
+expressions, aggregate arguments, group keys, sort keys, distinct keys, join
+keys, pivot source columns, complete keys, complete fill expressions, and
+window `partition_by` and `order_by` columns.
+
+The LSP semantic-token legend MUST preserve the existing standard token order
+for `keyword`, `function`, `variable`, `string`, `number`, and `operator`, then
+append the PDL-specific token types `pdlBindingDeclaration`,
+`pdlBindingReference`, `pdlColumnDefinition`, and `pdlColumnReference`.
+
+The WASM editor-service JSON ABI MUST serialize the editor-service token kind
+names exactly as the Rust `SemanticTokenKind` variants. The `pdl-wasm`
+TypeScript types and `pdl-editor` Monaco provider MUST expose the same names.
+The Monaco legend MUST map those names to the LSP-style custom token type names
+listed above, and the default theme SHOULD style binding categories distinctly
+from column categories.
+
+Comments, strings, numbers, operators, keywords, and function names SHOULD keep
+their existing semantic-token behavior except where parser-backed PDL name
+classification intentionally identifies a parsed binding or column position.
+The TextMate grammar remains a static fallback and is not required to reproduce
+all parser-backed semantic-token categories.
+
+### 17.5 Formatting
 
 The formatter SHOULD use:
 
@@ -2653,7 +2716,7 @@ The current formatter withholds edits for documents containing comments because
 comment attachment is not yet source-preserving. Short item lists SHOULD remain
 inline so compact programs do not become unnecessarily vertical.
 
-### 17.5 VS Code Client
+### 17.6 VS Code Client
 
 The reference repository SHOULD include a VS Code extension under `editors/vscode/`.
 
@@ -2852,6 +2915,11 @@ analysis, diagnostics, completion, hover, formatting, semantic tokens, symbols,
 definition/reference, or rename in TypeScript; it MUST adapt the upstream
 WASM/editor-service ABI into Monaco providers.
 
+Since version 0.28.0, those package surfaces MUST expose the expanded semantic
+token categories defined by section 17.4. Browser hosts should receive binding
+and column highlighting by updating `pdl-wasm`, `pdl-editor`, and the generated
+WASM runtime rather than adding host-side PDL language logic.
+
 The packages MUST support unpublished local development. In source mode, hosts
 MAY install or alias sibling package directories from `../pdl` and pass an
 explicit local `wasmUrl` for a generated artifact copied into the host's public
@@ -2930,7 +2998,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.27.0"
+version = "0.28.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -4509,7 +4577,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.27.0.
+PDL source does not require an explicit version declaration in draft 0.28.0.
 
 The implementation SHOULD report supported language version.
 

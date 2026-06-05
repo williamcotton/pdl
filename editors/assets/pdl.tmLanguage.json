@@ -19,6 +19,9 @@
       "include": "#operators"
     },
     {
+      "include": "#declarations"
+    },
+    {
       "include": "#keywords"
     },
     {
@@ -90,6 +93,38 @@
         {
           "name": "keyword.operator.arithmetic.pdl",
           "match": "[+\\-*/%]"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "name": "meta.binding.declaration.pdl",
+          "match": "\\b(let)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.pdl"
+            },
+            "2": {
+              "name": "variable.other.declaration.pdl"
+            }
+          }
+        },
+        {
+          "name": "meta.output.declaration.pdl",
+          "match": "\\b(output)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.pdl"
+            },
+            "2": {
+              "name": "entity.name.function.output.pdl"
+            }
+          }
+        },
+        {
+          "name": "variable.parameter.pdl",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*=(?!=))"
         }
       ]
     },

@@ -409,6 +409,10 @@ fn semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenType::STRING,
             SemanticTokenType::NUMBER,
             SemanticTokenType::OPERATOR,
+            SemanticTokenType::new("pdlBindingDeclaration"),
+            SemanticTokenType::new("pdlBindingReference"),
+            SemanticTokenType::new("pdlColumnDefinition"),
+            SemanticTokenType::new("pdlColumnReference"),
         ],
         token_modifiers: Vec::new(),
     }
@@ -460,6 +464,10 @@ fn semantic_token_index(kind: SemanticTokenKind) -> u32 {
         SemanticTokenKind::String => 3,
         SemanticTokenKind::Number => 4,
         SemanticTokenKind::Operator => 5,
+        SemanticTokenKind::BindingDeclaration => 6,
+        SemanticTokenKind::BindingReference => 7,
+        SemanticTokenKind::ColumnDefinition => 8,
+        SemanticTokenKind::ColumnReference => 9,
     }
 }
 
@@ -551,5 +559,37 @@ mod tests {
             "{:?}",
             corrected_document.diagnostics
         );
+    }
+
+    #[test]
+    fn lsp_semantic_token_legend_includes_pdl_name_categories() {
+        let legend = semantic_tokens_legend();
+        let token_types = legend
+            .token_types
+            .iter()
+            .map(|token_type| token_type.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            token_types,
+            vec![
+                "keyword",
+                "function",
+                "variable",
+                "string",
+                "number",
+                "operator",
+                "pdlBindingDeclaration",
+                "pdlBindingReference",
+                "pdlColumnDefinition",
+                "pdlColumnReference",
+            ]
+        );
+        assert_eq!(semantic_token_index(SemanticTokenKind::Keyword), 0);
+        assert_eq!(
+            semantic_token_index(SemanticTokenKind::BindingDeclaration),
+            6
+        );
+        assert_eq!(semantic_token_index(SemanticTokenKind::ColumnReference), 9);
     }
 }

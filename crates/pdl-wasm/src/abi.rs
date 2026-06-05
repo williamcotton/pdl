@@ -628,6 +628,44 @@ output totals =
     }
 
     #[test]
+    fn editor_service_json_serializes_expanded_semantic_token_names() {
+        let request = serde_json::json!({
+            "source": r#"let cleaned =
+  load "orders.csv"
+  | mutate net_amount = gross_amount
+
+cleaned
+  | group_by net_amount"#,
+            "files": {
+                "orders.csv": "gross_amount\n10\n"
+            },
+            "request": { "kind": "semanticTokens" }
+        });
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&editor_service_json(&request.to_string())).expect("json");
+
+        assert!(payload["error"].is_null(), "{payload}");
+        let token_types = payload["result"]
+            .as_array()
+            .expect("semantic tokens")
+            .iter()
+            .filter_map(|token| token["token_type"].as_str())
+            .collect::<Vec<_>>();
+        for expected in [
+            "BindingDeclaration",
+            "BindingReference",
+            "ColumnDefinition",
+            "ColumnReference",
+        ] {
+            assert!(
+                token_types.contains(&expected),
+                "missing {expected} in {token_types:?}"
+            );
+        }
+    }
+
+    #[test]
     fn editor_service_json_uses_in_memory_csv_bytes_for_hover_preview() {
         let request = serde_json::json!({
             "source": "load \"sales.csv\"\n  | group_by region",

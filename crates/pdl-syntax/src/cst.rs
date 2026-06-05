@@ -124,22 +124,18 @@ impl CstBuilder<'_> {
                 Stage::Filter { expr, .. } => builder.expr(expr),
                 Stage::Select { items, .. } => {
                     for item in items {
-                        let end = item
+                        let span = item
                             .alias
                             .as_ref()
-                            .map_or(item.column.span.end, |alias| alias.span.end);
-                        builder.node(
-                            SyntaxKind::SelectItemNode,
-                            Span::new(item.column.span.start, end),
-                            |_| {},
-                        );
+                            .map_or(item.column.span, |alias| item.column.span.join(alias.span));
+                        builder.node(SyntaxKind::SelectItemNode, span, |_| {});
                     }
                 }
                 Stage::Rename { items, .. } => {
                     for item in items {
                         builder.node(
                             SyntaxKind::RenameItemNode,
-                            Span::new(item.old.span.start, item.new.span.end),
+                            item.old.span.join(item.new.span),
                             |_| {},
                         );
                     }
@@ -227,5 +223,25 @@ pub fn sink_span(sink: &SinkRef) -> Span {
     match sink {
         SinkRef::Path(value) => value.span,
         SinkRef::Stdout(span) => *span,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ast::Root;
+
+    #[test]
+    fn cst_builds_assignment_form_select_and_rename_items() {
+        let parse = crate::parse(
+            r#"load "orders.csv"
+  | select region_label = region
+  | rename customer_key = customer_id"#,
+        );
+        let root = Root::cast(parse.syntax).expect("root");
+        let pipeline = root.main_pipeline().expect("main pipeline");
+        let stages = pipeline.stages();
+
+        assert_eq!(stages[0].select_items().len(), 1);
+        assert_eq!(stages[1].rename_items().len(), 1);
     }
 }

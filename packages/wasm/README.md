@@ -1,6 +1,11 @@
 # pdl-wasm
 
-Browser runtime loader and structural TypeScript ABI types for PDL `0.27.x`.
+Browser runtime loader and structural TypeScript ABI types for PDL `0.28.x`.
+
+The `0.28.x` editor-service ABI includes parser-backed semantic token names for
+table bindings and columns. Downstream browser hosts should consume those names
+through this package and shared editor integrations such as `pdl-editor` rather
+than implementing PDL-specific token classification in TypeScript.
 
 During local source-mode development, build or copy `pdl.wasm` into the host
 app's public assets and pass that URL explicitly:

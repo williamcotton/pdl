@@ -17,7 +17,18 @@ export const PDL_THEME_NAME = "pdl-playground";
 export const PDL_MARKER_OWNER = "pdl-wasm";
 export const PDL_DEFAULT_MODEL_URI = "inmemory://pdl/main.pdl";
 
-const SEMANTIC_TOKEN_TYPES = ["keyword", "function", "variable", "string", "number", "operator"];
+const SEMANTIC_TOKEN_TYPES = [
+  "keyword",
+  "function",
+  "variable",
+  "string",
+  "number",
+  "operator",
+  "pdlBindingDeclaration",
+  "pdlBindingReference",
+  "pdlColumnDefinition",
+  "pdlColumnReference",
+];
 
 let setupPromise: Promise<void> | null = null;
 let onigasmPromise: Promise<void> | null = null;
@@ -66,7 +77,17 @@ export interface PdlTextEdit {
 
 export interface PdlSemanticToken {
   range: TextRange;
-  token_type: "Keyword" | "Function" | "Variable" | "String" | "Number" | "Operator";
+  token_type:
+    | "Keyword"
+    | "Function"
+    | "Variable"
+    | "String"
+    | "Number"
+    | "Operator"
+    | "BindingDeclaration"
+    | "BindingReference"
+    | "ColumnDefinition"
+    | "ColumnReference";
 }
 
 export type PdlEditorFeatureRequest =
@@ -325,8 +346,12 @@ export function defaultPdlTheme(): monaco.editor.IStandaloneThemeData {
       { token: "number", foreground: "b42318" },
       { token: "keyword", foreground: "166f5c", fontStyle: "bold" },
       { token: "function", foreground: "0f5f8f", fontStyle: "bold" },
-      { token: "property", foreground: "9a5512" },
+      { token: "property", foreground: "0e7490" },
       { token: "variable", foreground: "355f8c" },
+      { token: "pdlBindingDeclaration", foreground: "7c3aed", fontStyle: "bold" },
+      { token: "pdlBindingReference", foreground: "6d28d9" },
+      { token: "pdlColumnDefinition", foreground: "475569" },
+      { token: "pdlColumnReference", foreground: "0e7490" },
       { token: "operator", foreground: "4f5b63" },
       { token: "constant.character.escape", foreground: "9f5b00", fontStyle: "bold" },
       { token: "constant.numeric", foreground: "b42318" },
@@ -348,11 +373,18 @@ export function defaultPdlTheme(): monaco.editor.IStandaloneThemeData {
       { token: "entity.name.function.source", foreground: "3c6b22", fontStyle: "bold" },
       { token: "entity.name.function.literal", foreground: "6f42c1" },
       { token: "entity.name.function", foreground: "315f7d" },
+      { token: "entity.name.namespace", foreground: "7c3aed", fontStyle: "bold" },
+      { token: "support.type.namespace", foreground: "2563eb", fontStyle: "bold" },
       { token: "variable.parameter.property.unknown", foreground: "a33d2d" },
       { token: "variable.parameter.property", foreground: "9a5512" },
-      { token: "variable.other.declaration", foreground: "145f52", fontStyle: "bold" },
+      { token: "variable.other.declaration", foreground: "7c3aed", fontStyle: "bold" },
+      { token: "variable.other.binding", foreground: "2563eb", fontStyle: "bold" },
       { token: "variable.other.quoted", foreground: "385f70" },
-      { token: "variable.other.column", foreground: "355f8c" },
+      { token: "variable.parameter", foreground: "475569" },
+      { token: "variable.other.member", foreground: "475569" },
+      { token: "variable.other.readwrite", foreground: "475569" },
+      { token: "variable.other.column.definition", foreground: "475569" },
+      { token: "variable.other.column", foreground: "0e7490" },
       { token: "punctuation", foreground: "68757d" },
     ],
     colors: {
@@ -668,6 +700,14 @@ function semanticTokenIndex(kind: PdlSemanticToken["token_type"]): number {
       return 4;
     case "Operator":
       return 5;
+    case "BindingDeclaration":
+      return 6;
+    case "BindingReference":
+      return 7;
+    case "ColumnDefinition":
+      return 8;
+    case "ColumnReference":
+      return 9;
   }
 }
 

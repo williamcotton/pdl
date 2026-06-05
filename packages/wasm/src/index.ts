@@ -75,7 +75,17 @@ export interface PdlTextEdit {
 
 export interface PdlSemanticToken {
   range: TextRange;
-  token_type: "Keyword" | "Function" | "Variable" | "String" | "Number" | "Operator";
+  token_type:
+    | "Keyword"
+    | "Function"
+    | "Variable"
+    | "String"
+    | "Number"
+    | "Operator"
+    | "BindingDeclaration"
+    | "BindingReference"
+    | "ColumnDefinition"
+    | "ColumnReference";
 }
 
 export type PdlEditorFeatureRequest =
