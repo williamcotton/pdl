@@ -1,12 +1,20 @@
 # PDL Detailed Specification
 
-Status: Draft 0.29.0
+Status: Draft 0.30.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.29.0`.
+The current repository implementation is `0.30.0`.
+
+Version 0.30.0 is an npm publication-readiness release tracked in
+`docs/V0_30_PLAN.md`. It keeps the v0.29 source language, execution semantics,
+editor-service behavior, and browser JSON ABI stable while changing the
+package-shaped browser integrations to publish generated `dist/` entrypoints:
+CommonJS `dist/index.cjs`, ESM `dist/index.mjs`, TypeScript declarations, and
+package-local browser assets such as `dist/pdl.wasm` for `pdl-wasm` and static
+TextMate/language-configuration assets for `pdl-editor`.
 
 Version 0.29.0 is a reactive context release tracked in
 `docs/V0_29_PLAN.md`. It adds top-level `param` and `state` declarations,
@@ -2601,7 +2609,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.29.0` LSP implementation provides diagnostics,
+The current `0.30.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -2970,6 +2978,15 @@ ignored package `dist/` or workspace `artifacts/` directory and install them
 with `file:` paths before npm publication. Generated `pdl.wasm` binaries and
 local package tarballs MUST NOT be checked into source.
 
+Since version 0.30.0, published `pdl-wasm` and `pdl-editor` package manifests
+MUST expose generated `dist/` entrypoints for `main`, `module`, `types`, and
+`exports`, with CommonJS `dist/index.cjs`, ESM `dist/index.mjs`, and TypeScript
+declarations. The `pdl-wasm` tarball MUST include `dist/pdl.wasm`; the
+`pdl-editor` tarball MUST include generated `dist/` files plus package-local
+static editor assets. `prepack` MUST build the publishable surface, and release
+validation MUST inspect `npm pack --dry-run` output to prove ignored generated
+`dist/` files are included by the npm `files` whitelist.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3040,7 +3057,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.29.0"
+version = "0.30.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -4632,7 +4649,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.29.0.
+PDL source does not require an explicit version declaration in draft 0.30.0.
 
 The implementation SHOULD report supported language version.
 

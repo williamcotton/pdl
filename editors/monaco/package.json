@@ -1,16 +1,17 @@
 {
   "name": "pdl-editor",
-  "version": "0.29.0",
+  "version": "0.30.0",
   "description": "Monaco and React editor integration for PDL browser hosts.",
   "license": "MIT OR Apache-2.0",
   "type": "module",
-  "main": "./src/index.tsx",
-  "module": "./src/index.tsx",
-  "types": "./src/index.tsx",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.tsx",
-      "import": "./src/index.tsx"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
     },
     "./assets/pdl.tmLanguage.json": "./assets/pdl.tmLanguage.json",
     "./assets/language-configuration.json": "./assets/language-configuration.json",
@@ -18,7 +19,7 @@
   },
   "files": [
     "assets",
-    "src",
+    "dist",
     "README.md"
   ],
   "sideEffects": [
@@ -27,15 +28,17 @@
   "scripts": {
     "sync:assets": "node ../../scripts/sync-editor-assets.mjs",
     "check": "npm run sync:assets && tsc --noEmit",
-    "build": "npm run check",
-    "pack:local": "npm run build && mkdir -p ../../artifacts && npm pack --pack-destination ../../artifacts"
+    "build": "npm run check && tsup",
+    "prepack": "npm run build",
+    "clean": "rm -rf dist",
+    "pack:local": "mkdir -p ../../artifacts && npm pack --pack-destination ../../artifacts"
   },
   "peerDependencies": {
     "monaco-editor": "^0.55.1",
     "monaco-editor-textmate": "^4.0.0",
     "monaco-textmate": "^3.0.1",
     "onigasm": "^2.2.5",
-    "pdl-wasm": "0.29.x",
+    "pdl-wasm": "0.30.x",
     "react": "^18.3.1 || ^19.0.0",
     "react-dom": "^18.3.1 || ^19.0.0"
   },
@@ -52,6 +55,7 @@
     "monaco-textmate": "^3.0.1",
     "onigasm": "^2.2.5",
     "typescript": "^5.4.5",
+    "tsup": "^8.5.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   }

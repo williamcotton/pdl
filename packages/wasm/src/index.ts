@@ -135,8 +135,13 @@ interface PdlWasmExports extends WebAssembly.Exports {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+declare const __PDL_WASM_MODULE_URL__: string | undefined;
+const moduleBaseUrl = typeof __PDL_WASM_MODULE_URL__ === "string" ? __PDL_WASM_MODULE_URL__ : undefined;
 
-export function defaultPdlWasmUrl(baseUrl = import.meta.url): string {
+export function defaultPdlWasmUrl(baseUrl: string | URL | undefined = moduleBaseUrl): string {
+  if (baseUrl === undefined) {
+    throw new Error("pdl-wasm could not infer a package-local WASM URL; pass loadPdlRuntime({ wasmUrl }) explicitly.");
+  }
   return new URL("../dist/pdl.wasm", baseUrl).toString();
 }
 

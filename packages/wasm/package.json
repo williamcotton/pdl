@@ -1,31 +1,35 @@
 {
   "name": "pdl-wasm",
-  "version": "0.29.0",
+  "version": "0.30.0",
   "description": "Browser runtime loader and TypeScript ABI types for PDL.",
   "license": "MIT OR Apache-2.0",
   "type": "module",
-  "main": "./src/index.ts",
-  "module": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "import": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
     },
     "./package.json": "./package.json"
   },
   "files": [
-    "src",
     "dist",
     "README.md"
   ],
+  "sideEffects": false,
   "scripts": {
     "check": "tsc --noEmit",
-    "build": "npm run check",
-    "build:wasm": "RUSTC=$(rustup which --toolchain stable rustc) rustup run stable cargo build --manifest-path ../../Cargo.toml -p pdl-wasm --lib --target wasm32-unknown-unknown --release && mkdir -p dist && cp ../../target/wasm32-unknown-unknown/release/pdl_wasm.wasm dist/pdl.wasm",
-    "pack:local": "npm run build:wasm && mkdir -p ../../artifacts && npm pack --pack-destination ../../artifacts"
+    "build": "npm run check && tsup",
+    "build:wasm": "npm run build && RUSTC=$(rustup which --toolchain stable rustc) rustup run stable cargo build --manifest-path ../../Cargo.toml -p pdl-wasm --lib --target wasm32-unknown-unknown --release && mkdir -p dist && cp ../../target/wasm32-unknown-unknown/release/pdl_wasm.wasm dist/pdl.wasm",
+    "prepack": "npm run build:wasm",
+    "clean": "rm -rf dist",
+    "pack:local": "mkdir -p ../../artifacts && npm pack --pack-destination ../../artifacts"
   },
   "devDependencies": {
-    "typescript": "^5.4.5"
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2"
   }
 }
