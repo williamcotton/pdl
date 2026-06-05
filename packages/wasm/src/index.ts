@@ -37,7 +37,10 @@ export interface PdlNamedOutputTable {
 export interface PdlRunOptions {
   stdoutFormat?: string;
   programPath?: string;
+  context?: Record<string, PdlContextValue>;
 }
+
+export type PdlContextValue = string | number | boolean | null;
 
 export interface TextPosition {
   line: number;
@@ -60,7 +63,7 @@ export interface PdlCompletion {
   label: string;
   insert_text: string;
   detail: string;
-  kind: "Binding" | "Column" | "Format" | "Function" | "Keyword" | "Stage";
+  kind: "Binding" | "Column" | "Context" | "Format" | "Function" | "Keyword" | "Stage";
 }
 
 export interface PdlHover {
@@ -85,7 +88,9 @@ export interface PdlSemanticToken {
     | "BindingDeclaration"
     | "BindingReference"
     | "ColumnDefinition"
-    | "ColumnReference";
+    | "ColumnReference"
+    | "ContextDeclaration"
+    | "ContextReference";
 }
 
 export type PdlEditorFeatureRequest =
@@ -215,6 +220,9 @@ function runWithExports(
   };
   if (options.stdoutFormat) {
     payload.stdout_format = options.stdoutFormat;
+  }
+  if (options.context) {
+    payload.context = options.context;
   }
   const result = callJson<PdlRunResult>(exports, payload, exports.pdl_run_json);
   return {

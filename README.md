@@ -156,6 +156,13 @@ cargo build -p pdl-cli
 target/debug/pdl run examples/top_regions.pdl --stdout-format csv
 ```
 
+Reactive host-driven workflows can declare parameters and state defaults, then
+let a browser host override them through the runtime context map:
+
+```bash
+target/debug/pdl run examples/reactive_trip_dashboard.pdl
+```
+
 ## File formats and output
 
 Native execution supports CSV, JSON Lines, Parquet, Arrow IPC file, and Arrow

@@ -1,0 +1,6 @@
+zone,station,fleet,revenue,duration_min
+Downtown,A,bus,100,12
+Downtown,B,rail,50,30
+Riverfront,C,bus,80,20
+Riverfront,D,rail,120,40
+Uptown,E,bus,60,18

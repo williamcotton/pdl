@@ -3,7 +3,10 @@ use pdl_semantics::registry::{
     AGGREGATE_FUNCTIONS, FORMATS, KEYWORDS, SCALAR_FUNCTIONS, STAGES, WINDOW_FUNCTIONS,
 };
 use pdl_semantics::{analyze_program, FormatInfo, FunctionInfo, LoadRequest, StageInfo};
-use pdl_syntax::{Expr, JoinKind, ParseResult, Pipeline, PipelineStart, Program, Stage};
+use pdl_syntax::{
+    decode_context_column_ref, ContextKind, Expr, JoinKind, ParseResult, Pipeline, PipelineStart,
+    Program, Stage,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -47,6 +50,7 @@ pub struct EditorCompletion {
 pub enum CompletionKind {
     Binding,
     Column,
+    Context,
     Format,
     Function,
     Keyword,
@@ -83,6 +87,8 @@ pub enum SemanticTokenKind {
     BindingReference,
     ColumnDefinition,
     ColumnReference,
+    ContextDeclaration,
+    ContextReference,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,6 +104,7 @@ pub struct EditorDocumentSymbol {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DocumentSymbolKind {
     Binding,
+    Context,
     Function,
     Stage,
 }
@@ -218,6 +225,8 @@ pub fn completions(
         );
     } else if context.in_join_kind_keyword_context {
         completions.push(keyword_completion("kind", "Select a join kind"));
+    } else if let Some(kind) = context.context_reference_kind {
+        completions.extend(context_completions(&facts, kind));
     } else if context.in_agg_function_context {
         completions.extend(AGGREGATE_FUNCTIONS.iter().map(function_completion));
     } else if context.in_scalar_function_context {
@@ -278,6 +287,14 @@ pub fn semantic_tokens(source: &str) -> Vec<EditorSemanticToken> {
             let end = scan_string(source, pos);
             push_semantic_token(source, &mut tokens, pos, end, SemanticTokenKind::String);
             pos = end;
+        } else if ch == '$' || ch == '@' {
+            let end = scan_context_reference(source, pos);
+            let token_type = semantic_names
+                .get(&(pos, end))
+                .copied()
+                .unwrap_or(SemanticTokenKind::ContextReference);
+            push_semantic_token(source, &mut tokens, pos, end, token_type);
+            pos = end;
         } else if ch == '`' {
             let end = scan_backtick_column(source, pos);
             let token_type = semantic_names
@@ -325,6 +342,15 @@ fn semantic_name_overrides(
     program: &Program,
 ) -> BTreeMap<(usize, usize), SemanticTokenKind> {
     let mut names = BTreeMap::new();
+    for context in &program.contexts {
+        push_semantic_name(
+            source,
+            &mut names,
+            context.name.span,
+            SemanticTokenKind::ContextDeclaration,
+        );
+        collect_expr_semantic_names(source, &context.default, &mut names);
+    }
     for binding in &program.bindings {
         push_semantic_name(
             source,
@@ -367,7 +393,7 @@ fn collect_stage_semantic_names(
     names: &mut BTreeMap<(usize, usize), SemanticTokenKind>,
 ) {
     match stage {
-        Stage::Filter { expr, .. } => collect_expr_column_references(source, expr, names),
+        Stage::Filter { expr, .. } => collect_expr_semantic_names(source, expr, names),
         Stage::Select { items, .. } => {
             for item in items {
                 push_column_reference(source, names, item.column.span);
@@ -388,14 +414,14 @@ fn collect_stage_semantic_names(
         Stage::Mutate { items, .. } => {
             for item in items {
                 push_column_definition(source, names, item.column.span);
-                collect_expr_column_references(source, &item.expr, names);
+                collect_expr_semantic_names(source, &item.expr, names);
             }
         }
         Stage::Agg { items, .. } => {
             for item in items {
                 push_column_definition(source, names, item.alias.span);
                 for arg in &item.args {
-                    collect_expr_column_references(source, arg, names);
+                    collect_expr_semantic_names(source, arg, names);
                 }
             }
         }
@@ -445,14 +471,14 @@ fn collect_stage_semantic_names(
             push_column_references(source, names, keys);
             for fill in fills {
                 push_column_definition(source, names, fill.column.span);
-                collect_expr_column_references(source, &fill.expr, names);
+                collect_expr_semantic_names(source, &fill.expr, names);
             }
         }
         Stage::Limit { .. } | Stage::Save(_) | Stage::Unsupported { .. } => {}
     }
 }
 
-fn collect_expr_column_references(
+fn collect_expr_semantic_names(
     source: &str,
     expr: &Expr,
     names: &mut BTreeMap<(usize, usize), SemanticTokenKind>,
@@ -461,22 +487,25 @@ fn collect_expr_column_references(
         Expr::Ident(value) => push_column_reference(source, names, value.span),
         Expr::Call { args, .. } => {
             for arg in args {
-                collect_expr_column_references(source, arg, names);
+                collect_expr_semantic_names(source, arg, names);
             }
         }
         Expr::Window { args, spec, .. } => {
             for arg in args {
-                collect_expr_column_references(source, arg, names);
+                collect_expr_semantic_names(source, arg, names);
             }
             push_column_references(source, names, &spec.partition_by);
             for item in &spec.order_by {
                 push_column_reference(source, names, item.column.span);
             }
         }
-        Expr::Unary { expr, .. } => collect_expr_column_references(source, expr, names),
+        Expr::Unary { expr, .. } => collect_expr_semantic_names(source, expr, names),
         Expr::Binary { left, right, .. } => {
-            collect_expr_column_references(source, left, names);
-            collect_expr_column_references(source, right, names);
+            collect_expr_semantic_names(source, left, names);
+            collect_expr_semantic_names(source, right, names);
+        }
+        Expr::Context { span, .. } => {
+            push_semantic_name(source, names, *span, SemanticTokenKind::ContextReference);
         }
         Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) => {}
     }
@@ -497,7 +526,12 @@ fn push_column_reference(
     names: &mut BTreeMap<(usize, usize), SemanticTokenKind>,
     span: Span,
 ) {
-    push_semantic_name(source, names, span, SemanticTokenKind::ColumnReference);
+    let token_type = if is_context_reference_span(source, span) {
+        SemanticTokenKind::ContextReference
+    } else {
+        SemanticTokenKind::ColumnReference
+    };
+    push_semantic_name(source, names, span, token_type);
 }
 
 fn push_column_definition(
@@ -505,7 +539,12 @@ fn push_column_definition(
     names: &mut BTreeMap<(usize, usize), SemanticTokenKind>,
     span: Span,
 ) {
-    push_semantic_name(source, names, span, SemanticTokenKind::ColumnDefinition);
+    let token_type = if is_context_reference_span(source, span) {
+        SemanticTokenKind::ContextReference
+    } else {
+        SemanticTokenKind::ColumnDefinition
+    };
+    push_semantic_name(source, names, span, token_type);
 }
 
 fn push_semantic_name(
@@ -526,6 +565,16 @@ fn push_semantic_name(
 pub fn document_symbols(source: &str) -> Vec<EditorDocumentSymbol> {
     let parse = pdl_syntax::parse(source);
     let mut symbols = Vec::new();
+    for context in &parse.program.contexts {
+        symbols.push(EditorDocumentSymbol {
+            name: context_symbol_name(context.kind, &context.name.value),
+            detail: context_kind_detail(context.kind).to_string(),
+            kind: DocumentSymbolKind::Context,
+            range: range_for_span(source, context.span),
+            selection_range: range_for_span(source, context.name.span),
+            children: Vec::new(),
+        });
+    }
     for binding in &parse.program.bindings {
         symbols.push(EditorDocumentSymbol {
             name: binding.name.value.clone(),
@@ -562,6 +611,16 @@ pub fn document_symbols(source: &str) -> Vec<EditorDocumentSymbol> {
 pub fn binding_definition(source: &str, position: TextPosition) -> Option<EditorLocation> {
     let offset = byte_offset_for_position(source, position);
     let parse = pdl_syntax::parse(source);
+    if let Some((kind, name)) = context_name_at_offset(source, &parse.program, offset) {
+        return parse
+            .program
+            .contexts
+            .iter()
+            .find(|context| context.kind == kind && context.name.value == name)
+            .map(|context| EditorLocation {
+                range: range_for_span(source, context.name.span),
+            });
+    }
     let name = binding_name_at_offset(&parse.program, offset)?;
     parse
         .program
@@ -576,6 +635,14 @@ pub fn binding_definition(source: &str, position: TextPosition) -> Option<Editor
 pub fn binding_references(source: &str, position: TextPosition) -> Vec<EditorLocation> {
     let offset = byte_offset_for_position(source, position);
     let parse = pdl_syntax::parse(source);
+    if let Some((kind, name)) = context_name_at_offset(source, &parse.program, offset) {
+        return context_full_spans(source, &parse.program, kind, &name)
+            .into_iter()
+            .map(|span| EditorLocation {
+                range: range_for_span(source, span),
+            })
+            .collect();
+    }
     let Some(name) = binding_name_at_offset(&parse.program, offset) else {
         return Vec::new();
     };
@@ -597,6 +664,15 @@ pub fn rename_binding_edits(
     }
     let offset = byte_offset_for_position(source, position);
     let parse = pdl_syntax::parse(source);
+    if let Some((kind, name)) = context_name_at_offset(source, &parse.program, offset) {
+        return context_name_spans(source, &parse.program, kind, &name)
+            .into_iter()
+            .map(|span| EditorTextEdit {
+                range: range_for_span(source, span),
+                new_text: new_name.to_string(),
+            })
+            .collect();
+    }
     let Some(name) = binding_name_at_offset(&parse.program, offset) else {
         return Vec::new();
     };
@@ -671,6 +747,7 @@ struct CompletionContext {
     in_mutate_context: bool,
     in_sort_direction_context: bool,
     in_column_context: bool,
+    context_reference_kind: Option<ContextKind>,
     inside_string: bool,
 }
 
@@ -678,11 +755,12 @@ impl CompletionContext {
     fn new(source: &str, offset: usize, program: &Program) -> Self {
         let line_start = source[..offset].rfind('\n').map_or(0, |index| index + 1);
         let line_prefix = &source[line_start..offset];
+        let (word_start, _, word) = current_word(source, offset);
         let after_pipe = line_prefix
             .trim_start()
             .strip_prefix('|')
             .is_some_and(|rest| rest.trim().chars().all(is_ident_char));
-        let word = current_word(source, offset).2;
+        let context_reference_kind = context_reference_kind_before_word(source, word_start);
         let in_pipeline_start = source[..offset].trim().is_empty()
             || line_prefix.trim().is_empty()
             || source[..offset].trim_end().ends_with('=');
@@ -766,6 +844,11 @@ impl CompletionContext {
             in_mutate_context,
             in_sort_direction_context,
             in_column_context,
+            context_reference_kind: if inside_string {
+                None
+            } else {
+                context_reference_kind
+            },
             inside_string,
         }
     }
@@ -895,18 +978,39 @@ fn collect_expr_columns(expr: &Expr, columns: &mut BTreeSet<String>) {
             collect_expr_columns(left, columns);
             collect_expr_columns(right, columns);
         }
-        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) => {}
+        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Context { .. } => {}
+    }
+}
+
+fn format_context_default(expr: &Expr) -> String {
+    match expr {
+        Expr::Quoted(value) => format!("\"{}\"", value.value.replace('"', "\\\"")),
+        Expr::Number(value) => value.value.to_string(),
+        Expr::Bool(value) => value.value.to_string(),
+        Expr::Null(_) => "null".to_string(),
+        Expr::Ident(value) => value.value.clone(),
+        Expr::Context { kind, name, .. } => context_symbol_name(*kind, &name.value),
+        Expr::Call { name, .. } => format!("{}(...)", name.value),
+        Expr::Window { function, .. } => format!("{}(...) over (...)", function.value),
+        Expr::Unary { .. } | Expr::Binary { .. } => "expression".to_string(),
     }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct DocumentFacts {
     pub(crate) bindings: BTreeMap<String, BindingFact>,
+    pub(crate) contexts: BTreeMap<String, ContextFact>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct BindingFact {
     pub(crate) schema: Option<SchemaState>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ContextFact {
+    pub(crate) kind: ContextKind,
+    pub(crate) detail: String,
 }
 
 #[derive(Clone, Debug)]
@@ -919,7 +1023,21 @@ impl DocumentFacts {
     pub(crate) fn new(program: &Program) -> Self {
         let mut facts = Self {
             bindings: BTreeMap::new(),
+            contexts: BTreeMap::new(),
         };
+        for context in &program.contexts {
+            facts.contexts.insert(
+                context.name.value.clone(),
+                ContextFact {
+                    kind: context.kind,
+                    detail: format!(
+                        "{} default `{}`",
+                        context_kind_detail(context.kind),
+                        format_context_default(&context.default)
+                    ),
+                },
+            );
+        }
         for binding in &program.bindings {
             let schema = facts.pipeline_schema(&binding.pipeline);
             facts
@@ -1133,6 +1251,203 @@ fn pipeline_stage_symbols(source: &str, pipeline: &Pipeline) -> Vec<EditorDocume
     symbols
 }
 
+pub(crate) fn context_name_at_offset(
+    _source: &str,
+    program: &Program,
+    offset: usize,
+) -> Option<(ContextKind, String)> {
+    for context in &program.contexts {
+        if contains(context.name.span, offset) {
+            return Some((context.kind, context.name.value.clone()));
+        }
+    }
+    context_reference_spans(program)
+        .into_iter()
+        .find(|(_, _, span)| contains(*span, offset))
+        .map(|(kind, name, _)| (kind, name))
+}
+
+pub(crate) fn context_full_spans(
+    _source: &str,
+    program: &Program,
+    kind: ContextKind,
+    name: &str,
+) -> Vec<Span> {
+    let mut spans = Vec::new();
+    spans.extend(
+        program
+            .contexts
+            .iter()
+            .filter(|context| context.kind == kind && context.name.value == name)
+            .map(|context| context.name.span),
+    );
+    spans.extend(
+        context_reference_spans(program)
+            .into_iter()
+            .filter(|(ref_kind, ref_name, _)| *ref_kind == kind && ref_name == name)
+            .map(|(_, _, span)| span),
+    );
+    spans
+}
+
+fn context_name_spans(source: &str, program: &Program, kind: ContextKind, name: &str) -> Vec<Span> {
+    context_full_spans(source, program, kind, name)
+        .into_iter()
+        .map(|span| context_reference_name_span(source, span))
+        .collect()
+}
+
+fn context_reference_spans(program: &Program) -> Vec<(ContextKind, String, Span)> {
+    let mut spans = Vec::new();
+    for context in &program.contexts {
+        collect_expr_context_references(&context.default, &mut spans);
+    }
+    for binding in &program.bindings {
+        collect_pipeline_context_references(&binding.pipeline, &mut spans);
+    }
+    for output in &program.outputs {
+        collect_pipeline_context_references(&output.pipeline, &mut spans);
+    }
+    if let Some(main) = &program.main {
+        collect_pipeline_context_references(main, &mut spans);
+    }
+    spans
+}
+
+fn collect_pipeline_context_references(
+    pipeline: &Pipeline,
+    spans: &mut Vec<(ContextKind, String, Span)>,
+) {
+    for stage in &pipeline.stages {
+        collect_stage_context_references(stage, spans);
+    }
+}
+
+fn collect_stage_context_references(stage: &Stage, spans: &mut Vec<(ContextKind, String, Span)>) {
+    match stage {
+        Stage::Filter { expr, .. } => collect_expr_context_references(expr, spans),
+        Stage::Select { items, .. } => {
+            for item in items {
+                push_context_column_reference(&item.column, spans);
+                if let Some(alias) = &item.alias {
+                    push_context_column_reference(alias, spans);
+                }
+            }
+        }
+        Stage::Drop { columns, .. }
+        | Stage::GroupBy { columns, .. }
+        | Stage::Distinct { columns, .. } => push_context_column_references(columns, spans),
+        Stage::Rename { items, .. } => {
+            for item in items {
+                push_context_column_reference(&item.old, spans);
+                push_context_column_reference(&item.new, spans);
+            }
+        }
+        Stage::Mutate { items, .. } => {
+            for item in items {
+                push_context_column_reference(&item.column, spans);
+                collect_expr_context_references(&item.expr, spans);
+            }
+        }
+        Stage::Agg { items, .. } => {
+            for item in items {
+                push_context_column_reference(&item.alias, spans);
+                for arg in &item.args {
+                    collect_expr_context_references(arg, spans);
+                }
+            }
+        }
+        Stage::Sort { items, .. } => {
+            for item in items {
+                push_context_column_reference(&item.column, spans);
+            }
+        }
+        Stage::Join { on, .. } => {
+            push_context_column_reference(on.left(), spans);
+            push_context_column_reference(on.right(), spans);
+        }
+        Stage::Union { .. } => {}
+        Stage::PivotLonger {
+            columns,
+            names_to,
+            values_to,
+            ..
+        } => {
+            push_context_column_references(columns, spans);
+            push_context_column_reference(names_to, spans);
+            push_context_column_reference(values_to, spans);
+        }
+        Stage::Complete { keys, fills, .. } => {
+            push_context_column_references(keys, spans);
+            for fill in fills {
+                push_context_column_reference(&fill.column, spans);
+                collect_expr_context_references(&fill.expr, spans);
+            }
+        }
+        Stage::Limit { .. } | Stage::Save(_) | Stage::Unsupported { .. } => {}
+    }
+}
+
+fn collect_expr_context_references(expr: &Expr, spans: &mut Vec<(ContextKind, String, Span)>) {
+    match expr {
+        Expr::Context { kind, name, span } => {
+            spans.push((*kind, name.value.clone(), *span));
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_context_references(arg, spans);
+            }
+        }
+        Expr::Window { args, spec, .. } => {
+            for arg in args {
+                collect_expr_context_references(arg, spans);
+            }
+            push_context_column_references(&spec.partition_by, spans);
+            for item in &spec.order_by {
+                push_context_column_reference(&item.column, spans);
+            }
+        }
+        Expr::Unary { expr, .. } => collect_expr_context_references(expr, spans),
+        Expr::Binary { left, right, .. } => {
+            collect_expr_context_references(left, spans);
+            collect_expr_context_references(right, spans);
+        }
+        Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => {}
+    }
+}
+
+fn push_context_column_references(
+    columns: &[pdl_syntax::Spanned<String>],
+    spans: &mut Vec<(ContextKind, String, Span)>,
+) {
+    for column in columns {
+        push_context_column_reference(column, spans);
+    }
+}
+
+fn push_context_column_reference(
+    column: &pdl_syntax::Spanned<String>,
+    spans: &mut Vec<(ContextKind, String, Span)>,
+) {
+    if let Some((kind, name)) = decode_context_column_ref(&column.value) {
+        spans.push((kind, name.to_string(), column.span));
+    }
+}
+
+fn context_reference_name_span(source: &str, span: Span) -> Span {
+    if is_context_reference_span(source, span) {
+        Span::new(span.start + 1, span.end)
+    } else {
+        span
+    }
+}
+
+fn is_context_reference_span(source: &str, span: Span) -> bool {
+    source
+        .get(span.start..span.end)
+        .is_some_and(|text| text.starts_with('$') || text.starts_with('@'))
+}
+
 fn binding_name_at_offset(program: &Program, offset: usize) -> Option<String> {
     for binding in &program.bindings {
         if contains(binding.name.span, offset) {
@@ -1297,6 +1612,20 @@ fn scan_string(source: &str, start: usize) -> usize {
     pos
 }
 
+fn scan_context_reference(source: &str, start: usize) -> usize {
+    let mut pos = start + 1;
+    while pos < source.len() {
+        let Some(ch) = source[pos..].chars().next() else {
+            break;
+        };
+        if !is_ident_char(ch) {
+            break;
+        }
+        pos += ch.len_utf8();
+    }
+    pos
+}
+
 fn scan_backtick_column(source: &str, start: usize) -> usize {
     let mut pos = start + 1;
     let mut escaped = false;
@@ -1406,6 +1735,14 @@ fn current_word(source: &str, offset: usize) -> (usize, usize, &str) {
     (start, end, &source[start..end])
 }
 
+fn context_reference_kind_before_word(source: &str, word_start: usize) -> Option<ContextKind> {
+    match source[..word_start].chars().next_back()? {
+        '$' => Some(ContextKind::Param),
+        '@' => Some(ContextKind::State),
+        _ => None,
+    }
+}
+
 fn inside_string_on_line(line_prefix: &str) -> bool {
     let mut escaped = false;
     let mut quote_count = 0usize;
@@ -1503,6 +1840,20 @@ fn column_completions(columns: &[String], inside_string: bool) -> Vec<EditorComp
         .collect()
 }
 
+fn context_completions(facts: &DocumentFacts, kind: ContextKind) -> Vec<EditorCompletion> {
+    facts
+        .contexts
+        .iter()
+        .filter(|(_, context)| context.kind == kind)
+        .map(|(name, context)| EditorCompletion {
+            label: context_symbol_name(kind, name),
+            insert_text: name.clone(),
+            detail: context.detail.clone(),
+            kind: CompletionKind::Context,
+        })
+        .collect()
+}
+
 fn stage_completion(info: &StageInfo) -> EditorCompletion {
     EditorCompletion {
         label: info.name.to_string(),
@@ -1549,6 +1900,21 @@ fn keyword_completion(label: &str, detail: &str) -> EditorCompletion {
         insert_text: label.to_string(),
         detail: detail.to_string(),
         kind: CompletionKind::Keyword,
+    }
+}
+
+pub(crate) fn context_symbol_name(kind: ContextKind, name: &str) -> String {
+    let prefix = match kind {
+        ContextKind::Param => "$",
+        ContextKind::State => "@",
+    };
+    format!("{prefix}{name}")
+}
+
+pub(crate) fn context_kind_detail(kind: ContextKind) -> &'static str {
+    match kind {
+        ContextKind::Param => "parameter",
+        ContextKind::State => "state",
     }
 }
 
@@ -1985,6 +2351,71 @@ load "orders.csv"
             "amount",
             SemanticTokenKind::ColumnReference,
         );
+    }
+
+    #[test]
+    fn context_bindings_have_editor_features() {
+        let source = r#"param metric_column = "revenue"
+state selected_zone = "Downtown"
+
+load "trips.csv"
+  | filter zone == @selected_zone
+  | group_by $metric_column"#;
+
+        let completions = completions(
+            source,
+            None,
+            position_for_byte_offset(
+                source,
+                source.find("$metric").expect("context reference") + 1,
+            ),
+        );
+        assert!(completions.iter().any(|item| {
+            item.label == "$metric_column" && item.kind == CompletionKind::Context
+        }));
+        assert!(!completions
+            .iter()
+            .any(|item| item.label == "@selected_zone"));
+
+        let tokens = semantic_tokens(source);
+        assert_token_kind(
+            source,
+            &tokens,
+            source.find("metric_column").expect("parameter declaration"),
+            "metric_column",
+            SemanticTokenKind::ContextDeclaration,
+        );
+        assert_token_kind(
+            source,
+            &tokens,
+            source.find("@selected_zone").expect("state reference"),
+            "@selected_zone",
+            SemanticTokenKind::ContextReference,
+        );
+        assert_token_kind(
+            source,
+            &tokens,
+            source.find("$metric_column").expect("parameter reference"),
+            "$metric_column",
+            SemanticTokenKind::ContextReference,
+        );
+
+        let symbols = document_symbols(source);
+        assert!(symbols
+            .iter()
+            .any(|symbol| symbol.name == "$metric_column"
+                && symbol.kind == DocumentSymbolKind::Context));
+
+        let edits = rename_binding_edits(
+            source,
+            position_for_byte_offset(
+                source,
+                source.find("@selected_zone").expect("state ref") + 2,
+            ),
+            "active_zone",
+        );
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|edit| edit.new_text == "active_zone"));
     }
 
     #[test]

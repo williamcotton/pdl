@@ -8,9 +8,9 @@ use pdl_driver::{
     SinkDescriptor, SourceDescriptor,
 };
 use pdl_semantics::{
-    AggItemIr, BinaryOpIr, CompleteFillItemIr, ExprIr, FrameBoundIr, JoinKindIr, MutateItemIr,
-    NullsOrderIr, PipelineIr, PipelineStartIr, SortDirectionIr, StageIr, UnaryOpIr, WindowFrameIr,
-    WindowSpecIr,
+    decode_context_column_ref_ir, AggItemIr, BinaryOpIr, CompleteFillItemIr, ContextKindIr, ExprIr,
+    FrameBoundIr, JoinKindIr, MutateItemIr, NullsOrderIr, PipelineIr, PipelineStartIr,
+    SortDirectionIr, StageIr, UnaryOpIr, WindowFrameIr, WindowSpecIr,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,6 +58,15 @@ pub fn run_prepared_with_io(
     options: RunOptions,
     io: &dyn DriverIo,
 ) -> RunResult {
+    run_prepared_with_io_and_context(prepared, options, io, BTreeMap::new())
+}
+
+pub fn run_prepared_with_io_and_context(
+    prepared: &PreparedProgram,
+    options: RunOptions,
+    io: &dyn DriverIo,
+    context: BTreeMap<String, Value>,
+) -> RunResult {
     let plan = match plan_prepared(
         prepared,
         PlanningOptions {
@@ -76,18 +85,9 @@ pub fn run_prepared_with_io(
         }
     };
 
-    let mut runtime = Runtime {
-        prepared,
-        diagnostics: prepared.diagnostics(),
-        cache: BTreeMap::new(),
-        active_bindings: Vec::new(),
-        dry_run: plan.dry_run,
-        stdout: None,
-        io,
-    };
-
     let Some(ir) = prepared.analysis.ir.as_ref() else {
-        runtime.diagnostics.push(Diagnostic::error(
+        let mut diagnostics = prepared.diagnostics();
+        diagnostics.push(Diagnostic::error(
             codes::E1505,
             "semantic IR is unavailable for execution",
             Span::zero(),
@@ -95,8 +95,31 @@ pub fn run_prepared_with_io(
         return RunResult {
             stdout: None,
             named_outputs: Vec::new(),
-            diagnostics: runtime.diagnostics,
+            diagnostics,
         };
+    };
+    let mut diagnostics = prepared.diagnostics();
+    let context = build_context_values(ir, context, &mut diagnostics);
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == pdl_core::Severity::Error)
+    {
+        return RunResult {
+            stdout: None,
+            named_outputs: Vec::new(),
+            diagnostics,
+        };
+    }
+
+    let mut runtime = Runtime {
+        prepared,
+        diagnostics,
+        cache: BTreeMap::new(),
+        active_bindings: Vec::new(),
+        context,
+        dry_run: plan.dry_run,
+        stdout: None,
+        io,
     };
 
     let mut named_outputs = Vec::new();
@@ -169,11 +192,83 @@ pub fn run_prepared_with_io(
     }
 }
 
+fn build_context_values(
+    ir: &pdl_semantics::ProgramIr,
+    mut overrides: BTreeMap<String, Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> BTreeMap<String, Value> {
+    let mut values = BTreeMap::new();
+    for context in &ir.contexts {
+        let default = literal_ir_value(&context.default).unwrap_or(Value::Null);
+        let value = match overrides.remove(&context.name) {
+            Some(value) => {
+                if context_value_type_matches(&default, &value) {
+                    value
+                } else {
+                    diagnostics.push(Diagnostic::error(
+                        codes::E2005,
+                        format!(
+                            "external value for {} `{}` has the wrong type",
+                            context_kind_label(context.kind),
+                            context.name
+                        ),
+                        context.span,
+                    ));
+                    default.clone()
+                }
+            }
+            None => default.clone(),
+        };
+        values.insert(context.name.clone(), value);
+    }
+    for name in overrides.into_keys() {
+        diagnostics.push(Diagnostic::error(
+            codes::E2002,
+            format!("unknown context value `{name}`"),
+            Span::zero(),
+        ));
+    }
+    values
+}
+
+fn literal_ir_value(expr: &ExprIr) -> Option<Value> {
+    match expr {
+        ExprIr::Quoted { value, .. } => Some(Value::String(value.clone())),
+        ExprIr::Number { value, .. } => Some(Value::Number(*value)),
+        ExprIr::Bool { value, .. } => Some(Value::Bool(*value)),
+        ExprIr::Null { .. } => Some(Value::Null),
+        ExprIr::Ident { .. }
+        | ExprIr::Context { .. }
+        | ExprIr::Call { .. }
+        | ExprIr::Window { .. }
+        | ExprIr::Unary { .. }
+        | ExprIr::Binary { .. } => None,
+    }
+}
+
+fn context_value_type_matches(default: &Value, value: &Value) -> bool {
+    matches!(
+        (default, value),
+        (Value::Null, Value::Null)
+            | (Value::Bool(_), Value::Bool(_))
+            | (Value::Number(_), Value::Number(_))
+            | (Value::String(_), Value::String(_))
+    )
+}
+
+fn context_kind_label(kind: ContextKindIr) -> &'static str {
+    match kind {
+        ContextKindIr::Param => "parameter",
+        ContextKindIr::State => "state",
+    }
+}
+
 struct Runtime<'a> {
     prepared: &'a PreparedProgram,
     diagnostics: Vec<Diagnostic>,
     cache: BTreeMap<String, Table>,
     active_bindings: Vec<String>,
+    context: BTreeMap<String, Value>,
     dry_run: bool,
     stdout: Option<Vec<u8>>,
     io: &'a dyn DriverIo,
@@ -198,20 +293,31 @@ impl Runtime<'_> {
                 StageIr::Select { items, .. } => {
                     let selection: Vec<(String, String)> = items
                         .iter()
-                        .map(|item| (item.source.clone(), item.output.clone()))
-                        .collect();
+                        .map(|item| {
+                            Ok((
+                                self.resolve_column_name(&item.source, item.span)?,
+                                self.resolve_column_name(&item.output, item.span)?,
+                            ))
+                        })
+                        .collect::<Result<_, Diagnostic>>()?;
                     table = table.select(&selection);
                     grouping = None;
                 }
-                StageIr::Drop { columns, .. } => {
-                    table = table.drop_columns(columns);
+                StageIr::Drop { columns, span } => {
+                    let columns = self.resolve_column_names(columns, *span)?;
+                    table = table.drop_columns(&columns);
                     grouping = None;
                 }
                 StageIr::Rename { items, .. } => {
                     let renames: Vec<(String, String)> = items
                         .iter()
-                        .map(|item| (item.old.clone(), item.new.clone()))
-                        .collect();
+                        .map(|item| {
+                            Ok((
+                                self.resolve_column_name(&item.old, item.span)?,
+                                self.resolve_column_name(&item.new, item.span)?,
+                            ))
+                        })
+                        .collect::<Result<_, Diagnostic>>()?;
                     table = table.rename_columns(&renames);
                     grouping = None;
                 }
@@ -219,8 +325,8 @@ impl Runtime<'_> {
                     table = self.mutate(table, items)?;
                     grouping = None;
                 }
-                StageIr::GroupBy { columns, .. } => {
-                    grouping = Some(columns.clone());
+                StageIr::GroupBy { columns, span } => {
+                    grouping = Some(self.resolve_column_names(columns, *span)?);
                 }
                 StageIr::Agg { items, .. } => {
                     table = self.aggregate(&table, grouping.take().unwrap_or_default(), items)?;
@@ -243,13 +349,13 @@ impl Runtime<'_> {
                                     DataSortDirection::Asc => DataNullsOrder::Last,
                                     DataSortDirection::Desc => DataNullsOrder::First,
                                 });
-                            SortSpec {
-                                column: item.column.clone(),
+                            Ok(SortSpec {
+                                column: self.resolve_column_name(&item.column, item.span)?,
                                 direction,
                                 nulls,
-                            }
+                            })
                         })
-                        .collect::<Vec<_>>();
+                        .collect::<Result<Vec<_>, Diagnostic>>()?;
                     table.stable_sort(&specs);
                 }
                 StageIr::Limit { n, .. } => {
@@ -264,7 +370,9 @@ impl Runtime<'_> {
                     span,
                 } => {
                     let right = self.execute_binding(source, *source_span)?;
-                    table = self.join(table, right, left_key, right_key, *kind, *span)?;
+                    let left_key = self.resolve_column_name(left_key, *span)?;
+                    let right_key = self.resolve_column_name(right_key, *span)?;
+                    table = self.join(table, right, &left_key, &right_key, *kind, *span)?;
                     grouping = None;
                 }
                 StageIr::Union {
@@ -278,8 +386,9 @@ impl Runtime<'_> {
                     table = self.union(table, right, *by_name, *distinct, *span)?;
                     grouping = None;
                 }
-                StageIr::Distinct { columns, .. } => {
-                    table = table.distinct(columns);
+                StageIr::Distinct { columns, span } => {
+                    let columns = self.resolve_column_names(columns, *span)?;
+                    table = table.distinct(&columns);
                     grouping = None;
                 }
                 StageIr::PivotLonger {
@@ -288,11 +397,25 @@ impl Runtime<'_> {
                     values_to,
                     span,
                 } => {
-                    table = pivot_longer(table, columns, names_to, values_to, *span)?;
+                    let columns = self.resolve_column_names(columns, *span)?;
+                    let names_to = self.resolve_column_name(names_to, *span)?;
+                    let values_to = self.resolve_column_name(values_to, *span)?;
+                    table = pivot_longer(table, &columns, &names_to, &values_to, *span)?;
                     grouping = None;
                 }
                 StageIr::Complete { keys, fills, span } => {
-                    table = complete(table, keys, fills, *span)?;
+                    let keys = self.resolve_column_names(keys, *span)?;
+                    let fills = fills
+                        .iter()
+                        .map(|fill| {
+                            Ok(CompleteFillItemIr {
+                                column: self.resolve_column_name(&fill.column, fill.span)?,
+                                expr: fill.expr.clone(),
+                                span: fill.span,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, Diagnostic>>()?;
+                    table = complete(table, &keys, &fills, *span, &self.context)?;
                     grouping = None;
                 }
                 StageIr::Save { format, span, .. } => {
@@ -309,6 +432,38 @@ impl Runtime<'_> {
         }
 
         Ok(table)
+    }
+
+    fn resolve_column_names(
+        &self,
+        columns: &[String],
+        span: Span,
+    ) -> Result<Vec<String>, Diagnostic> {
+        columns
+            .iter()
+            .map(|column| self.resolve_column_name(column, span))
+            .collect()
+    }
+
+    fn resolve_column_name(&self, column: &str, span: Span) -> Result<String, Diagnostic> {
+        let Some((kind, name)) = decode_context_column_ref_ir(column) else {
+            return Ok(column.to_string());
+        };
+        let Some(value) = self.context.get(name) else {
+            return Err(Diagnostic::error(
+                codes::E2002,
+                format!("unknown {} `{name}`", context_kind_label(kind)),
+                span,
+            ));
+        };
+        match value {
+            Value::String(value) => Ok(value.clone()),
+            _ => Err(Diagnostic::error(
+                codes::E2004,
+                format!("context value `{name}` must be a string to resolve a column name"),
+                span,
+            )),
+        }
     }
 
     fn execute_binding(&mut self, name: &str, reference_span: Span) -> Result<Table, Diagnostic> {
@@ -421,7 +576,14 @@ impl Runtime<'_> {
             .rows
             .iter()
             .filter_map(|row| {
-                match eval_row_expr(expr, &table, row, ExprRole::PredicateRoot, None) {
+                match eval_row_expr(
+                    expr,
+                    &table,
+                    row,
+                    ExprRole::PredicateRoot,
+                    None,
+                    &self.context,
+                ) {
                     Ok(value) if value.is_truthy_true() => Some(Ok(row.clone())),
                     Ok(_) => None,
                     Err(diagnostic) => Some(Err(diagnostic)),
@@ -465,7 +627,7 @@ impl Runtime<'_> {
         for (key, group_rows) in grouped {
             let mut values = key.into_iter().map(Value::String).collect::<Vec<_>>();
             for item in items {
-                values.push(eval_aggregate(item, table, &group_rows)?);
+                values.push(eval_aggregate(item, table, &group_rows, &self.context)?);
             }
             rows.push(Row { values });
         }
@@ -489,8 +651,14 @@ impl Runtime<'_> {
             .map(|(row_index, row)| {
                 let mut values = row.values.clone();
                 for item in items {
-                    let value =
-                        eval_row_expr(&item.expr, &table, row, ExprRole::Default, Some(row_index))?;
+                    let value = eval_row_expr(
+                        &item.expr,
+                        &table,
+                        row,
+                        ExprRole::Default,
+                        Some(row_index),
+                        &self.context,
+                    )?;
                     if let Some(index) = input_columns
                         .iter()
                         .position(|column| column == &item.column)
@@ -742,6 +910,7 @@ fn complete(
     keys: &[String],
     fills: &[CompleteFillItemIr],
     span: Span,
+    runtime_context: &BTreeMap<String, Value>,
 ) -> Result<Table, Diagnostic> {
     if keys.is_empty() {
         return Err(Diagnostic::error(
@@ -802,6 +971,7 @@ fn complete(
         fills,
         fill_indices: &fill_indices,
         existing: &existing,
+        runtime_context,
     };
     complete_rows(&context, &mut tuple_values, &mut rows)?;
 
@@ -818,6 +988,7 @@ struct CompleteContext<'a> {
     fills: &'a [CompleteFillItemIr],
     fill_indices: &'a [usize],
     existing: &'a BTreeMap<Vec<String>, Row>,
+    runtime_context: &'a BTreeMap<String, Value>,
 }
 
 fn complete_rows(
@@ -849,6 +1020,7 @@ fn complete_rows(
                 &base_row,
                 ExprRole::Default,
                 None,
+                context.runtime_context,
             )?;
         }
         rows.push(Row { values });
@@ -1174,12 +1346,19 @@ enum ExprRole {
     ComparisonRight,
 }
 
+#[derive(Clone, Copy)]
+struct EvalScope<'a> {
+    window_row_index: Option<usize>,
+    runtime_context: &'a BTreeMap<String, Value>,
+}
+
 fn eval_row_expr(
     expr: &ExprIr,
     table: &Table,
     row: &Row,
     role: ExprRole,
     window_row_index: Option<usize>,
+    runtime_context: &BTreeMap<String, Value>,
 ) -> Result<Value, Diagnostic> {
     let _ = role;
     match expr {
@@ -1188,16 +1367,37 @@ fn eval_row_expr(
         ExprIr::Bool { value, .. } => Ok(Value::Bool(*value)),
         ExprIr::Null { .. } => Ok(Value::Null),
         ExprIr::Ident { value, span } => column_value(table, row, value, *span),
-        ExprIr::Call { name, args, span } => {
-            eval_call(name, args, table, row, *span, window_row_index)
-        }
+        ExprIr::Context { name, span, .. } => runtime_context.get(name).cloned().ok_or_else(|| {
+            Diagnostic::error(
+                codes::E2002,
+                format!("unknown context value `{name}`"),
+                *span,
+            )
+        }),
+        ExprIr::Call { name, args, span } => eval_call(
+            name,
+            args,
+            table,
+            row,
+            *span,
+            window_row_index,
+            runtime_context,
+        ),
         ExprIr::Window {
             function,
             args,
             spec,
             span,
         } => match window_row_index {
-            Some(row_index) => eval_window_expr(function, args, spec, table, row_index, *span),
+            Some(row_index) => eval_window_expr(
+                function,
+                args,
+                spec,
+                table,
+                row_index,
+                *span,
+                runtime_context,
+            ),
             None => Err(Diagnostic::error(
                 codes::E1226,
                 "window expressions are supported only in `mutate` assignments",
@@ -1205,7 +1405,14 @@ fn eval_row_expr(
             )),
         },
         ExprIr::Unary { op, expr, span } => {
-            let value = eval_row_expr(expr, table, row, ExprRole::Default, window_row_index)?;
+            let value = eval_row_expr(
+                expr,
+                table,
+                row,
+                ExprRole::Default,
+                window_row_index,
+                runtime_context,
+            )?;
             match op {
                 UnaryOpIr::Not => match value {
                     Value::Bool(value) => Ok(Value::Bool(!value)),
@@ -1231,7 +1438,18 @@ fn eval_row_expr(
             op,
             right,
             span,
-        } => eval_binary(*op, left, right, table, row, *span, window_row_index),
+        } => eval_binary(
+            *op,
+            left,
+            right,
+            table,
+            row,
+            *span,
+            EvalScope {
+                window_row_index,
+                runtime_context,
+            },
+        ),
     }
 }
 
@@ -1242,11 +1460,44 @@ fn eval_call(
     row: &Row,
     span: Span,
     window_row_index: Option<usize>,
+    runtime_context: &BTreeMap<String, Value>,
 ) -> Result<Value, Diagnostic> {
     match name {
+        "col" => match args {
+            [expr] => {
+                let value = eval_row_expr(
+                    expr,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?;
+                let Value::String(column) = value else {
+                    return Err(Diagnostic::error(
+                        codes::E2004,
+                        "col() requires a string value",
+                        span,
+                    ));
+                };
+                column_value(table, row, &column, span)
+            }
+            _ => Err(Diagnostic::error(
+                codes::E1402,
+                "col() expects one argument",
+                span,
+            )),
+        },
         "is_null" => match args {
             [expr] => Ok(Value::Bool(matches!(
-                eval_row_expr(expr, table, row, ExprRole::Default, window_row_index)?,
+                eval_row_expr(
+                    expr,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?,
                 Value::Null
             ))),
             _ => Err(Diagnostic::error(
@@ -1257,7 +1508,14 @@ fn eval_call(
         },
         "not_null" => match args {
             [expr] => Ok(Value::Bool(!matches!(
-                eval_row_expr(expr, table, row, ExprRole::Default, window_row_index)?,
+                eval_row_expr(
+                    expr,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?,
                 Value::Null
             ))),
             _ => Err(Diagnostic::error(
@@ -1268,7 +1526,14 @@ fn eval_call(
         },
         "coalesce" => {
             for arg in args {
-                let value = eval_row_expr(arg, table, row, ExprRole::Default, window_row_index)?;
+                let value = eval_row_expr(
+                    arg,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?;
                 if !matches!(value, Value::Null) {
                     return Ok(value);
                 }
@@ -1278,40 +1543,74 @@ fn eval_call(
         "concat" => {
             let mut text = String::new();
             for arg in args {
-                let value = eval_row_expr(arg, table, row, ExprRole::Default, window_row_index)?;
+                let value = eval_row_expr(
+                    arg,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?;
                 if !matches!(value, Value::Null) {
                     text.push_str(&value.to_csv_cell());
                 }
             }
             Ok(Value::String(text))
         }
-        "lower" => eval_single_arg(args, table, row, span, window_row_index, |value| {
-            Ok(map_text(value, |text| text.to_ascii_lowercase()))
-        }),
-        "upper" => eval_single_arg(args, table, row, span, window_row_index, |value| {
-            Ok(map_text(value, |text| text.to_ascii_uppercase()))
-        }),
-        "trim" => eval_single_arg(args, table, row, span, window_row_index, |value| {
-            Ok(map_text(value, |text| text.trim().to_string()))
-        }),
-        "to_number" => eval_single_arg(args, table, row, span, window_row_index, |value| {
-            Ok(match value {
-                Value::Null => Value::Null,
-                Value::Number(_) => value,
-                _ => value
-                    .to_csv_cell()
-                    .trim()
-                    .parse::<f64>()
-                    .map(Value::Number)
-                    .unwrap_or(Value::Null),
-            })
-        }),
+        "lower" => eval_single_arg(
+            args,
+            table,
+            row,
+            span,
+            window_row_index,
+            runtime_context,
+            |value| Ok(map_text(value, |text| text.to_ascii_lowercase())),
+        ),
+        "upper" => eval_single_arg(
+            args,
+            table,
+            row,
+            span,
+            window_row_index,
+            runtime_context,
+            |value| Ok(map_text(value, |text| text.to_ascii_uppercase())),
+        ),
+        "trim" => eval_single_arg(
+            args,
+            table,
+            row,
+            span,
+            window_row_index,
+            runtime_context,
+            |value| Ok(map_text(value, |text| text.trim().to_string())),
+        ),
+        "to_number" => eval_single_arg(
+            args,
+            table,
+            row,
+            span,
+            window_row_index,
+            runtime_context,
+            |value| {
+                Ok(match value {
+                    Value::Null => Value::Null,
+                    Value::Number(_) => value,
+                    _ => value
+                        .to_csv_cell()
+                        .trim()
+                        .parse::<f64>()
+                        .map(Value::Number)
+                        .unwrap_or(Value::Null),
+                })
+            },
+        ),
         "abs" => eval_single_arg(
             args,
             table,
             row,
             span,
             window_row_index,
+            runtime_context,
             |value| match value {
                 Value::Null => Ok(Value::Null),
                 Value::Number(value) => Ok(Value::Number(value.abs())),
@@ -1324,14 +1623,26 @@ fn eval_call(
         ),
         "round" => match args {
             [value_expr] => {
-                let value =
-                    eval_row_expr(value_expr, table, row, ExprRole::Default, window_row_index)?;
+                let value = eval_row_expr(
+                    value_expr,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?;
                 round_value(value, 0, span)
             }
             [value_expr, digits_expr] => {
                 let digits = round_digits(digits_expr, span)?;
-                let value =
-                    eval_row_expr(value_expr, table, row, ExprRole::Default, window_row_index)?;
+                let value = eval_row_expr(
+                    value_expr,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?;
                 round_value(value, digits, span)
             }
             _ => Err(Diagnostic::error(
@@ -1342,15 +1653,31 @@ fn eval_call(
         },
         "if_else" => match args {
             [condition, when_true, when_false] => {
-                let condition =
-                    eval_row_expr(condition, table, row, ExprRole::Default, window_row_index)?;
+                let condition = eval_row_expr(
+                    condition,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?;
                 match condition {
-                    Value::Bool(true) => {
-                        eval_row_expr(when_true, table, row, ExprRole::Default, window_row_index)
-                    }
-                    Value::Bool(false) => {
-                        eval_row_expr(when_false, table, row, ExprRole::Default, window_row_index)
-                    }
+                    Value::Bool(true) => eval_row_expr(
+                        when_true,
+                        table,
+                        row,
+                        ExprRole::Default,
+                        window_row_index,
+                        runtime_context,
+                    ),
+                    Value::Bool(false) => eval_row_expr(
+                        when_false,
+                        table,
+                        row,
+                        ExprRole::Default,
+                        window_row_index,
+                        runtime_context,
+                    ),
                     Value::Null => Ok(Value::Null),
                     _ => Err(Diagnostic::error(
                         codes::E1302,
@@ -1415,6 +1742,7 @@ fn eval_window_expr(
     table: &Table,
     current_index: usize,
     span: Span,
+    runtime_context: &BTreeMap<String, Value>,
 ) -> Result<Value, Diagnostic> {
     let partition = ordered_partition_indices(table, spec, current_index);
     let Some(position) = partition.iter().position(|index| *index == current_index) else {
@@ -1449,8 +1777,8 @@ fn eval_window_expr(
                 ))
             }
         }
-        "lag" => eval_offset_window(args, table, &partition, position, -1, span),
-        "lead" => eval_offset_window(args, table, &partition, position, 1, span),
+        "lag" => eval_offset_window(args, table, &partition, position, -1, span, runtime_context),
+        "lead" => eval_offset_window(args, table, &partition, position, 1, span, runtime_context),
         "first_value" => {
             let Some(arg) = args.first() else {
                 return Err(Diagnostic::error(
@@ -1463,7 +1791,14 @@ fn eval_window_expr(
             let Some(row_index) = frame.first() else {
                 return Ok(Value::Null);
             };
-            eval_row_expr(arg, table, &table.rows[*row_index], ExprRole::Default, None)
+            eval_row_expr(
+                arg,
+                table,
+                &table.rows[*row_index],
+                ExprRole::Default,
+                None,
+                runtime_context,
+            )
         }
         "last_value" => {
             let Some(arg) = args.first() else {
@@ -1477,7 +1812,14 @@ fn eval_window_expr(
             let Some(row_index) = frame.last() else {
                 return Ok(Value::Null);
             };
-            eval_row_expr(arg, table, &table.rows[*row_index], ExprRole::Default, None)
+            eval_row_expr(
+                arg,
+                table,
+                &table.rows[*row_index],
+                ExprRole::Default,
+                None,
+                runtime_context,
+            )
         }
         "count" | "sum" | "mean" | "min" | "max" => {
             let frame = frame_indices(spec.frame.as_ref(), &partition, position);
@@ -1485,7 +1827,7 @@ fn eval_window_expr(
                 .iter()
                 .map(|index| &table.rows[*index])
                 .collect::<Vec<_>>();
-            eval_window_aggregate(function, args, table, &rows, span)
+            eval_window_aggregate(function, args, table, &rows, span, runtime_context)
         }
         _ => Err(Diagnostic::error(
             codes::E1401,
@@ -1639,6 +1981,7 @@ fn eval_offset_window(
     position: usize,
     direction: isize,
     span: Span,
+    runtime_context: &BTreeMap<String, Value>,
 ) -> Result<Value, Diagnostic> {
     let Some(value_expr) = args.first() else {
         return Err(Diagnostic::error(
@@ -1657,6 +2000,7 @@ fn eval_offset_window(
                 &table.rows[partition[position]],
                 ExprRole::Default,
                 None,
+                runtime_context,
             ),
             None => Ok(Value::Null),
         };
@@ -1668,6 +2012,7 @@ fn eval_offset_window(
         &table.rows[row_index],
         ExprRole::Default,
         None,
+        runtime_context,
     )
 }
 
@@ -1732,6 +2077,7 @@ fn eval_window_aggregate(
     table: &Table,
     rows: &[&Row],
     span: Span,
+    runtime_context: &BTreeMap<String, Value>,
 ) -> Result<Value, Diagnostic> {
     match function {
         "count" if args.is_empty() => Ok(Value::Number(rows.len() as f64)),
@@ -1743,7 +2089,7 @@ fn eval_window_aggregate(
                     span,
                 ));
             };
-            let values = aggregate_arg_values(arg, table, rows)?;
+            let values = aggregate_arg_values(arg, table, rows, runtime_context)?;
             Ok(Value::Number(
                 values
                     .iter()
@@ -1759,7 +2105,7 @@ fn eval_window_aggregate(
                     span,
                 ));
             };
-            let values = aggregate_arg_values(arg, table, rows)?;
+            let values = aggregate_arg_values(arg, table, rows, runtime_context)?;
             let mut found = false;
             let mut sum = 0.0;
             for value in values {
@@ -1782,7 +2128,7 @@ fn eval_window_aggregate(
                     span,
                 ));
             };
-            let values = aggregate_arg_values(arg, table, rows)?;
+            let values = aggregate_arg_values(arg, table, rows, runtime_context)?;
             let numbers = values
                 .into_iter()
                 .filter_map(|value| value.as_number())
@@ -1803,7 +2149,7 @@ fn eval_window_aggregate(
                     span,
                 ));
             };
-            aggregate_arg_values(arg, table, rows).map(|values| {
+            aggregate_arg_values(arg, table, rows, runtime_context).map(|values| {
                 values
                     .into_iter()
                     .filter(|value| !matches!(value, Value::Null))
@@ -1819,7 +2165,7 @@ fn eval_window_aggregate(
                     span,
                 ));
             };
-            aggregate_arg_values(arg, table, rows).map(|values| {
+            aggregate_arg_values(arg, table, rows, runtime_context).map(|values| {
                 values
                     .into_iter()
                     .filter(|value| !matches!(value, Value::Null))
@@ -1841,11 +2187,19 @@ fn eval_single_arg(
     row: &Row,
     span: Span,
     window_row_index: Option<usize>,
+    runtime_context: &BTreeMap<String, Value>,
     apply: impl FnOnce(Value) -> Result<Value, Diagnostic>,
 ) -> Result<Value, Diagnostic> {
     match args {
         [expr] => {
-            let value = eval_row_expr(expr, table, row, ExprRole::Default, window_row_index)?;
+            let value = eval_row_expr(
+                expr,
+                table,
+                row,
+                ExprRole::Default,
+                window_row_index,
+                runtime_context,
+            )?;
             apply(value)
         }
         _ => Err(Diagnostic::error(
@@ -1871,34 +2225,84 @@ fn eval_binary(
     table: &Table,
     row: &Row,
     span: Span,
-    window_row_index: Option<usize>,
+    scope: EvalScope<'_>,
 ) -> Result<Value, Diagnostic> {
     if is_comparison_op(op) {
-        let left = eval_row_expr(left, table, row, ExprRole::ComparisonLeft, window_row_index)?;
+        let left = eval_row_expr(
+            left,
+            table,
+            row,
+            ExprRole::ComparisonLeft,
+            scope.window_row_index,
+            scope.runtime_context,
+        )?;
         let right = eval_row_expr(
             right,
             table,
             row,
             ExprRole::ComparisonRight,
-            window_row_index,
+            scope.window_row_index,
+            scope.runtime_context,
         )?;
         return Ok(compare_for_op(&left, op, &right));
     }
 
     match op {
         BinaryOpIr::And => {
-            let left = eval_row_expr(left, table, row, ExprRole::Default, window_row_index)?;
-            let right = eval_row_expr(right, table, row, ExprRole::Default, window_row_index)?;
+            let left = eval_row_expr(
+                left,
+                table,
+                row,
+                ExprRole::Default,
+                scope.window_row_index,
+                scope.runtime_context,
+            )?;
+            let right = eval_row_expr(
+                right,
+                table,
+                row,
+                ExprRole::Default,
+                scope.window_row_index,
+                scope.runtime_context,
+            )?;
             Ok(nullable_and(left, right))
         }
         BinaryOpIr::Or => {
-            let left = eval_row_expr(left, table, row, ExprRole::Default, window_row_index)?;
-            let right = eval_row_expr(right, table, row, ExprRole::Default, window_row_index)?;
+            let left = eval_row_expr(
+                left,
+                table,
+                row,
+                ExprRole::Default,
+                scope.window_row_index,
+                scope.runtime_context,
+            )?;
+            let right = eval_row_expr(
+                right,
+                table,
+                row,
+                ExprRole::Default,
+                scope.window_row_index,
+                scope.runtime_context,
+            )?;
             Ok(nullable_or(left, right))
         }
         BinaryOpIr::Add | BinaryOpIr::Sub | BinaryOpIr::Mul | BinaryOpIr::Div | BinaryOpIr::Rem => {
-            let left = eval_row_expr(left, table, row, ExprRole::Default, window_row_index)?;
-            let right = eval_row_expr(right, table, row, ExprRole::Default, window_row_index)?;
+            let left = eval_row_expr(
+                left,
+                table,
+                row,
+                ExprRole::Default,
+                scope.window_row_index,
+                scope.runtime_context,
+            )?;
+            let right = eval_row_expr(
+                right,
+                table,
+                row,
+                ExprRole::Default,
+                scope.window_row_index,
+                scope.runtime_context,
+            )?;
             let (Some(left), Some(right)) = (left.as_number(), right.as_number()) else {
                 return Err(Diagnostic::error(
                     codes::E1302,
@@ -1963,11 +2367,16 @@ fn column_value(table: &Table, row: &Row, column: &str, span: Span) -> Result<Va
         .ok_or_else(|| Diagnostic::error(codes::E1005, format!("unknown column `{column}`"), span))
 }
 
-fn eval_aggregate(item: &AggItemIr, table: &Table, rows: &[&Row]) -> Result<Value, Diagnostic> {
+fn eval_aggregate(
+    item: &AggItemIr,
+    table: &Table,
+    rows: &[&Row],
+    runtime_context: &BTreeMap<String, Value>,
+) -> Result<Value, Diagnostic> {
     match item.function.as_str() {
         "count" if item.args.is_empty() => Ok(Value::Number(rows.len() as f64)),
         "count" => {
-            let values = aggregate_arg_values(&item.args[0], table, rows)?;
+            let values = aggregate_arg_values(&item.args[0], table, rows, runtime_context)?;
             Ok(Value::Number(
                 values
                     .iter()
@@ -1976,7 +2385,7 @@ fn eval_aggregate(item: &AggItemIr, table: &Table, rows: &[&Row]) -> Result<Valu
             ))
         }
         "sum" => {
-            let values = aggregate_arg_values(&item.args[0], table, rows)?;
+            let values = aggregate_arg_values(&item.args[0], table, rows, runtime_context)?;
             let mut found = false;
             let mut sum = 0.0;
             for value in values {
@@ -1992,7 +2401,7 @@ fn eval_aggregate(item: &AggItemIr, table: &Table, rows: &[&Row]) -> Result<Valu
             })
         }
         "mean" => {
-            let values = aggregate_arg_values(&item.args[0], table, rows)?;
+            let values = aggregate_arg_values(&item.args[0], table, rows, runtime_context)?;
             let numbers: Vec<f64> = values
                 .into_iter()
                 .filter_map(|value| value.as_number())
@@ -2005,14 +2414,14 @@ fn eval_aggregate(item: &AggItemIr, table: &Table, rows: &[&Row]) -> Result<Valu
                 ))
             }
         }
-        "min" => aggregate_arg_values(&item.args[0], table, rows).map(|values| {
+        "min" => aggregate_arg_values(&item.args[0], table, rows, runtime_context).map(|values| {
             values
                 .into_iter()
                 .filter(|value| !matches!(value, Value::Null))
                 .min_by(|left, right| compare_values(left, right).unwrap_or(Ordering::Equal))
                 .unwrap_or(Value::Null)
         }),
-        "max" => aggregate_arg_values(&item.args[0], table, rows).map(|values| {
+        "max" => aggregate_arg_values(&item.args[0], table, rows, runtime_context).map(|values| {
             values
                 .into_iter()
                 .filter(|value| !matches!(value, Value::Null))
@@ -2020,7 +2429,7 @@ fn eval_aggregate(item: &AggItemIr, table: &Table, rows: &[&Row]) -> Result<Valu
                 .unwrap_or(Value::Null)
         }),
         "count_distinct" => {
-            let values = aggregate_arg_values(&item.args[0], table, rows)?;
+            let values = aggregate_arg_values(&item.args[0], table, rows, runtime_context)?;
             let distinct = values
                 .into_iter()
                 .filter(|value| !matches!(value, Value::Null))
@@ -2040,14 +2449,20 @@ fn aggregate_arg_values(
     expr: &ExprIr,
     table: &Table,
     rows: &[&Row],
+    runtime_context: &BTreeMap<String, Value>,
 ) -> Result<Vec<Value>, Diagnostic> {
     rows.iter()
-        .map(|row| eval_aggregate_expr(expr, table, row))
+        .map(|row| eval_aggregate_expr(expr, table, row, runtime_context))
         .collect()
 }
 
-fn eval_aggregate_expr(expr: &ExprIr, table: &Table, row: &Row) -> Result<Value, Diagnostic> {
-    eval_row_expr(expr, table, row, ExprRole::Default, None)
+fn eval_aggregate_expr(
+    expr: &ExprIr,
+    table: &Table,
+    row: &Row,
+    runtime_context: &BTreeMap<String, Value>,
+) -> Result<Value, Diagnostic> {
+    eval_row_expr(expr, table, row, ExprRole::Default, None, runtime_context)
 }
 
 fn is_comparison_op(op: BinaryOpIr) -> bool {
@@ -2095,6 +2510,72 @@ mod tests {
         assert_eq!(
             String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
             "amount\n10\n"
+        );
+    }
+
+    #[test]
+    fn reactive_context_defaults_and_overrides_drive_named_outputs() {
+        let io = InMemoryDriverIo::default().with_file_bytes(
+            "memory/trips.csv",
+            "zone,station,fleet,revenue,duration_min\nDowntown,A,bus,100,12\nDowntown,B,rail,50,30\nRiverfront,C,bus,80,20\nRiverfront,D,rail,120,40\n",
+        );
+        let source = r#"param active_fleet = "all"
+state selected_zone = "Downtown"
+param metric_column = "revenue"
+
+let trips =
+  load "trips.csv"
+  | filter $active_fleet == "all" or fleet == $active_fleet
+
+output zone_summary =
+  trips
+  | group_by zone
+  | agg total_revenue = sum(revenue)
+  | save "zone_summary.csv"
+
+output active_rankings =
+  trips
+  | filter zone == @selected_zone
+  | group_by station
+  | agg total = sum(col($metric_column))
+  | sort total desc
+  | save "active_rankings.csv""#;
+        let prepared = prepare_source_with_io("memory/main.pdl", source, &io);
+
+        let run_options = RunOptions {
+            dry_run: true,
+            ..RunOptions::default()
+        };
+        let defaults = run_prepared_with_io(&prepared, run_options.clone(), &io);
+        assert!(
+            defaults.diagnostics.is_empty(),
+            "{:?}",
+            defaults.diagnostics
+        );
+        assert_eq!(
+            named_output_csv(&defaults, "active_rankings"),
+            "station,total\nA,100\nB,50\n"
+        );
+
+        let mut context = BTreeMap::new();
+        context.insert("active_fleet".to_string(), Value::String("bus".to_string()));
+        context.insert(
+            "selected_zone".to_string(),
+            Value::String("Riverfront".to_string()),
+        );
+        context.insert(
+            "metric_column".to_string(),
+            Value::String("duration_min".to_string()),
+        );
+        let overridden = run_prepared_with_io_and_context(&prepared, run_options, &io, context);
+        assert!(
+            overridden.diagnostics.is_empty(),
+            "{:?}",
+            overridden.diagnostics
+        );
+        assert_eq!(
+            named_output_csv(&overridden, "active_rankings"),
+            "station,total\nC,20\n"
         );
     }
 

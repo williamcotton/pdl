@@ -1,12 +1,21 @@
 # PDL Detailed Specification
 
-Status: Draft 0.28.0
+Status: Draft 0.29.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.28.0`.
+The current repository implementation is `0.29.0`.
+
+Version 0.29.0 is a reactive context release tracked in
+`docs/V0_29_PLAN.md`. It adds top-level `param` and `state` declarations,
+`$name` parameter references, `@name` state references, runtime context maps for
+native and browser execution, dynamic column-name resolution in column
+positions, and `col(value)` for explicit expression-side column indirection.
+Defaults keep documents runnable without host values; host overrides are typed
+against declaration defaults and are supplied through runtime APIs rather than
+source rewriting.
 
 Version 0.28.0 is an editor semantic-token readability release tracked in
 `docs/V0_28_PLAN.md`. It keeps the v0.27 source language, runtime, CLI, LSP
@@ -88,7 +97,7 @@ GitHub Actions workflows for the Rust test suite and GitHub Pages demo
 deployment, plus GitHub Release asset publication for packaged editor and
 browser outputs.
 
-Version 0.28.0 does not yet implement configurable CSV dialect options, full
+Version 0.29.0 does not yet implement configurable CSV dialect options, full
 LSP code actions or cross-document navigation, Arrow IPC browser output,
 output selectors or full multi-output browser controls.
 Those features are tracked as deferred or planned work in successor release
@@ -835,6 +844,8 @@ Reserved stage and declaration words in version 0.1 are:
 - `complete`
 - `let`
 - `output`
+- `param`
+- `state`
 - `on`
 - `kind`
 - `by_name`
@@ -870,7 +881,31 @@ Window expression syntax uses additional clause words:
 - `preceding`
 - `following`
 
-These words are reserved by the version 0.26.0 target language.
+These words are reserved by the version 0.26.0 target language. `param` and
+`state` are reserved by version 0.29.0 for reactive context declarations.
+
+### 6.5.1 Reactive Context Declarations And References
+
+Version 0.29.0 supports top-level context declarations before bindings,
+outputs, or the main pipeline:
+
+```pdl
+param time_cutoff = 15
+param active_fleet = "all"
+state selected_zone = "Downtown"
+```
+
+`param` declares a host-controlled input. `state` declares a host-observed value
+that may be updated by application interactions. Each declaration MUST include a
+literal default (`string`, `number`, `bool`, or `null`) so the document remains
+runnable when no host context value is supplied.
+
+`$name` resolves a declared parameter and `@name` resolves a declared state.
+Context references are value expressions. In column-name positions, a context
+value MUST be a string and resolves to the active column name. In expression
+positions where a context string should be treated as a column name rather than
+a scalar value, authors MUST use `col(value)`, for example
+`col($metric_column) > 500`.
 
 ### 6.6 String Tokens And Escaped Column References
 
@@ -2566,7 +2601,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.28.0` LSP implementation provides diagnostics,
+The current `0.29.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -2860,6 +2895,13 @@ work. Binary virtual file payloads, Arrow IPC byte output, and binary dataframe
 decoders remain deferred until a later plan promotes a byte-oriented browser
 ABI.
 
+Since version 0.29.0, `pdl_run_json` MAY accept a `context` object whose keys
+are declared `param` or `state` names and whose values are JSON nulls, booleans,
+numbers, or strings. The browser runtime MUST coerce these values to the same
+typed context map used by native execution, fall back to declaration defaults
+when a key is absent, and return registered diagnostics for unknown names,
+non-primitive values, type mismatches, or invalid dynamic column resolution.
+
 For hover requests, `pdl_editor_service_json` in version 0.26.0 MUST use the
 same host file map through in-memory driver I/O so Monaco/WASM hover previews
 match native LSP hover behavior for text-backed paths and columns.
@@ -2998,7 +3040,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.28.0"
+version = "0.29.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -4052,6 +4094,7 @@ Diagnostic codes are grouped:
 - `E1701`-`E1799`: materialization and output errors
 - `E1801`-`E1899`: data source and format runtime errors
 - `E1901`-`E1999`: stream interop errors
+- `E2001`-`E2099`: reactive context declaration and runtime errors
 - `W2001`-`W2099`: author-facing warnings
 - `H3001`-`H3099`: author-facing hints
 - `R4001`-`R4099`: implementation-oriented runtime/internal diagnostics
@@ -4386,7 +4429,19 @@ stage-argument error.
 
 `E1905` consumer format could not be inferred.
 
-### 20.12 Warning Diagnostics
+### 20.12 Reactive Context Diagnostics
+
+`E2001` duplicate context declaration.
+
+`E2002` unknown or mismatched parameter/state reference.
+
+`E2003` invalid context declaration default.
+
+`E2004` invalid context value in a column-indirection position.
+
+`E2005` external context value type mismatch.
+
+### 20.13 Warning Diagnostics
 
 `W2001` active grouping state was not consumed by `agg`.
 
@@ -4413,7 +4468,7 @@ pre-v0.26 compatibility diagnostics.
 
 `W2012` source format was inferred from extension only.
 
-### 20.13 Hint Diagnostics
+### 20.14 Hint Diagnostics
 
 `H3001` use `col(...)` or `lit(...)` to disambiguate a quoted token. Retired
 from active v0.26 syntax; reserved for pre-v0.26 compatibility diagnostics.
@@ -4444,7 +4499,7 @@ from active v0.26 syntax; reserved for pre-v0.26 compatibility diagnostics.
 
 `H3012` write aliases as `new_name = expression`.
 
-### 20.14 Internal Runtime Diagnostics
+### 20.15 Internal Runtime Diagnostics
 
 `R4001` internal invariant violation.
 
@@ -4577,7 +4632,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.28.0.
+PDL source does not require an explicit version declaration in draft 0.29.0.
 
 The implementation SHOULD report supported language version.
 

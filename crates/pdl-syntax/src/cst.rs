@@ -5,8 +5,8 @@ use rowan::{
 
 use crate::lexer::{Token, TokenKind};
 use crate::parser::{
-    AggItem, Binding, Expr, OutputDecl, PdlLanguage, Pipeline, PipelineStart, Program, SinkRef,
-    SourceRef, Stage, SyntaxKind,
+    AggItem, Binding, ContextDecl, Expr, OutputDecl, PdlLanguage, Pipeline, PipelineStart, Program,
+    SinkRef, SourceRef, Stage, SyntaxKind,
 };
 
 pub type SyntaxToken = RowanSyntaxToken<PdlLanguage>;
@@ -18,6 +18,9 @@ pub(crate) fn build_cst(tokens: &[Token], program: &Program, source_len: usize) 
         builder: GreenNodeBuilder::new(),
     };
     builder.start_node(SyntaxKind::Root);
+    for context in &program.contexts {
+        builder.context_decl(context);
+    }
     for binding in &program.bindings {
         builder.binding(binding);
     }
@@ -77,6 +80,12 @@ impl CstBuilder<'_> {
         children(self);
         self.emit_until(span.end, false);
         self.finish_node();
+    }
+
+    fn context_decl(&mut self, context: &ContextDecl) {
+        self.node(SyntaxKind::ContextDecl, context.span, |builder| {
+            builder.expr(&context.default);
+        });
     }
 
     fn binding(&mut self, binding: &Binding) {
@@ -196,7 +205,12 @@ impl CstBuilder<'_> {
                 builder.expr(left);
                 builder.expr(right);
             }
-            Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => {}
+            Expr::Quoted(_)
+            | Expr::Number(_)
+            | Expr::Bool(_)
+            | Expr::Null(_)
+            | Expr::Ident(_)
+            | Expr::Context { .. } => {}
         });
     }
 

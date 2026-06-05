@@ -1,8 +1,8 @@
 pub use crate::parser::{
-    AggItem, BinaryOp, Binding, CompleteFillItem, Expr, FrameBound, JoinKind, JoinOn, LoadStage,
-    MutateItem, NullsOrder, OutputDecl, Pipeline, PipelineStart, Program, RenameItem, SaveStage,
-    SelectItem, SinkRef, SortDirection, SortItem, SourceRef, Spanned, Stage, UnaryOp, UnionOption,
-    UnionOptionKind, WindowFrame, WindowSpec,
+    AggItem, BinaryOp, Binding, CompleteFillItem, ContextDecl, ContextKind, Expr, FrameBound,
+    JoinKind, JoinOn, LoadStage, MutateItem, NullsOrder, OutputDecl, Pipeline, PipelineStart,
+    Program, RenameItem, SaveStage, SelectItem, SinkRef, SortDirection, SortItem, SourceRef,
+    Spanned, Stage, UnaryOp, UnionOption, UnionOptionKind, WindowFrame, WindowSpec,
 };
 
 use pdl_core::Span;
@@ -82,6 +82,10 @@ ast_node!(
 );
 
 impl Root {
+    pub fn context_decls(&self) -> Vec<ContextDeclNode> {
+        child_nodes(&self.syntax, ContextDeclNode::cast)
+    }
+
     pub fn binding_decls(&self) -> Vec<BindingDecl> {
         child_nodes(&self.syntax, BindingDecl::cast)
     }
@@ -100,6 +104,29 @@ impl Root {
 
     pub fn token_count(&self) -> usize {
         self.syntax.children_with_tokens().count()
+    }
+}
+
+ast_node!(
+    /// A top-level `param` or `state` declaration.
+    ContextDeclNode = ContextDecl
+);
+
+impl ContextDeclNode {
+    pub fn name(&self) -> Option<String> {
+        self.name_token().map(|token| token.text().to_string())
+    }
+
+    pub fn name_span(&self) -> Option<Span> {
+        self.name_token().map(token_span)
+    }
+
+    fn name_token(&self) -> Option<SyntaxToken> {
+        self.syntax
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| token.kind() == SyntaxKind::Ident)
+            .find(|token| token.text() != "param" && token.text() != "state")
     }
 }
 

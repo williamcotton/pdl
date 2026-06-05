@@ -1,0 +1,22 @@
+param active_fleet = "all"
+param metric_column = "revenue"
+state selected_zone = "Downtown"
+
+let trips =
+  load "reactive_trips.csv"
+  | filter $active_fleet == "all" or fleet == $active_fleet
+
+output zone_summary =
+  trips
+  | group_by zone
+  | agg total_revenue = sum(revenue)
+  | sort total_revenue desc
+  | save "zone_summary.csv"
+
+output active_rankings =
+  trips
+  | filter zone == @selected_zone
+  | group_by station
+  | agg total = sum(col($metric_column))
+  | sort total desc
+  | save "active_rankings.csv"

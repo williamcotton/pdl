@@ -1,7 +1,8 @@
 use pdl_core::{codes, Diagnostic, Span};
+use pdl_data::Value;
 use pdl_syntax::{
-    AggItem, Binding, Expr, JoinKind, LoadStage, Pipeline, PipelineStart, Program, SaveStage,
-    SourceRef, Stage, UnionOption, UnionOptionKind,
+    decode_context_column_ref, AggItem, Binding, ContextKind, Expr, JoinKind, LoadStage, Pipeline,
+    PipelineStart, Program, SaveStage, SourceRef, Stage, UnionOption, UnionOptionKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ where
     let mut analyzer = Analyzer {
         diagnostics: Vec::new(),
         load_schema: &mut load_schema,
+        context_decls: BTreeMap::new(),
         binding_decls: BTreeMap::new(),
         binding_schemas: BTreeMap::new(),
         traces: Vec::new(),
@@ -58,6 +60,7 @@ where
 {
     diagnostics: Vec<Diagnostic>,
     load_schema: &'a mut F,
+    context_decls: BTreeMap<String, ContextInfo>,
     binding_decls: BTreeMap<String, Binding>,
     binding_schemas: BTreeMap<String, Vec<String>>,
     traces: Vec<StageTrace>,
@@ -65,11 +68,19 @@ where
     next_stage_id: usize,
 }
 
+#[derive(Clone, Debug)]
+struct ContextInfo {
+    kind: ContextKind,
+    default: Value,
+    span: Span,
+}
+
 impl<F> Analyzer<'_, F>
 where
     F: FnMut(LoadRequest<'_>) -> Result<Vec<String>, Diagnostic>,
 {
     fn analyze(&mut self, program: &Program) {
+        self.analyze_context_decls(program);
         self.check_top_level_names(program);
         for binding in &program.bindings {
             self.binding_decls
@@ -104,6 +115,43 @@ where
                     columns,
                 });
             }
+        }
+    }
+
+    fn analyze_context_decls(&mut self, program: &Program) {
+        for context in &program.contexts {
+            if let Some(existing) = self.context_decls.get(&context.name.value) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::E2001,
+                        format!("duplicate context declaration `{}`", context.name.value),
+                        context.name.span,
+                    )
+                    .with_related(existing.span, "first declaration is here"),
+                );
+            }
+            let default = match literal_default_value(&context.default) {
+                Some(value) => value,
+                None => {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E2003,
+                        format!(
+                            "{} `{}` default must be a literal",
+                            context_kind_label(context.kind),
+                            context.name.value
+                        ),
+                        context.default.span(),
+                    ));
+                    Value::Null
+                }
+            };
+            self.context_decls
+                .entry(context.name.value.clone())
+                .or_insert(ContextInfo {
+                    kind: context.kind,
+                    default,
+                    span: context.name.span,
+                });
         }
     }
 
@@ -215,35 +263,47 @@ where
                     let mut output = Vec::new();
                     let mut seen = BTreeSet::new();
                     for item in items {
-                        self.require_column(&schema, &item.column.value, item.column.span);
-                        let output_name = item.alias.as_ref().unwrap_or(&item.column);
-                        if !seen.insert(output_name.value.clone()) {
+                        let source_name = self.resolved_column_name(&schema, &item.column);
+                        let (output_name, output_span) = if let Some(alias) = &item.alias {
+                            if self.reject_context_column_target(alias, "a select output alias") {
+                                continue;
+                            }
+                            (alias.value.clone(), alias.span)
+                        } else {
+                            (source_name, item.column.span)
+                        };
+                        if !seen.insert(output_name.clone()) {
                             self.diagnostics.push(Diagnostic::error(
                                 codes::E1207,
-                                format!("duplicate output column `{}`", output_name.value),
-                                output_name.span,
+                                format!("duplicate output column `{output_name}`"),
+                                output_span,
                             ));
                         }
-                        output.push(output_name.value.clone());
+                        output.push(output_name);
                     }
                     schema = output;
                     grouping = None;
                 }
                 Stage::Drop { columns, .. } => {
-                    for column in columns {
-                        self.require_column(&schema, &column.value, column.span);
-                    }
-                    schema.retain(|column| !columns.iter().any(|drop| drop.value == *column));
+                    let resolved = columns
+                        .iter()
+                        .map(|column| self.resolved_column_name(&schema, column))
+                        .collect::<Vec<_>>();
+                    schema.retain(|column| !resolved.iter().any(|drop| drop == column));
                     grouping = None;
                 }
                 Stage::Rename { items, .. } => {
-                    for item in items {
-                        self.require_column(&schema, &item.old.value, item.old.span);
-                    }
+                    let resolved_old = items
+                        .iter()
+                        .map(|item| self.resolved_column_name(&schema, &item.old))
+                        .collect::<Vec<_>>();
                     let mut output = schema.clone();
-                    for item in items {
+                    for (item, old_name) in items.iter().zip(resolved_old) {
+                        if self.reject_context_column_target(&item.new, "a rename target") {
+                            continue;
+                        }
                         if schema.iter().any(|column| column == &item.new.value)
-                            && item.old.value != item.new.value
+                            && old_name != item.new.value
                         {
                             self.diagnostics.push(Diagnostic::error(
                                 codes::E1207,
@@ -252,7 +312,7 @@ where
                             ));
                         }
                         for column in &mut output {
-                            if *column == item.old.value {
+                            if *column == old_name {
                                 *column = item.new.value.clone();
                             }
                         }
@@ -265,6 +325,9 @@ where
                     let mut output = schema.clone();
                     for item in items {
                         self.analyze_mutate_expr(&schema, &item.expr);
+                        if self.reject_context_column_target(&item.column, "a mutate target") {
+                            continue;
+                        }
                         if !seen.insert(item.column.value.clone()) {
                             self.diagnostics.push(Diagnostic::error(
                                 codes::E1207,
@@ -280,10 +343,11 @@ where
                     grouping = None;
                 }
                 Stage::GroupBy { columns, .. } => {
-                    for column in columns {
-                        self.require_column(&schema, &column.value, column.span);
-                    }
-                    grouping = Some(columns.iter().map(|column| column.value.clone()).collect());
+                    let resolved = columns
+                        .iter()
+                        .map(|column| self.resolved_column_name(&schema, column))
+                        .collect::<Vec<_>>();
+                    grouping = Some(resolved);
                 }
                 Stage::Agg { items, .. } => {
                     let keys = grouping.take().unwrap_or_default();
@@ -291,6 +355,9 @@ where
                     let mut seen: BTreeSet<String> = output.iter().cloned().collect();
                     for item in items {
                         self.analyze_aggregate_item(&schema, item);
+                        if self.reject_context_column_target(&item.alias, "an aggregate alias") {
+                            continue;
+                        }
                         if !seen.insert(item.alias.value.clone()) {
                             self.diagnostics.push(Diagnostic::error(
                                 codes::E1207,
@@ -304,7 +371,7 @@ where
                 }
                 Stage::Sort { items, .. } => {
                     for item in items {
-                        self.require_column(&schema, &item.column.value, item.column.span);
+                        self.require_column_ref(&schema, &item.column);
                     }
                 }
                 Stage::Limit { .. } => {}
@@ -312,9 +379,9 @@ where
                     source, on, kind, ..
                 } => {
                     let right_schema = self.analyze_binding(&source.value, source.span, stack)?;
-                    self.require_column(&schema, &on.left().value, on.left().span);
-                    self.require_column(&right_schema, &on.right().value, on.right().span);
-                    match joined_schema(&schema, &right_schema, &on.right().value, *kind) {
+                    let _left_key = self.resolved_column_name(&schema, on.left());
+                    let right_key = self.resolved_column_name(&right_schema, on.right());
+                    match joined_schema(&schema, &right_schema, &right_key, *kind) {
                         Ok(output) => schema = output,
                         Err(collision) => {
                             self.diagnostics.push(Diagnostic::error(
@@ -345,7 +412,7 @@ where
                 }
                 Stage::Distinct { columns, .. } => {
                     for column in columns {
-                        self.require_column(&schema, &column.value, column.span);
+                        self.require_column_ref(&schema, column);
                     }
                     grouping = None;
                 }
@@ -363,31 +430,37 @@ where
                         ));
                     }
                     let mut seen = BTreeSet::new();
+                    let mut resolved_columns = Vec::new();
                     for column in columns {
-                        self.require_column(&schema, &column.value, column.span);
-                        if !seen.insert(column.value.clone()) {
+                        let resolved = self.resolved_column_name(&schema, column);
+                        if !seen.insert(resolved.clone()) {
                             self.diagnostics.push(Diagnostic::error(
                                 codes::E1205,
-                                format!("duplicate pivot_longer column `{}`", column.value),
+                                format!("duplicate pivot_longer column `{resolved}`"),
                                 column.span,
                             ));
                         }
+                        resolved_columns.push(resolved);
                     }
-                    let selected: BTreeSet<String> =
-                        columns.iter().map(|column| column.value.clone()).collect();
+                    let selected: BTreeSet<String> = resolved_columns.iter().cloned().collect();
                     let copied = schema
                         .iter()
                         .filter(|column| !selected.contains(*column))
                         .cloned()
                         .collect::<Vec<_>>();
-                    if copied.iter().any(|column| column == &names_to.value) {
+                    let invalid_names_to = self
+                        .reject_context_column_target(names_to, "a pivot_longer names_to target");
+                    let invalid_values_to = self
+                        .reject_context_column_target(values_to, "a pivot_longer values_to target");
+                    if !invalid_names_to && copied.iter().any(|column| column == &names_to.value) {
                         self.diagnostics.push(Diagnostic::error(
                             codes::E1207,
                             format!("pivot_longer names_to `{}` already exists", names_to.value),
                             names_to.span,
                         ));
                     }
-                    if copied.iter().any(|column| column == &values_to.value) {
+                    if !invalid_values_to && copied.iter().any(|column| column == &values_to.value)
+                    {
                         self.diagnostics.push(Diagnostic::error(
                             codes::E1207,
                             format!(
@@ -397,7 +470,8 @@ where
                             values_to.span,
                         ));
                     }
-                    if names_to.value == values_to.value {
+                    if !invalid_names_to && !invalid_values_to && names_to.value == values_to.value
+                    {
                         self.diagnostics.push(Diagnostic::error(
                             codes::E1207,
                             "pivot_longer names_to and values_to must be different columns",
@@ -405,8 +479,12 @@ where
                         ));
                     }
                     schema = copied;
-                    schema.push(names_to.value.clone());
-                    schema.push(values_to.value.clone());
+                    if !invalid_names_to {
+                        schema.push(names_to.value.clone());
+                    }
+                    if !invalid_values_to {
+                        schema.push(values_to.value.clone());
+                    }
                     grouping = None;
                 }
                 Stage::Complete { keys, fills, .. } => {
@@ -419,33 +497,33 @@ where
                     }
                     let mut key_names = BTreeSet::new();
                     for key in keys {
-                        self.require_column(&schema, &key.value, key.span);
-                        if !key_names.insert(key.value.clone()) {
+                        let resolved = self.resolved_column_name(&schema, key);
+                        if !key_names.insert(resolved.clone()) {
                             self.diagnostics.push(Diagnostic::error(
                                 codes::E1205,
-                                format!("duplicate complete key `{}`", key.value),
+                                format!("duplicate complete key `{resolved}`"),
                                 key.span,
                             ));
                         }
                     }
                     let mut fill_names = BTreeSet::new();
                     for fill in fills {
-                        self.require_column(&schema, &fill.column.value, fill.column.span);
+                        let fill_column = self.resolved_column_name(&schema, &fill.column);
                         self.analyze_mutate_expr(&schema, &fill.expr);
-                        if key_names.contains(&fill.column.value) {
+                        if key_names.contains(&fill_column) {
                             self.diagnostics.push(Diagnostic::error(
                                 codes::E1207,
                                 format!(
                                     "complete fill target `{}` cannot be a key column",
-                                    fill.column.value
+                                    fill_column
                                 ),
                                 fill.column.span,
                             ));
                         }
-                        if !fill_names.insert(fill.column.value.clone()) {
+                        if !fill_names.insert(fill_column.clone()) {
                             self.diagnostics.push(Diagnostic::error(
                                 codes::E1205,
-                                format!("duplicate complete fill target `{}`", fill.column.value),
+                                format!("duplicate complete fill target `{fill_column}`"),
                                 fill.column.span,
                             ));
                         }
@@ -512,7 +590,7 @@ where
         for arg in &item.args {
             self.analyze_scalar_expr(arg, WindowContext::Disallowed);
             self.diagnose_legacy_quoted_columns(arg, schema, ExprRole::Default);
-            for column in aggregate_expr_column_refs(arg) {
+            for column in self.aggregate_expr_column_refs(arg) {
                 self.require_column(schema, &column.value, column.span);
             }
         }
@@ -521,7 +599,7 @@ where
     fn analyze_row_expr(&mut self, schema: &[String], expr: &Expr, role: ExprRole) {
         self.analyze_scalar_expr(expr, WindowContext::Disallowed);
         self.diagnose_legacy_quoted_columns(expr, schema, role);
-        for column in row_expr_column_refs(expr, schema, role) {
+        for column in self.row_expr_column_refs(expr, schema, role) {
             self.require_column(schema, &column.value, column.span);
         }
     }
@@ -529,7 +607,7 @@ where
     fn analyze_mutate_expr(&mut self, schema: &[String], expr: &Expr) {
         self.analyze_scalar_expr(expr, WindowContext::Allowed);
         self.diagnose_legacy_quoted_columns(expr, schema, ExprRole::Default);
-        for column in row_expr_column_refs(expr, schema, ExprRole::Default) {
+        for column in self.row_expr_column_refs(expr, schema, ExprRole::Default) {
             self.require_column(schema, &column.value, column.span);
         }
     }
@@ -584,6 +662,9 @@ where
             Expr::Binary { left, right, .. } => {
                 self.analyze_scalar_expr(left, window_context);
                 self.analyze_scalar_expr(right, window_context);
+            }
+            Expr::Context { kind, name, span } => {
+                self.check_context_reference(*kind, &name.value, *span);
             }
             Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => {}
         }
@@ -664,6 +745,244 @@ where
                 format!("unknown column `{name}`"),
                 span,
             ));
+        }
+    }
+
+    fn require_column_ref(&mut self, schema: &[String], column: &pdl_syntax::Spanned<String>) {
+        if let Some(name) = self.resolve_context_column_default(column) {
+            self.require_column(schema, &name, column.span);
+        } else if decode_context_column_ref(&column.value).is_none() {
+            self.require_column(schema, &column.value, column.span);
+        }
+    }
+
+    fn resolved_column_name(
+        &mut self,
+        schema: &[String],
+        column: &pdl_syntax::Spanned<String>,
+    ) -> String {
+        if let Some(name) = self.resolve_context_column_default(column) {
+            self.require_column(schema, &name, column.span);
+            name
+        } else if decode_context_column_ref(&column.value).is_some() {
+            column.value.clone()
+        } else {
+            self.require_column(schema, &column.value, column.span);
+            column.value.clone()
+        }
+    }
+
+    fn reject_context_column_target(
+        &mut self,
+        column: &pdl_syntax::Spanned<String>,
+        position: &str,
+    ) -> bool {
+        let Some((kind, name)) = decode_context_column_ref(&column.value) else {
+            return false;
+        };
+        if self
+            .check_context_reference(kind, name, column.span)
+            .is_some()
+        {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E2004,
+                format!(
+                    "{} `{name}` cannot be used as {position}",
+                    context_kind_label(kind)
+                ),
+                column.span,
+            ));
+        }
+        true
+    }
+
+    fn resolve_context_column_default(
+        &mut self,
+        column: &pdl_syntax::Spanned<String>,
+    ) -> Option<String> {
+        let (kind, name) = decode_context_column_ref(&column.value)?;
+        let info = self.check_context_reference(kind, name, column.span)?;
+        match &info.default {
+            Value::String(value) => Some(value.clone()),
+            _ => {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E2004,
+                    format!(
+                        "{} `{name}` must default to a string to be used as a column name",
+                        context_kind_label(kind)
+                    ),
+                    column.span,
+                ));
+                None
+            }
+        }
+    }
+
+    fn check_context_reference(
+        &mut self,
+        kind: ContextKind,
+        name: &str,
+        span: Span,
+    ) -> Option<ContextInfo> {
+        let Some(info) = self.context_decls.get(name).cloned() else {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E2002,
+                format!("unknown {} `{name}`", context_kind_label(kind)),
+                span,
+            ));
+            return None;
+        };
+        if info.kind != kind {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E2002,
+                format!(
+                    "`{name}` is declared as {}, not {}",
+                    context_kind_label(info.kind),
+                    context_kind_label(kind)
+                ),
+                span,
+            ));
+            return None;
+        }
+        Some(info)
+    }
+
+    fn row_expr_column_refs(
+        &mut self,
+        expr: &Expr,
+        schema: &[String],
+        _role: ExprRole,
+    ) -> Vec<pdl_syntax::Spanned<String>> {
+        match expr {
+            Expr::Ident(value) => vec![value.clone()],
+            Expr::Quoted(_) | Expr::Context { .. } => Vec::new(),
+            Expr::Call { name, args, span } if name.value == "col" => match args.as_slice() {
+                [arg] => self
+                    .dynamic_column_expr_ref(arg, *span)
+                    .into_iter()
+                    .collect(),
+                _ => Vec::new(),
+            },
+            Expr::Call { args, .. } => args
+                .iter()
+                .flat_map(|arg| self.row_expr_column_refs(arg, schema, ExprRole::Default))
+                .collect(),
+            Expr::Window { args, spec, .. } => self.window_expr_column_refs(args, spec, schema),
+            Expr::Unary { expr, .. } => self.row_expr_column_refs(expr, schema, ExprRole::Default),
+            Expr::Binary {
+                left, op, right, ..
+            } if is_comparison_op(*op) => {
+                let mut refs = self.row_expr_column_refs(left, schema, ExprRole::ComparisonLeft);
+                refs.extend(self.row_expr_column_refs(right, schema, ExprRole::ComparisonRight));
+                refs
+            }
+            Expr::Binary { left, right, .. } => {
+                let mut refs = self.row_expr_column_refs(left, schema, ExprRole::Default);
+                refs.extend(self.row_expr_column_refs(right, schema, ExprRole::Default));
+                refs
+            }
+            Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) => Vec::new(),
+        }
+    }
+
+    fn aggregate_expr_column_refs(&mut self, expr: &Expr) -> Vec<pdl_syntax::Spanned<String>> {
+        match expr {
+            Expr::Ident(value) => vec![value.clone()],
+            Expr::Quoted(_) | Expr::Context { .. } => Vec::new(),
+            Expr::Call { name, args, span } if name.value == "col" => match args.as_slice() {
+                [arg] => self
+                    .dynamic_column_expr_ref(arg, *span)
+                    .into_iter()
+                    .collect(),
+                _ => Vec::new(),
+            },
+            Expr::Call { args, .. } => args
+                .iter()
+                .flat_map(|arg| self.aggregate_expr_column_refs(arg))
+                .collect(),
+            Expr::Window { args, spec, .. } => self.window_expr_column_refs(args, spec, &[]),
+            Expr::Unary { expr, .. } => self.aggregate_expr_column_refs(expr),
+            Expr::Binary { left, right, .. } => {
+                let mut refs = self.aggregate_expr_column_refs(left);
+                refs.extend(self.aggregate_expr_column_refs(right));
+                refs
+            }
+            Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) => Vec::new(),
+        }
+    }
+
+    fn window_expr_column_refs(
+        &mut self,
+        args: &[Expr],
+        spec: &pdl_syntax::WindowSpec,
+        schema: &[String],
+    ) -> Vec<pdl_syntax::Spanned<String>> {
+        let mut refs = Vec::new();
+        for arg in args {
+            refs.extend(self.row_expr_column_refs(arg, schema, ExprRole::Default));
+        }
+        refs.extend(
+            spec.partition_by
+                .iter()
+                .filter_map(|column| self.resolved_spanned_column_name(schema, column)),
+        );
+        refs.extend(
+            spec.order_by
+                .iter()
+                .filter_map(|item| self.resolved_spanned_column_name(schema, &item.column)),
+        );
+        refs
+    }
+
+    fn dynamic_column_expr_ref(
+        &mut self,
+        expr: &Expr,
+        span: Span,
+    ) -> Option<pdl_syntax::Spanned<String>> {
+        match expr {
+            Expr::Quoted(value) => Some(value.clone()),
+            Expr::Context { kind, name, span } => {
+                let info = self.check_context_reference(*kind, &name.value, *span)?;
+                match info.default {
+                    Value::String(value) => Some(pdl_syntax::Spanned::new(value, *span)),
+                    _ => {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E2004,
+                            format!(
+                                "{} `{}` must default to a string for col()",
+                                context_kind_label(*kind),
+                                name.value
+                            ),
+                            *span,
+                        ));
+                        None
+                    }
+                }
+            }
+            _ => {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E2004,
+                    "col() requires a string literal or context reference",
+                    span,
+                ));
+                None
+            }
+        }
+    }
+
+    fn resolved_spanned_column_name(
+        &mut self,
+        schema: &[String],
+        column: &pdl_syntax::Spanned<String>,
+    ) -> Option<pdl_syntax::Spanned<String>> {
+        if let Some(name) = self.resolve_context_column_default(column) {
+            return Some(pdl_syntax::Spanned::new(name, column.span));
+        }
+        if decode_context_column_ref(&column.value).is_some() {
+            None
+        } else {
+            self.require_column(schema, &column.value, column.span);
+            Some(column.clone())
         }
     }
 
@@ -749,6 +1068,28 @@ fn union_schema_compatible(left_schema: &[String], right_schema: &[String], by_n
     }
 }
 
+fn literal_default_value(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::Quoted(value) => Some(Value::String(value.value.clone())),
+        Expr::Number(value) => Some(Value::Number(value.value)),
+        Expr::Bool(value) => Some(Value::Bool(value.value)),
+        Expr::Null(_) => Some(Value::Null),
+        Expr::Ident(_)
+        | Expr::Context { .. }
+        | Expr::Call { .. }
+        | Expr::Window { .. }
+        | Expr::Unary { .. }
+        | Expr::Binary { .. } => None,
+    }
+}
+
+fn context_kind_label(kind: ContextKind) -> &'static str {
+    match kind {
+        ContextKind::Param => "parameter",
+        ContextKind::State => "state",
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ExprRole {
     PredicateRoot,
@@ -763,56 +1104,6 @@ enum WindowContext {
     Disallowed,
 }
 
-fn row_expr_column_refs(
-    expr: &Expr,
-    schema: &[String],
-    _role: ExprRole,
-) -> Vec<pdl_syntax::Spanned<String>> {
-    match expr {
-        Expr::Ident(value) => vec![value.clone()],
-        Expr::Quoted(_) => Vec::new(),
-        Expr::Call { args, .. } => args
-            .iter()
-            .flat_map(|arg| row_expr_column_refs(arg, schema, ExprRole::Default))
-            .collect(),
-        Expr::Window { args, spec, .. } => window_expr_column_refs(args, spec, schema),
-        Expr::Unary { expr, .. } => row_expr_column_refs(expr, schema, ExprRole::Default),
-        Expr::Binary {
-            left, op, right, ..
-        } if is_comparison_op(*op) => {
-            let mut refs = row_expr_column_refs(left, schema, ExprRole::ComparisonLeft);
-            refs.extend(row_expr_column_refs(
-                right,
-                schema,
-                ExprRole::ComparisonRight,
-            ));
-            refs
-        }
-        Expr::Binary { left, right, .. } => {
-            let mut refs = row_expr_column_refs(left, schema, ExprRole::Default);
-            refs.extend(row_expr_column_refs(right, schema, ExprRole::Default));
-            refs
-        }
-        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) => Vec::new(),
-    }
-}
-
-fn aggregate_expr_column_refs(expr: &Expr) -> Vec<pdl_syntax::Spanned<String>> {
-    match expr {
-        Expr::Ident(value) => vec![value.clone()],
-        Expr::Quoted(_) => Vec::new(),
-        Expr::Call { args, .. } => args.iter().flat_map(aggregate_expr_column_refs).collect(),
-        Expr::Window { args, spec, .. } => window_expr_column_refs(args, spec, &[]),
-        Expr::Unary { expr, .. } => aggregate_expr_column_refs(expr),
-        Expr::Binary { left, right, .. } => {
-            let mut refs = aggregate_expr_column_refs(left);
-            refs.extend(aggregate_expr_column_refs(right));
-            refs
-        }
-        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) => Vec::new(),
-    }
-}
-
 fn legacy_quoted_column_refs(
     expr: &Expr,
     schema: &[String],
@@ -825,7 +1116,7 @@ fn legacy_quoted_column_refs(
         {
             vec![value.clone()]
         }
-        Expr::Quoted(_) => Vec::new(),
+        Expr::Quoted(_) | Expr::Context { .. } => Vec::new(),
         Expr::Call { args, .. } => args
             .iter()
             .flat_map(|arg| legacy_quoted_column_refs(arg, schema, ExprRole::Default))
@@ -855,20 +1146,6 @@ fn legacy_quoted_column_refs(
     }
 }
 
-fn window_expr_column_refs(
-    args: &[Expr],
-    spec: &pdl_syntax::WindowSpec,
-    schema: &[String],
-) -> Vec<pdl_syntax::Spanned<String>> {
-    let mut refs = Vec::new();
-    for arg in args {
-        refs.extend(row_expr_column_refs(arg, schema, ExprRole::Default));
-    }
-    refs.extend(spec.partition_by.iter().cloned());
-    refs.extend(spec.order_by.iter().map(|item| item.column.clone()));
-    refs
-}
-
 fn contains_window_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Window { .. } => true,
@@ -877,7 +1154,12 @@ fn contains_window_expr(expr: &Expr) -> bool {
         Expr::Binary { left, right, .. } => {
             contains_window_expr(left) || contains_window_expr(right)
         }
-        Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => false,
+        Expr::Quoted(_)
+        | Expr::Number(_)
+        | Expr::Bool(_)
+        | Expr::Null(_)
+        | Expr::Ident(_)
+        | Expr::Context { .. } => false,
     }
 }
 
@@ -1105,6 +1387,24 @@ mod tests {
 
         assert!(analysis.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "E1005" && diagnostic.message == "unknown column `net_amount`"
+        }));
+        assert!(analysis.ir.is_none());
+    }
+
+    #[test]
+    fn dynamic_context_columns_are_rejected_as_output_targets() {
+        let parse = pdl_syntax::parse(
+            r#"param output_name = "total"
+
+load "orders.csv"
+  | mutate $output_name = amount"#,
+        );
+
+        let analysis = analyze_program(&parse.program, |_| Ok(vec!["amount".to_string()]));
+
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E2004"
+                && diagnostic.message == "parameter `output_name` cannot be used as a mutate target"
         }));
         assert!(analysis.ir.is_none());
     }

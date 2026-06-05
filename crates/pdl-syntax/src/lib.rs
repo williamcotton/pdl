@@ -8,4 +8,4 @@ pub use ast::*;
 pub use cst::*;
 pub use format::{format_source, FormatResult};
 pub use lexer::{lex_source, LexResult, Token, TokenKind};
-pub use parser::{parse, ParseResult};
+pub use parser::{decode_context_column_ref, encode_context_column_ref, parse, ParseResult};

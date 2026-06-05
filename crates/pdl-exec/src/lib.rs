@@ -6,4 +6,6 @@ pub mod runtime;
 
 pub use output::{emit_stdout, write_output};
 pub use planning::{plan_prepared, ExecutionPlan, ExecutionPlanStep};
-pub use runtime::{run_prepared, run_prepared_with_io, RunOptions, RunResult};
+pub use runtime::{
+    run_prepared, run_prepared_with_io, run_prepared_with_io_and_context, RunOptions, RunResult,
+};

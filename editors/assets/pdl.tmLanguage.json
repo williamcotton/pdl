@@ -16,6 +16,9 @@
       "include": "#numbers"
     },
     {
+      "include": "#contextReferences"
+    },
+    {
       "include": "#operators"
     },
     {
@@ -93,11 +96,35 @@
         {
           "name": "keyword.operator.arithmetic.pdl",
           "match": "[+\\-*/%]"
+        },
+        {
+          "name": "keyword.operator.context.pdl",
+          "match": "[$@]"
+        }
+      ]
+    },
+    "contextReferences": {
+      "patterns": [
+        {
+          "name": "variable.parameter.context.pdl",
+          "match": "[$@][A-Za-z_][A-Za-z0-9_]*\\b"
         }
       ]
     },
     "declarations": {
       "patterns": [
+        {
+          "name": "meta.context.declaration.pdl",
+          "match": "\\b(param|state)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.pdl"
+            },
+            "2": {
+              "name": "variable.parameter.declaration.pdl"
+            }
+          }
+        },
         {
           "name": "meta.binding.declaration.pdl",
           "match": "\\b(let)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
@@ -132,7 +159,7 @@
       "patterns": [
         {
           "name": "keyword.control.pdl",
-          "match": "\\b(?:let|output|load|filter|select|drop|rename|mutate|group_by|agg|sort|limit|join|union|distinct|pivot_longer|complete|save|on|kind|by_name|names_to|values_to|fill|format|over|partition_by|order_by|rows|between|unbounded_preceding|current_row|unbounded_following|preceding|following|stdin|stdout|and|or|not|asc|desc|inner|left|right|full|semi|anti|nulls_first|nulls_last)\\b"
+          "match": "\\b(?:let|output|param|state|load|filter|select|drop|rename|mutate|group_by|agg|sort|limit|join|union|distinct|pivot_longer|complete|save|on|kind|by_name|names_to|values_to|fill|format|over|partition_by|order_by|rows|between|unbounded_preceding|current_row|unbounded_following|preceding|following|stdin|stdout|and|or|not|asc|desc|inner|left|right|full|semi|anti|nulls_first|nulls_last)\\b"
         },
         {
           "name": "constant.language.pdl",
@@ -152,7 +179,7 @@
         },
         {
           "name": "support.function.scalar.pdl",
-          "match": "\\b(?:is_null|not_null|coalesce|concat|lower|upper|trim|to_number|abs|round|if_else)\\b(?=\\s*\\()"
+          "match": "\\b(?:is_null|not_null|coalesce|concat|lower|upper|trim|to_number|abs|round|if_else|col)\\b(?=\\s*\\()"
         },
         {
           "name": "support.function.window.pdl",

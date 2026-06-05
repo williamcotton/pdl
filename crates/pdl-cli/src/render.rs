@@ -5,14 +5,14 @@ use pdl_driver::{
 };
 use pdl_exec::{ExecutionPlan, ExecutionPlanStep};
 use pdl_semantics::{
-    BinaryOpIr, CompleteFillItemIr, ExprIr, FrameBoundIr, JoinKindIr, PipelineSchemaLabel,
-    PipelineStartIr, ProgramIr, SinkIr, SortDirectionIr, StageIr, UnaryOpIr, WindowFrameIr,
-    WindowSpecIr,
+    BinaryOpIr, CompleteFillItemIr, ContextDeclIr, ContextKindIr, ExprIr, FrameBoundIr, JoinKindIr,
+    PipelineSchemaLabel, PipelineStartIr, ProgramIr, SinkIr, SortDirectionIr, StageIr, UnaryOpIr,
+    WindowFrameIr, WindowSpecIr,
 };
 use pdl_syntax::{
-    AggItem, BinaryOp, Binding, CompleteFillItem, Expr, FrameBound, JoinOn, MutateItem, OutputDecl,
-    Pipeline, PipelineStart, Program, SaveStage, SinkRef, SortDirection, SourceRef, Spanned, Stage,
-    UnaryOp, UnionOptionKind, WindowFrame, WindowSpec,
+    AggItem, BinaryOp, Binding, CompleteFillItem, ContextDecl, ContextKind, Expr, FrameBound,
+    JoinOn, MutateItem, OutputDecl, Pipeline, PipelineStart, Program, SaveStage, SinkRef,
+    SortDirection, SourceRef, Spanned, Stage, UnaryOp, UnionOptionKind, WindowFrame, WindowSpec,
 };
 use serde::Serialize;
 
@@ -511,10 +511,19 @@ fn execution_step_text(step: &ExecutionPlanStep) -> String {
 
 #[derive(Serialize)]
 struct ProgramJson {
+    contexts: Vec<ContextDeclJson>,
     bindings: Vec<BindingJson>,
     outputs: Vec<OutputJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     main: Option<PipelineJson>,
+}
+
+#[derive(Serialize)]
+struct ContextDeclJson {
+    context_kind: &'static str,
+    name: SpannedJson<String>,
+    default: ExprJson,
+    span: Span,
 }
 
 #[derive(Serialize)]
@@ -724,6 +733,11 @@ enum ExprJson {
     Ident {
         value: SpannedJson<String>,
     },
+    Context {
+        context_kind: &'static str,
+        name: SpannedJson<String>,
+        span: Span,
+    },
     Call {
         name: SpannedJson<String>,
         args: Vec<ExprJson>,
@@ -795,9 +809,19 @@ where
 
 fn program_json(program: &Program) -> ProgramJson {
     ProgramJson {
+        contexts: program.contexts.iter().map(context_decl_json).collect(),
         bindings: program.bindings.iter().map(binding_json).collect(),
         outputs: program.outputs.iter().map(output_json).collect(),
         main: program.main.as_ref().map(pipeline_json),
+    }
+}
+
+fn context_decl_json(context: &ContextDecl) -> ContextDeclJson {
+    ContextDeclJson {
+        context_kind: context_kind_text(context.kind),
+        name: spanned_json(&context.name),
+        default: expr_json(&context.default),
+        span: context.span,
     }
 }
 
@@ -1032,6 +1056,11 @@ fn expr_json(expr: &Expr) -> ExprJson {
         Expr::Ident(value) => ExprJson::Ident {
             value: spanned_json(value),
         },
+        Expr::Context { kind, name, span } => ExprJson::Context {
+            context_kind: context_kind_text(*kind),
+            name: spanned_json(name),
+            span: *span,
+        },
         Expr::Call { name, args, span } => ExprJson::Call {
             name: spanned_json(name),
             args: args.iter().map(expr_json).collect(),
@@ -1147,12 +1176,35 @@ fn binary_op_text(op: BinaryOp) -> &'static str {
     }
 }
 
+fn context_kind_text(kind: ContextKind) -> &'static str {
+    match kind {
+        ContextKind::Param => "param",
+        ContextKind::State => "state",
+    }
+}
+
+fn context_kind_ir_text(kind: ContextKindIr) -> &'static str {
+    match kind {
+        ContextKindIr::Param => "param",
+        ContextKindIr::State => "state",
+    }
+}
+
 #[derive(Serialize)]
 struct ProgramIrJson {
+    contexts: Vec<ContextDeclIrJson>,
     bindings: Vec<BindingIrJson>,
     outputs: Vec<OutputIrJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     main: Option<PipelineIrJson>,
+}
+
+#[derive(Serialize)]
+struct ContextDeclIrJson {
+    context_kind: &'static str,
+    name: String,
+    span: Span,
+    default: ExprIrJson,
 }
 
 #[derive(Serialize)]
@@ -1339,6 +1391,11 @@ enum ExprIrJson {
         value: String,
         span: Span,
     },
+    Context {
+        context_kind: &'static str,
+        name: String,
+        span: Span,
+    },
     Call {
         name: String,
         args: Vec<ExprIrJson>,
@@ -1391,6 +1448,7 @@ enum FrameBoundIrJson {
 
 fn program_ir_json(ir: &ProgramIr) -> ProgramIrJson {
     ProgramIrJson {
+        contexts: ir.contexts.iter().map(context_decl_ir_json).collect(),
         bindings: ir
             .bindings
             .iter()
@@ -1422,6 +1480,15 @@ fn program_ir_json(ir: &ProgramIr) -> ProgramIrJson {
             stages: pipeline.stages.iter().map(stage_ir_json).collect(),
             span: pipeline.span,
         }),
+    }
+}
+
+fn context_decl_ir_json(context: &ContextDeclIr) -> ContextDeclIrJson {
+    ContextDeclIrJson {
+        context_kind: context_kind_ir_text(context.kind),
+        name: context.name.clone(),
+        span: context.span,
+        default: expr_ir_json(&context.default),
     }
 }
 
@@ -1612,6 +1679,11 @@ fn expr_ir_json(expr: &ExprIr) -> ExprIrJson {
         ExprIr::Null { span } => ExprIrJson::Null { span: *span },
         ExprIr::Ident { value, span } => ExprIrJson::Ident {
             value: value.clone(),
+            span: *span,
+        },
+        ExprIr::Context { kind, name, span } => ExprIrJson::Context {
+            context_kind: context_kind_ir_text(*kind),
+            name: name.clone(),
             span: *span,
         },
         ExprIr::Call { name, args, span } => ExprIrJson::Call {

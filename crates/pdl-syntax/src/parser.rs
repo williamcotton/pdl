@@ -49,6 +49,8 @@ pub enum SyntaxKind {
     Star,
     Slash,
     Percent,
+    Dollar,
+    At,
     EqEq,
     NotEq,
     Lt,
@@ -58,6 +60,7 @@ pub enum SyntaxKind {
     Bang,
     Eof,
     Error,
+    ContextDecl,
     BindingDecl,
     PipelineExpr,
     LoadStageNode,
@@ -94,28 +97,31 @@ impl SyntaxKind {
             15 => SyntaxKind::Star,
             16 => SyntaxKind::Slash,
             17 => SyntaxKind::Percent,
-            18 => SyntaxKind::EqEq,
-            19 => SyntaxKind::NotEq,
-            20 => SyntaxKind::Lt,
-            21 => SyntaxKind::Lte,
-            22 => SyntaxKind::Gt,
-            23 => SyntaxKind::Gte,
-            24 => SyntaxKind::Bang,
-            25 => SyntaxKind::Eof,
-            26 => SyntaxKind::Error,
-            27 => SyntaxKind::BindingDecl,
-            28 => SyntaxKind::PipelineExpr,
-            29 => SyntaxKind::LoadStageNode,
-            30 => SyntaxKind::BindingRefNode,
-            31 => SyntaxKind::StageNode,
-            32 => SyntaxKind::SaveStageNode,
-            33 => SyntaxKind::SelectItemNode,
-            34 => SyntaxKind::RenameItemNode,
-            35 => SyntaxKind::AggItemNode,
-            36 => SyntaxKind::SortItemNode,
-            37 => SyntaxKind::MutateItemNode,
-            38 => SyntaxKind::ExprNode,
-            39 => SyntaxKind::OutputDecl,
+            18 => SyntaxKind::Dollar,
+            19 => SyntaxKind::At,
+            20 => SyntaxKind::EqEq,
+            21 => SyntaxKind::NotEq,
+            22 => SyntaxKind::Lt,
+            23 => SyntaxKind::Lte,
+            24 => SyntaxKind::Gt,
+            25 => SyntaxKind::Gte,
+            26 => SyntaxKind::Bang,
+            27 => SyntaxKind::Eof,
+            28 => SyntaxKind::Error,
+            29 => SyntaxKind::ContextDecl,
+            30 => SyntaxKind::BindingDecl,
+            31 => SyntaxKind::PipelineExpr,
+            32 => SyntaxKind::LoadStageNode,
+            33 => SyntaxKind::BindingRefNode,
+            34 => SyntaxKind::StageNode,
+            35 => SyntaxKind::SaveStageNode,
+            36 => SyntaxKind::SelectItemNode,
+            37 => SyntaxKind::RenameItemNode,
+            38 => SyntaxKind::AggItemNode,
+            39 => SyntaxKind::SortItemNode,
+            40 => SyntaxKind::MutateItemNode,
+            41 => SyntaxKind::ExprNode,
+            42 => SyntaxKind::OutputDecl,
             _ => SyntaxKind::Error,
         }
     }
@@ -130,9 +136,24 @@ impl SyntaxKind {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Program {
+    pub contexts: Vec<ContextDecl>,
     pub bindings: Vec<Binding>,
     pub outputs: Vec<OutputDecl>,
     pub main: Option<Pipeline>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContextDecl {
+    pub kind: ContextKind,
+    pub name: Spanned<String>,
+    pub default: Expr,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextKind {
+    Param,
+    State,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -446,6 +467,11 @@ pub enum Expr {
     Bool(Spanned<bool>),
     Null(Span),
     Ident(Spanned<String>),
+    Context {
+        kind: ContextKind,
+        name: Spanned<String>,
+        span: Span,
+    },
     Call {
         name: Spanned<String>,
         args: Vec<Expr>,
@@ -478,6 +504,7 @@ impl Expr {
             Expr::Bool(value) => value.span,
             Expr::Null(span) => *span,
             Expr::Ident(value) => value.span,
+            Expr::Context { span, .. } => *span,
             Expr::Call { span, .. }
             | Expr::Window { span, .. }
             | Expr::Unary { span, .. }
@@ -521,6 +548,27 @@ impl<T> Spanned<T> {
     }
 }
 
+const PARAM_COLUMN_PREFIX: &str = "\0param:";
+const STATE_COLUMN_PREFIX: &str = "\0state:";
+
+pub fn encode_context_column_ref(kind: ContextKind, name: &str) -> String {
+    match kind {
+        ContextKind::Param => format!("{PARAM_COLUMN_PREFIX}{name}"),
+        ContextKind::State => format!("{STATE_COLUMN_PREFIX}{name}"),
+    }
+}
+
+pub fn decode_context_column_ref(value: &str) -> Option<(ContextKind, &str)> {
+    value
+        .strip_prefix(PARAM_COLUMN_PREFIX)
+        .map(|name| (ContextKind::Param, name))
+        .or_else(|| {
+            value
+                .strip_prefix(STATE_COLUMN_PREFIX)
+                .map(|name| (ContextKind::State, name))
+        })
+}
+
 pub fn parse(source: &str) -> ParseResult {
     let lexed = lex_source(source);
     let mut parser = Parser::new(source, lexed.parse_tokens, lexed.diagnostics);
@@ -551,8 +599,16 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_program(&mut self) -> (Program, Vec<Diagnostic>) {
+        let mut contexts = Vec::new();
         let mut bindings = Vec::new();
         let mut outputs = Vec::new();
+        while self.at_ident("param") || self.at_ident("state") {
+            if let Some(context) = self.parse_context_decl() {
+                contexts.push(context);
+            } else {
+                self.recover_to_pipe_or_eof();
+            }
+        }
         while self.at_ident("let") {
             if let Some(binding) = self.parse_binding() {
                 bindings.push(binding);
@@ -591,12 +647,39 @@ impl<'a> Parser<'a> {
 
         (
             Program {
+                contexts,
                 bindings,
                 outputs,
                 main,
             },
             std::mem::take(&mut self.diagnostics),
         )
+    }
+
+    fn parse_context_decl(&mut self) -> Option<ContextDecl> {
+        let keyword = self.advance().clone();
+        let kind = match &keyword.kind {
+            TokenKind::Ident(value) if value == "param" => ContextKind::Param,
+            TokenKind::Ident(value) if value == "state" => ContextKind::State,
+            _ => {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E0001,
+                    "expected `param` or `state`",
+                    keyword.span,
+                ));
+                return None;
+            }
+        };
+        let name = self.expect_context_name(kind)?;
+        self.expect_equal();
+        let default = self.parse_expr(0)?;
+        let span = keyword.span.join(default.span());
+        Some(ContextDecl {
+            kind,
+            name,
+            default,
+            span,
+        })
     }
 
     fn parse_binding(&mut self) -> Option<Binding> {
@@ -1695,6 +1778,8 @@ impl<'a> Parser<'a> {
                 Some(Expr::Bool(Spanned::new(false, token.span)))
             }
             TokenKind::Ident(value) if value == "null" => Some(Expr::Null(token.span)),
+            TokenKind::Dollar => self.parse_context_expr(ContextKind::Param, token.span),
+            TokenKind::At => self.parse_context_expr(ContextKind::State, token.span),
             TokenKind::Ident(value) if value == "not" => {
                 let expr = self.parse_expr(11)?;
                 let span = token.span.join(expr.span());
@@ -1830,6 +1915,35 @@ impl<'a> Parser<'a> {
         Some(name)
     }
 
+    fn expect_context_name(&mut self, kind: ContextKind) -> Option<Spanned<String>> {
+        let label = match kind {
+            ContextKind::Param => "parameter name",
+            ContextKind::State => "state name",
+        };
+        let name = self.expect_identifier(label)?;
+        if is_reserved_keyword(&name.value) {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1002,
+                format!(
+                    "reserved keyword `{}` cannot be used as a context name",
+                    name.value
+                ),
+                name.span,
+            ));
+        }
+        Some(name)
+    }
+
+    fn parse_context_expr(&mut self, kind: ContextKind, sigil_span: Span) -> Option<Expr> {
+        let label = match kind {
+            ContextKind::Param => "parameter reference",
+            ContextKind::State => "state reference",
+        };
+        let name = self.expect_identifier(label)?;
+        let span = sigil_span.join(name.span);
+        Some(Expr::Context { kind, name, span })
+    }
+
     fn expect_column_name(&mut self) -> Option<Spanned<String>> {
         let token = self.advance().clone();
         match token.kind {
@@ -1850,6 +1964,22 @@ impl<'a> Parser<'a> {
             TokenKind::String(value) => {
                 self.quoted_column_diagnostic(&value, token.span);
                 Some(Spanned::new(value, token.span))
+            }
+            TokenKind::Dollar => {
+                let name = self.expect_identifier("parameter column reference")?;
+                let span = token.span.join(name.span);
+                Some(Spanned::new(
+                    encode_context_column_ref(ContextKind::Param, &name.value),
+                    span,
+                ))
+            }
+            TokenKind::At => {
+                let name = self.expect_identifier("state column reference")?;
+                let span = token.span.join(name.span);
+                Some(Spanned::new(
+                    encode_context_column_ref(ContextKind::State, &name.value),
+                    span,
+                ))
             }
             _ => {
                 self.diagnostics.push(
@@ -2036,7 +2166,11 @@ impl<'a> Parser<'a> {
             && self.tokens.get(self.pos + 1).is_some_and(|token| {
                 matches!(
                     token.kind,
-                    TokenKind::Ident(_) | TokenKind::BacktickColumn(_) | TokenKind::String(_)
+                    TokenKind::Ident(_)
+                        | TokenKind::BacktickColumn(_)
+                        | TokenKind::String(_)
+                        | TokenKind::Dollar
+                        | TokenKind::At
                 )
             })
     }
@@ -2186,6 +2320,8 @@ fn is_reserved_keyword(value: &str) -> bool {
             | "complete"
             | "let"
             | "output"
+            | "param"
+            | "state"
             | "on"
             | "kind"
             | "by_name"
@@ -2508,6 +2644,30 @@ load "sales.csv"
             panic!("agg stage");
         };
         assert_eq!(items[0].alias.value, "as");
+    }
+
+    #[test]
+    fn parses_context_declarations_and_references() {
+        let source = r#"param metric_column = "revenue"
+state selected_zone = "Downtown"
+
+load "trips.csv"
+  | filter zone == @selected_zone
+  | group_by $metric_column"#;
+        let result = parse(source);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.program.contexts.len(), 2);
+        assert_eq!(result.program.contexts[0].kind, ContextKind::Param);
+        assert_eq!(result.program.contexts[0].name.value, "metric_column");
+        let main = result.program.main.expect("main pipeline");
+        let Stage::GroupBy { columns, .. } = &main.stages[1] else {
+            panic!("expected group_by stage");
+        };
+        assert_eq!(
+            decode_context_column_ref(&columns[0].value),
+            Some((ContextKind::Param, "metric_column"))
+        );
     }
 
     #[test]

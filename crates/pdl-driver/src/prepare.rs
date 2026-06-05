@@ -523,7 +523,11 @@ fn collect_expr_columns(expr: &Expr, role: ExprHintRole, columns: &mut Vec<Strin
             collect_expr_columns(left, ExprHintRole::Default, columns);
             collect_expr_columns(right, ExprHintRole::Default, columns);
         }
-        Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Quoted(_) => {}
+        Expr::Number(_)
+        | Expr::Bool(_)
+        | Expr::Null(_)
+        | Expr::Quoted(_)
+        | Expr::Context { .. } => {}
     }
 }
 
@@ -564,6 +568,7 @@ fn analysis_target_program(program: &Program, binding: &str) -> Program {
         .find(|candidate| candidate.name.value == binding)
         .map_or_else(Span::zero, |candidate| candidate.name.span);
     Program {
+        contexts: program.contexts.clone(),
         bindings: program.bindings.clone(),
         outputs: Vec::new(),
         main: Some(Pipeline {

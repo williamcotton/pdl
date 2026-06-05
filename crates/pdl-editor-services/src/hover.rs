@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::services::{
-    byte_offset_for_position, contains, range_for_span, stage_name, unquoted_text_at_span,
+    byte_offset_for_position, contains, context_full_spans, context_kind_detail,
+    context_name_at_offset, context_symbol_name, range_for_span, stage_name, unquoted_text_at_span,
     DocumentFacts, EditorHover, TextPosition,
 };
 
@@ -46,6 +47,10 @@ fn hover_with_facts(
         .map(|(path, io)| PreviewFacts::new(&parse.program, path, io))
         .unwrap_or_default();
 
+    if let Some(hover) = hover_context(source, &parse.program, &facts, offset) {
+        return Some(hover);
+    }
+
     for binding in parse.program.bindings.iter() {
         if contains(binding.name.span, offset) {
             let schema = binding_schema_text(&binding.name.value, &facts, &previews);
@@ -69,6 +74,32 @@ fn hover_with_facts(
     }
 
     hover_pipeline(source, &parse.program, &facts, &previews, offset)
+}
+
+fn hover_context(
+    source: &str,
+    program: &Program,
+    facts: &DocumentFacts,
+    offset: usize,
+) -> Option<EditorHover> {
+    let (kind, name) = context_name_at_offset(source, program, offset)?;
+    let span = context_full_spans(source, program, kind, &name)
+        .into_iter()
+        .find(|span| contains(*span, offset))?;
+    let detail = facts
+        .contexts
+        .get(&name)
+        .map(|context| context.detail.as_str())
+        .unwrap_or_else(|| context_kind_detail(kind));
+    Some(EditorHover {
+        range: range_for_span(source, span),
+        markdown: format!(
+            "**{} `{}`**\n\n{}",
+            context_kind_detail(kind),
+            context_symbol_name(kind, &name),
+            detail
+        ),
+    })
 }
 
 fn hover_pipeline(
@@ -832,9 +863,12 @@ fn expr_function_spans(expr: &Expr) -> Vec<(String, Span)> {
             spans.extend(expr_function_spans(right));
             spans
         }
-        Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) | Expr::Ident(_) => {
-            Vec::new()
-        }
+        Expr::Quoted(_)
+        | Expr::Number(_)
+        | Expr::Bool(_)
+        | Expr::Null(_)
+        | Expr::Ident(_)
+        | Expr::Context { .. } => Vec::new(),
     }
 }
 
@@ -854,7 +888,11 @@ fn expr_column_spans(expr: &Expr) -> Vec<Span> {
             spans.extend(expr_column_spans(right));
             spans
         }
-        Expr::Quoted(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null(_) => Vec::new(),
+        Expr::Quoted(_)
+        | Expr::Number(_)
+        | Expr::Bool(_)
+        | Expr::Null(_)
+        | Expr::Context { .. } => Vec::new(),
     }
 }
 
@@ -959,6 +997,27 @@ mod tests {
             hover_with_driver_io(source, Path::new("memory/main.pdl"), &io, position).unwrap();
 
         assert_eq!(hover.markdown, "**column `region`**\n\nType: `string`\n\nNullable: `no`\n\nSamples: North, South, West");
+    }
+
+    #[test]
+    fn context_hover_describes_parameter_references() {
+        let source = r#"param metric_column = "revenue"
+
+load "sales.csv"
+  | group_by $metric_column"#;
+        let offset = source.find("$metric_column").expect("context reference") + 2;
+
+        let hover = hover(
+            source,
+            None,
+            crate::services::position_for_byte_offset(source, offset),
+        )
+        .expect("context hover");
+
+        assert_eq!(
+            hover.markdown,
+            "**parameter `$metric_column`**\n\nparameter default `\"revenue\"`"
+        );
     }
 
     #[test]

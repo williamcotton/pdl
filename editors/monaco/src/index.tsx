@@ -28,6 +28,8 @@ const SEMANTIC_TOKEN_TYPES = [
   "pdlBindingReference",
   "pdlColumnDefinition",
   "pdlColumnReference",
+  "pdlContextDeclaration",
+  "pdlContextReference",
 ];
 
 let setupPromise: Promise<void> | null = null;
@@ -62,7 +64,7 @@ export interface PdlCompletion {
   label: string;
   insert_text: string;
   detail: string;
-  kind: "Binding" | "Column" | "Format" | "Function" | "Keyword" | "Stage";
+  kind: "Binding" | "Column" | "Context" | "Format" | "Function" | "Keyword" | "Stage";
 }
 
 export interface PdlHover {
@@ -87,7 +89,9 @@ export interface PdlSemanticToken {
     | "BindingDeclaration"
     | "BindingReference"
     | "ColumnDefinition"
-    | "ColumnReference";
+    | "ColumnReference"
+    | "ContextDeclaration"
+    | "ContextReference";
 }
 
 export type PdlEditorFeatureRequest =
@@ -159,7 +163,7 @@ interface PdlLocation {
 interface PdlDocumentSymbol {
   name: string;
   detail: string;
-  kind: "Binding" | "Function" | "Stage";
+  kind: "Binding" | "Context" | "Function" | "Stage";
   range: TextRange;
   selection_range: TextRange;
   children: PdlDocumentSymbol[];
@@ -352,6 +356,8 @@ export function defaultPdlTheme(): monaco.editor.IStandaloneThemeData {
       { token: "pdlBindingReference", foreground: "6d28d9" },
       { token: "pdlColumnDefinition", foreground: "475569" },
       { token: "pdlColumnReference", foreground: "0e7490" },
+      { token: "pdlContextDeclaration", foreground: "9a5512", fontStyle: "bold" },
+      { token: "pdlContextReference", foreground: "9a5512" },
       { token: "operator", foreground: "4f5b63" },
       { token: "constant.character.escape", foreground: "9f5b00", fontStyle: "bold" },
       { token: "constant.numeric", foreground: "b42318" },
@@ -422,7 +428,7 @@ export function registerPdlEditorProviders(options: RegisterPdlProvidersOptions)
       },
     }),
     monaco.languages.registerCompletionItemProvider(languageId, {
-      triggerCharacters: ["|", "\"", " "],
+      triggerCharacters: ["|", "\"", " ", "$", "@"],
       provideCompletionItems(model, position) {
         const completions = requestFeature<PdlCompletion[]>(model, options, programPathForRequest, {
           kind: "completion",
@@ -643,6 +649,7 @@ function completionItem(item: PdlCompletion, position: monaco.IPosition): monaco
 function completionKind(kind: PdlCompletion["kind"]): monaco.languages.CompletionItemKind {
   switch (kind) {
     case "Binding":
+    case "Context":
       return monaco.languages.CompletionItemKind.Variable;
     case "Column":
       return monaco.languages.CompletionItemKind.Field;
@@ -708,6 +715,10 @@ function semanticTokenIndex(kind: PdlSemanticToken["token_type"]): number {
       return 8;
     case "ColumnReference":
       return 9;
+    case "ContextDeclaration":
+      return 10;
+    case "ContextReference":
+      return 11;
   }
 }
 
@@ -726,6 +737,7 @@ function documentSymbol(symbol: PdlDocumentSymbol): monaco.languages.DocumentSym
 function symbolKind(kind: PdlDocumentSymbol["kind"]): monaco.languages.SymbolKind {
   switch (kind) {
     case "Binding":
+    case "Context":
       return monaco.languages.SymbolKind.Variable;
     case "Function":
       return monaco.languages.SymbolKind.Function;

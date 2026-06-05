@@ -89,6 +89,8 @@ impl LanguageServer for Backend {
                         "|".to_string(),
                         "\"".to_string(),
                         " ".to_string(),
+                        "$".to_string(),
+                        "@".to_string(),
                     ]),
                     ..CompletionOptions::default()
                 }),
@@ -326,6 +328,7 @@ fn lsp_completion(item: EditorCompletion) -> CompletionItem {
         kind: Some(match item.kind {
             CompletionKind::Binding => CompletionItemKind::VARIABLE,
             CompletionKind::Column => CompletionItemKind::FIELD,
+            CompletionKind::Context => CompletionItemKind::VARIABLE,
             CompletionKind::Format => CompletionItemKind::ENUM_MEMBER,
             CompletionKind::Function => CompletionItemKind::FUNCTION,
             CompletionKind::Keyword => CompletionItemKind::KEYWORD,
@@ -351,6 +354,7 @@ fn lsp_document_symbol(symbol: EditorDocumentSymbol) -> DocumentSymbol {
         detail: Some(symbol.detail),
         kind: match symbol.kind {
             DocumentSymbolKind::Binding => SymbolKind::VARIABLE,
+            DocumentSymbolKind::Context => SymbolKind::CONSTANT,
             DocumentSymbolKind::Function => SymbolKind::FUNCTION,
             DocumentSymbolKind::Stage => SymbolKind::METHOD,
         },
@@ -413,6 +417,8 @@ fn semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenType::new("pdlBindingReference"),
             SemanticTokenType::new("pdlColumnDefinition"),
             SemanticTokenType::new("pdlColumnReference"),
+            SemanticTokenType::new("pdlContextDeclaration"),
+            SemanticTokenType::new("pdlContextReference"),
         ],
         token_modifiers: Vec::new(),
     }
@@ -468,6 +474,8 @@ fn semantic_token_index(kind: SemanticTokenKind) -> u32 {
         SemanticTokenKind::BindingReference => 7,
         SemanticTokenKind::ColumnDefinition => 8,
         SemanticTokenKind::ColumnReference => 9,
+        SemanticTokenKind::ContextDeclaration => 10,
+        SemanticTokenKind::ContextReference => 11,
     }
 }
 
@@ -583,6 +591,8 @@ mod tests {
                 "pdlBindingReference",
                 "pdlColumnDefinition",
                 "pdlColumnReference",
+                "pdlContextDeclaration",
+                "pdlContextReference",
             ]
         );
         assert_eq!(semantic_token_index(SemanticTokenKind::Keyword), 0);
@@ -591,5 +601,9 @@ mod tests {
             6
         );
         assert_eq!(semantic_token_index(SemanticTokenKind::ColumnReference), 9);
+        assert_eq!(
+            semantic_token_index(SemanticTokenKind::ContextReference),
+            11
+        );
     }
 }

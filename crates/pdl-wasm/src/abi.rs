@@ -1,7 +1,7 @@
 use pdl_data::{write_table_to_bytes, DataFormat, Table};
 use pdl_driver::{PipelineLabel, SinkDescriptor};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +20,8 @@ struct BrowserRunRequest {
     program_path: String,
     #[serde(default)]
     stdout_format: Option<String>,
+    #[serde(default)]
+    context: BTreeMap<String, JsonValue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,6 +128,20 @@ fn run_browser_json(input: &[u8]) -> String {
     let program_path = PathBuf::from(&request.program_path);
     let io = in_memory_io(&program_path, request.files);
     let prepared = pdl_driver::prepare_source_with_io(&program_path, request.source, &io);
+    let mut context_diagnostics = Vec::new();
+    let context = json_context_values(request.context, &mut context_diagnostics);
+    if !context_diagnostics.is_empty() {
+        let mut diagnostics = prepared.diagnostics();
+        diagnostics.extend(context_diagnostics);
+        return serde_json::json!({
+            "stdout": null,
+            "files": {},
+            "outputs": [],
+            "diagnostics": diagnostics,
+            "error": null,
+        })
+        .to_string();
+    }
     let stdout_format = request.stdout_format.or_else(|| {
         prepared
             .analysis
@@ -134,7 +150,7 @@ fn run_browser_json(input: &[u8]) -> String {
             .map_or(true, |ir| ir.outputs.is_empty())
             .then(|| "csv".to_string())
     });
-    let result = pdl_exec::run_prepared_with_io(
+    let result = pdl_exec::run_prepared_with_io_and_context(
         &prepared,
         pdl_exec::RunOptions {
             stdout_format,
@@ -142,6 +158,7 @@ fn run_browser_json(input: &[u8]) -> String {
             allow_binary_stdout: false,
         },
         &io,
+        context,
     );
     let stdout = match result.stdout {
         Some(bytes) => match String::from_utf8(bytes) {
@@ -175,6 +192,38 @@ fn run_browser_json(input: &[u8]) -> String {
         "error": null,
     })
     .to_string()
+}
+
+fn json_context_values(
+    values: BTreeMap<String, JsonValue>,
+    diagnostics: &mut Vec<pdl_core::Diagnostic>,
+) -> BTreeMap<String, pdl_data::Value> {
+    values
+        .into_iter()
+        .filter_map(|(name, value)| match json_context_value(value) {
+            Some(value) => Some((name, value)),
+            None => {
+                diagnostics.push(pdl_core::Diagnostic::error(
+                    pdl_core::codes::E2005,
+                    format!(
+                        "external context value `{name}` must be null, boolean, number, or string"
+                    ),
+                    pdl_core::Span::zero(),
+                ));
+                None
+            }
+        })
+        .collect()
+}
+
+fn json_context_value(value: JsonValue) -> Option<pdl_data::Value> {
+    match value {
+        JsonValue::Null => Some(pdl_data::Value::Null),
+        JsonValue::Bool(value) => Some(pdl_data::Value::Bool(value)),
+        JsonValue::Number(value) => value.as_f64().map(pdl_data::Value::Number),
+        JsonValue::String(value) => Some(pdl_data::Value::String(value)),
+        JsonValue::Array(_) | JsonValue::Object(_) => None,
+    }
 }
 
 fn saved_files_json(
@@ -268,7 +317,7 @@ fn editor_service_result(
     program_path: &Path,
     io: &dyn pdl_driver::DriverIo,
     request: BrowserEditorFeatureRequest,
-) -> Result<Value, String> {
+) -> Result<JsonValue, String> {
     let result = match request {
         BrowserEditorFeatureRequest::Diagnostics => {
             serde_json::json!(pdl_editor_services::analyze_document(
@@ -580,6 +629,45 @@ output totals =
         assert_eq!(payload["files"]["totals.csv"], "total\n40\n");
         assert!(!Path::new("west.csv").exists());
         assert!(!Path::new("totals.csv").exists());
+    }
+
+    #[test]
+    fn run_json_accepts_reactive_context_values() {
+        let request = serde_json::json!({
+            "source": r#"param active_fleet = "all"
+state selected_zone = "Downtown"
+
+let trips =
+  load "trips.csv"
+  | filter $active_fleet == "all" or fleet == $active_fleet
+
+output active_rankings =
+  trips
+  | filter zone == @selected_zone
+  | group_by station
+  | agg total_revenue = sum(revenue)
+  | sort total_revenue desc
+  | save "active_rankings.csv""#,
+            "files": {
+                "trips.csv": "zone,station,fleet,revenue\nDowntown,A,bus,100\nRiverfront,C,bus,80\nRiverfront,D,rail,120\n"
+            },
+            "context": {
+                "active_fleet": "bus",
+                "selected_zone": "Riverfront"
+            }
+        });
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&run_json(&request.to_string())).expect("json");
+
+        assert!(payload["error"].is_null(), "{payload}");
+        assert_eq!(payload["diagnostics"].as_array().unwrap().len(), 0);
+        assert_eq!(payload["outputs"][0]["name"], "active_rankings");
+        assert_eq!(payload["outputs"][0]["table"]["rows"][0][0], "C");
+        assert_eq!(
+            payload["files"]["active_rankings.csv"],
+            "station,total_revenue\nC,80\n"
+        );
     }
 
     #[test]

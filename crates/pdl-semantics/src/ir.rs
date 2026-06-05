@@ -1,14 +1,29 @@
 use pdl_core::Span;
 use pdl_syntax::{
-    AggItem, BinaryOp, CompleteFillItem, Expr, FrameBound, Pipeline, PipelineStart, Program,
-    SinkRef, SortItem, SourceRef, Stage, UnaryOp, UnionOptionKind, WindowSpec,
+    AggItem, BinaryOp, CompleteFillItem, ContextKind, Expr, FrameBound, Pipeline, PipelineStart,
+    Program, SinkRef, SortItem, SourceRef, Stage, UnaryOp, UnionOptionKind, WindowSpec,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProgramIr {
+    pub contexts: Vec<ContextDeclIr>,
     pub bindings: Vec<BindingIr>,
     pub outputs: Vec<OutputIr>,
     pub main: Option<PipelineIr>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContextDeclIr {
+    pub kind: ContextKindIr,
+    pub name: String,
+    pub span: Span,
+    pub default: ExprIr,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextKindIr {
+    Param,
+    State,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -223,6 +238,11 @@ pub enum ExprIr {
         value: String,
         span: Span,
     },
+    Context {
+        kind: ContextKindIr,
+        name: String,
+        span: Span,
+    },
     Call {
         name: String,
         args: Vec<ExprIr>,
@@ -255,6 +275,7 @@ impl ExprIr {
             | ExprIr::Bool { span, .. }
             | ExprIr::Null { span }
             | ExprIr::Ident { span, .. }
+            | ExprIr::Context { span, .. }
             | ExprIr::Call { span, .. }
             | ExprIr::Window { span, .. }
             | ExprIr::Unary { span, .. }
@@ -312,6 +333,16 @@ pub enum BinaryOpIr {
 
 pub fn lower_program(program: &Program) -> ProgramIr {
     ProgramIr {
+        contexts: program
+            .contexts
+            .iter()
+            .map(|context| ContextDeclIr {
+                kind: lower_context_kind(context.kind),
+                name: context.name.value.clone(),
+                span: context.name.span,
+                default: lower_expr(&context.default),
+            })
+            .collect(),
         bindings: program
             .bindings
             .iter()
@@ -332,6 +363,18 @@ pub fn lower_program(program: &Program) -> ProgramIr {
             .collect(),
         main: program.main.as_ref().map(lower_pipeline),
     }
+}
+
+fn lower_context_kind(kind: ContextKind) -> ContextKindIr {
+    match kind {
+        ContextKind::Param => ContextKindIr::Param,
+        ContextKind::State => ContextKindIr::State,
+    }
+}
+
+pub fn decode_context_column_ref_ir(value: &str) -> Option<(ContextKindIr, &str)> {
+    let (kind, name) = pdl_syntax::decode_context_column_ref(value)?;
+    Some((lower_context_kind(kind), name))
 }
 
 fn lower_pipeline(pipeline: &Pipeline) -> PipelineIr {
@@ -541,6 +584,11 @@ fn lower_expr(expr: &Expr) -> ExprIr {
         Expr::Ident(value) => ExprIr::Ident {
             value: value.value.clone(),
             span: value.span,
+        },
+        Expr::Context { kind, name, span } => ExprIr::Context {
+            kind: lower_context_kind(*kind),
+            name: name.value.clone(),
+            span: *span,
         },
         Expr::Call { name, args, span } => ExprIr::Call {
             name: name.value.clone(),

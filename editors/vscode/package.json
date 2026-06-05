@@ -2,7 +2,7 @@
   "name": "pdl-vscode",
   "displayName": "PDL",
   "description": "Language support for the Pipeline Data Language.",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "publisher": "pdl",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -60,6 +60,16 @@
         "id": "pdlColumnReference",
         "superType": "variable",
         "description": "PDL column reference."
+      },
+      {
+        "id": "pdlContextDeclaration",
+        "superType": "variable",
+        "description": "PDL parameter or state declaration."
+      },
+      {
+        "id": "pdlContextReference",
+        "superType": "variable",
+        "description": "PDL parameter or state reference."
       }
     ],
     "semanticTokenScopes": [
@@ -81,6 +91,14 @@
           "pdlColumnReference": [
             "variable.other.readwrite.pdl",
             "variable.other.column.pdl"
+          ],
+          "pdlContextDeclaration": [
+            "variable.parameter.context.pdl",
+            "meta.context.declaration.pdl"
+          ],
+          "pdlContextReference": [
+            "variable.parameter.context.pdl",
+            "variable.other.context.pdl"
           ]
         }
       }

@@ -1,9 +1,10 @@
 use pdl_core::Severity;
 
 use crate::{
-    parse, AggItem, BinaryOp, CompleteFillItem, Expr, FrameBound, JoinOn, MutateItem, NullsOrder,
-    Pipeline, PipelineStart, SinkRef, SortDirection, SortItem, SourceRef, Spanned, Stage, UnaryOp,
-    UnionOptionKind, WindowFrame, WindowSpec,
+    decode_context_column_ref, parse, AggItem, BinaryOp, CompleteFillItem, ContextDecl,
+    ContextKind, Expr, FrameBound, JoinOn, MutateItem, NullsOrder, Pipeline, PipelineStart,
+    SinkRef, SortDirection, SortItem, SourceRef, Spanned, Stage, UnaryOp, UnionOptionKind,
+    WindowFrame, WindowSpec,
 };
 
 pub type FormatResult = Option<String>;
@@ -28,6 +29,16 @@ pub fn format_source(source: &str) -> FormatResult {
     }
 
     let mut lines = Vec::new();
+    for context in &parse.program.contexts {
+        lines.push(format_context_decl(context));
+    }
+    if !parse.program.contexts.is_empty()
+        && (!parse.program.bindings.is_empty()
+            || !parse.program.outputs.is_empty()
+            || parse.program.main.is_some())
+    {
+        lines.push(String::new());
+    }
     for binding in &parse.program.bindings {
         lines.push(format!("let {} =", binding.name.value));
         lines.extend(format_pipeline(&binding.pipeline, "  ", "  "));
@@ -45,6 +56,19 @@ pub fn format_source(source: &str) -> FormatResult {
     }
 
     Some(lines.join("\n"))
+}
+
+fn format_context_decl(context: &ContextDecl) -> String {
+    let keyword = match context.kind {
+        ContextKind::Param => "param",
+        ContextKind::State => "state",
+    };
+    format!(
+        "{} {} = {}",
+        keyword,
+        context.name.value,
+        format_expr(&context.default)
+    )
 }
 
 fn format_pipeline(pipeline: &Pipeline, first_indent: &str, pipe_indent: &str) -> Vec<String> {
@@ -441,6 +465,7 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Bool(value) => value.value.to_string(),
         Expr::Null(_) => "null".to_string(),
         Expr::Ident(value) => format_column_reference(&value.value),
+        Expr::Context { kind, name, .. } => format_context_ref(*kind, &name.value),
         Expr::Call { name, args, .. } => format!(
             "{}({})",
             name.value,
@@ -592,11 +617,22 @@ fn format_string_literal(value: &str) -> String {
 }
 
 fn format_column_reference(value: &str) -> String {
+    if let Some((kind, name)) = decode_context_column_ref(value) {
+        return format_context_ref(kind, name);
+    }
     if is_simple_column_name(value) && !is_reserved_keyword(value) {
         return value.to_string();
     }
     let escaped = value.replace('\\', "\\\\").replace('`', "\\`");
     format!("`{escaped}`")
+}
+
+fn format_context_ref(kind: ContextKind, name: &str) -> String {
+    let sigil = match kind {
+        ContextKind::Param => "$",
+        ContextKind::State => "@",
+    };
+    format!("{sigil}{name}")
 }
 
 fn is_simple_column_name(value: &str) -> bool {
@@ -633,6 +669,8 @@ fn is_reserved_keyword(value: &str) -> bool {
             | "complete"
             | "let"
             | "output"
+            | "param"
+            | "state"
             | "on"
             | "kind"
             | "by_name"
@@ -760,6 +798,23 @@ mod tests {
             r#"load "sales.csv"
   | select region, amount
   | sort amount desc"#
+        );
+    }
+
+    #[test]
+    fn formats_context_declarations_and_references() {
+        let source = r#"param metric_column="revenue"
+state selected_zone="Downtown"
+load "trips.csv"|filter zone==@selected_zone|group_by $metric_column"#;
+
+        assert_eq!(
+            format_source(source).expect("formatted"),
+            r#"param metric_column = "revenue"
+state selected_zone = "Downtown"
+
+load "trips.csv"
+  | filter zone == @selected_zone
+  | group_by $metric_column"#
         );
     }
 }

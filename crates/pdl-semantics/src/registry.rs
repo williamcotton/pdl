@@ -227,6 +227,14 @@ pub const SCALAR_FUNCTIONS: &[FunctionInfo] = &[
         max_args: Some(3),
         expected_arity: "three arguments",
     },
+    FunctionInfo {
+        name: "col",
+        documentation: "`col(name)`: resolve a string context value as a column reference.",
+        kind: FunctionKind::Scalar,
+        min_args: 1,
+        max_args: Some(1),
+        expected_arity: "one argument",
+    },
 ];
 
 pub const AGGREGATE_FUNCTIONS: &[AggregateFunctionInfo] = &[
@@ -452,6 +460,8 @@ pub const KEYWORDS: &[&str] = &[
     "complete",
     "let",
     "output",
+    "param",
+    "state",
     "on",
     "kind",
     "by_name",
