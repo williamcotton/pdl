@@ -1,6 +1,6 @@
 {
   "name": "pdl-editor",
-  "version": "0.30.0",
+  "version": "0.30.1",
   "description": "Monaco and React editor integration for PDL browser hosts.",
   "license": "MIT OR Apache-2.0",
   "type": "module",

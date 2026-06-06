@@ -2987,6 +2987,12 @@ static editor assets. `prepack` MUST build the publishable surface, and release
 validation MUST inspect `npm pack --dry-run` output to prove ignored generated
 `dist/` files are included by the npm `files` whitelist.
 
+Since version 0.30.1, published `pdl-editor` `dist/` entrypoints MUST NOT emit
+Vite-specific `?worker` or `?url` imports for Monaco workers or Onigasm WASM
+assets. Browser hosts that want package-provided Monaco worker setup MUST pass
+a `createEditorWorker` setup option, and hosts MUST pass an `onigasmWasmUrl`
+setup option when using TextMate grammar loading.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout

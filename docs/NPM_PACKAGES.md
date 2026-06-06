@@ -9,10 +9,12 @@ Use published packages for demo, Studio, and downstream package-surface checks:
 1. Install the published browser packages:
 
    ```bash
-   npm install pdl-wasm@0.30.0 pdl-editor@0.30.0
+   npm install pdl-wasm@0.30.0 pdl-editor@0.30.1
    ```
 
-2. Use the package-local WASM asset or pass an explicit host URL:
+2. Use the package-local WASM asset or pass an explicit host URL. Vite hosts
+   should also import Monaco's editor worker and Onigasm's WASM asset from app
+   source and pass them to `pdl-editor` through `setupOptions`.
 
 ```ts
 import { loadPdlRuntime } from "pdl-wasm";

@@ -3,6 +3,7 @@ import { ArrowRight, CheckCircle2, Code2, LoaderCircle, Play, Table2, Terminal }
 import { PdlEditor } from "pdl-editor";
 import type { PdlEditorDiagnostic, PdlRunResult } from "pdl-wasm";
 
+import { pdlEditorSetupOptions } from "../editorSetup";
 import { type RuntimeState, usePdlRuntime } from "./docs/usePdlRuntime";
 
 interface RoutedPageProps {
@@ -115,7 +116,14 @@ export function HomePage({ navigate, routeHref }: RoutedPageProps): React.ReactE
               </button>
             </div>
             <div className="mini-editor-host">
-              <PdlEditor diagnostics={diagnostics} files={files} onChange={setSource} runtime={runtime} value={source} />
+              <PdlEditor
+                diagnostics={diagnostics}
+                files={files}
+                onChange={setSource}
+                runtime={runtime}
+                setupOptions={pdlEditorSetupOptions}
+                value={source}
+              />
             </div>
           </div>
 

@@ -21,9 +21,21 @@ cross-repo development:
 ```ts
 import { PdlEditor } from "pdl-editor";
 import { loadPdlRuntime } from "pdl-wasm";
+import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+import onigasmWasmUrl from "onigasm/lib/onigasm.wasm?url";
 
 const runtime = await loadPdlRuntime({ wasmUrl: "/wasm/pdl.wasm" });
+
+const setupOptions = {
+  createEditorWorker: () => new EditorWorker(),
+  onigasmWasmUrl,
+};
 ```
+
+The editor package keeps Vite-specific `?worker` and `?url` imports out of its
+published `dist/` entrypoints. Vite hosts should import those assets in the app
+and pass them through `setupOptions`; other bundlers can provide equivalent
+worker factories and asset URLs.
 
 Use packed mode before publishing by running `npm pack --dry-run` in
 `packages/wasm` and `editors/monaco`, then inspecting the file lists for

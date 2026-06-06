@@ -12,6 +12,7 @@ import {
 import { PdlEditor } from "pdl-editor";
 import type { PdlEditorDiagnostic, PdlRunResult, PdlRuntime } from "pdl-wasm";
 
+import { pdlEditorSetupOptions } from "../editorSetup";
 import { publicAssetUrl } from "../publicAssets";
 import { usePdlRuntime } from "./docs/usePdlRuntime";
 
@@ -376,7 +377,14 @@ export function DemoPage(): React.ReactElement {
               </button>
             }
           />
-          <PdlEditor diagnostics={editorDiagnostics} files={dataTexts} onChange={setSource} runtime={runtime} value={source} />
+          <PdlEditor
+            diagnostics={editorDiagnostics}
+            files={dataTexts}
+            onChange={setSource}
+            runtime={runtime}
+            setupOptions={pdlEditorSetupOptions}
+            value={source}
+          />
         </div>
 
         <div className="pane data-pane">

@@ -3,6 +3,7 @@ import { AlertCircle, CheckCircle2, Code2, Database, LoaderCircle, Play, Table2 
 import { PdlEditor } from "pdl-editor";
 import type { PdlEditorDiagnostic, PdlRunResult } from "pdl-wasm";
 
+import { pdlEditorSetupOptions } from "../../editorSetup";
 import { type RuntimeState, usePdlRuntime } from "./usePdlRuntime";
 
 export interface LiveExampleProps {
@@ -121,6 +122,7 @@ export function LiveExample({
             modelUri={`inmemory://pdl/docs/${id}.pdl`}
             onChange={setValue}
             runtime={runtime}
+            setupOptions={pdlEditorSetupOptions}
             value={value}
           />
         </div>

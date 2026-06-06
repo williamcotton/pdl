@@ -2,11 +2,9 @@ import React from "react";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
 import "monaco-editor/min/vs/editor/editor.main.css";
 import "monaco-editor/esm/vs/editor/contrib/hover/browser/hoverContribution";
-import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import { wireTmGrammars } from "monaco-editor-textmate";
 import { Registry } from "monaco-textmate";
 import { loadWASM as loadOnigasm } from "onigasm";
-import onigasmWasmUrl from "onigasm/lib/onigasm.wasm?url";
 
 import pdlLanguageConfiguration from "../assets/language-configuration.json";
 import pdlGrammar from "../assets/pdl.tmLanguage.json";
@@ -153,6 +151,7 @@ export interface SetupPdlMonacoOptions {
   grammar?: unknown;
   languageConfiguration?: monaco.languages.LanguageConfiguration;
   onigasmWasmUrl?: string;
+  createEditorWorker?: () => Worker | Promise<Worker>;
   configureWorker?: boolean;
 }
 
@@ -561,12 +560,12 @@ function ensurePdlProviders(languageId: string): void {
 
 async function setupPdlMonacoOnce(options: SetupPdlMonacoOptions): Promise<void> {
   if (options.configureWorker !== false) {
-    configureMonacoWorker();
+    configureMonacoWorker(options);
   }
   registerPdlLanguage(options);
   definePdlTheme(options.themeName ?? PDL_THEME_NAME, options.theme ?? defaultPdlTheme());
 
-  await loadOnigasmOnce(options.onigasmWasmUrl ?? onigasmWasmUrl);
+  await loadOnigasmOnce(resolveOnigasmWasmUrl(options));
   const registry = new Registry({
     getGrammarDefinition: async () => ({
       format: "json",
@@ -580,14 +579,31 @@ async function setupPdlMonacoOnce(options: SetupPdlMonacoOptions): Promise<void>
   );
 }
 
-function configureMonacoWorker(): void {
+function configureMonacoWorker(options: SetupPdlMonacoOptions): void {
   const target = globalThis as typeof globalThis & {
     MonacoEnvironment?: monaco.Environment;
   };
 
-  target.MonacoEnvironment ??= {
-    getWorker: () => new EditorWorker(),
+  if (target.MonacoEnvironment?.getWorker) {
+    return;
+  }
+
+  const createEditorWorker = options.createEditorWorker;
+  if (!createEditorWorker) {
+    throw new Error("pdl-editor requires setupPdlMonaco({ createEditorWorker }) unless configureWorker is false.");
+  }
+
+  target.MonacoEnvironment = {
+    ...target.MonacoEnvironment,
+    getWorker: () => createEditorWorker(),
   };
+}
+
+function resolveOnigasmWasmUrl(options: SetupPdlMonacoOptions): string {
+  if (options.onigasmWasmUrl) {
+    return options.onigasmWasmUrl;
+  }
+  throw new Error("pdl-editor requires setupPdlMonaco({ onigasmWasmUrl }) for TextMate grammar loading.");
 }
 
 function loadOnigasmOnce(url: string): Promise<void> {
