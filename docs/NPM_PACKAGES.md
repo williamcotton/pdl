@@ -1,6 +1,6 @@
 # PDL Browser Package Development
 
-PDL v0.30 publishes package-shaped browser integrations for npm consumers.
+PDL v0.32 publishes package-shaped browser integrations for npm consumers.
 
 ## Published Package Mode
 
@@ -9,7 +9,7 @@ Use published packages for demo, Studio, and downstream package-surface checks:
 1. Install the published browser packages:
 
    ```bash
-   npm install pdl-wasm@0.30.0 pdl-editor@0.30.1
+   npm install pdl-wasm@0.32.0 pdl-editor@0.32.0
    ```
 
 2. Use the package-local WASM asset or pass an explicit host URL. Vite hosts

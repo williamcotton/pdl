@@ -243,35 +243,26 @@ fn run_suite(
     let git_ref = git_ref(root);
     let input_rows =
         csv_data_rows(&root.join("bench/data/generated/million-row.csv")).unwrap_or(tier.rows());
+    let context = RunContext {
+        root,
+        run_dir: &run_dir,
+        tier,
+        profile,
+        input_rows,
+        run_timestamp: &run_timestamp,
+        git_ref: &git_ref,
+        run_label: &run_label,
+    };
 
     let workloads = large_workloads();
     let mut failures = 0usize;
     for workload in workloads {
-        let row = run_workload(
-            root,
-            &run_dir,
-            workload,
-            tier,
-            profile,
-            input_rows,
-            &run_timestamp,
-            &git_ref,
-            &run_label,
-        );
+        let row = run_workload(&context, workload);
         match row {
             Ok(record) => report.write_record(record)?,
             Err(err) => {
                 failures += 1;
-                report.write_record(failure_record(
-                    root,
-                    &run_dir,
-                    workload,
-                    tier,
-                    &run_timestamp,
-                    &git_ref,
-                    &run_label,
-                    &err.to_string(),
-                ))?;
+                report.write_record(failure_record(&context, workload, &err.to_string()))?;
             }
         }
     }
@@ -429,17 +420,23 @@ fn large_workloads() -> &'static [Workload] {
     ]
 }
 
-fn run_workload(
-    root: &Path,
-    run_dir: &Path,
-    workload: &Workload,
+struct RunContext<'a> {
+    root: &'a Path,
+    run_dir: &'a Path,
     tier: Tier,
     profile: BuildProfile,
     input_rows: usize,
-    run_timestamp: &str,
-    git_ref: &str,
-    run_label: &str,
+    run_timestamp: &'a str,
+    git_ref: &'a str,
+    run_label: &'a str,
+}
+
+fn run_workload(
+    context: &RunContext<'_>,
+    workload: &Workload,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let root = context.root;
+    let run_dir = context.run_dir;
     let required_path = root.join(workload.required_path);
     if !required_path.exists() {
         return Err(format!("missing {}", relative(root, &required_path)).into());
@@ -449,7 +446,7 @@ fn run_workload(
     let log_name = format!("{}-{}.log", workload.name, workload.output_format);
     let output_path = run_dir.join(output_name);
     let log_path = run_dir.join(log_name);
-    let bin = root.join("target").join(profile.dir()).join("pdl");
+    let bin = root.join("target").join(context.profile.dir()).join("pdl");
     let command_text = format!(
         "{} run {} --stdout-format {}",
         relative(root, &bin),
@@ -483,60 +480,53 @@ fn run_workload(
     Ok(vec![
         "pdl".to_string(),
         "pdl-bench".to_string(),
-        run_label.to_string(),
+        context.run_label.to_string(),
         "large".to_string(),
         workload.name.to_string(),
         workload.dataset.to_string(),
-        tier.as_str().to_string(),
+        context.tier.as_str().to_string(),
         workload.input_format.to_string(),
         workload.output_format.to_string(),
         status_text.to_string(),
         command_text,
         relative(root, &output_path),
         relative(root, &log_path),
-        input_rows.to_string(),
+        context.input_rows.to_string(),
         output_rows,
         String::new(),
         output_bytes.to_string(),
         elapsed_ms.to_string(),
-        run_timestamp.to_string(),
-        git_ref.to_string(),
+        context.run_timestamp.to_string(),
+        context.git_ref.to_string(),
         String::new(),
     ])
 }
 
-fn failure_record(
-    root: &Path,
-    run_dir: &Path,
-    workload: &Workload,
-    tier: Tier,
-    run_timestamp: &str,
-    git_ref: &str,
-    run_label: &str,
-    notes: &str,
-) -> Vec<String> {
-    let log_path = run_dir.join(format!("{}-{}.log", workload.name, workload.output_format));
+fn failure_record(context: &RunContext<'_>, workload: &Workload, notes: &str) -> Vec<String> {
+    let log_path = context
+        .run_dir
+        .join(format!("{}-{}.log", workload.name, workload.output_format));
     vec![
         "pdl".to_string(),
         "pdl-bench".to_string(),
-        run_label.to_string(),
+        context.run_label.to_string(),
         "large".to_string(),
         workload.name.to_string(),
         workload.dataset.to_string(),
-        tier.as_str().to_string(),
+        context.tier.as_str().to_string(),
         workload.input_format.to_string(),
         workload.output_format.to_string(),
         "failed".to_string(),
         String::new(),
         String::new(),
-        relative(root, &log_path),
+        relative(context.root, &log_path),
         String::new(),
         String::new(),
         String::new(),
         "0".to_string(),
         "0".to_string(),
-        run_timestamp.to_string(),
-        git_ref.to_string(),
+        context.run_timestamp.to_string(),
+        context.git_ref.to_string(),
         notes.to_string(),
     ]
 }
@@ -747,7 +737,7 @@ fn build_cli(root: &Path, profile: BuildProfile) -> Result<(), Box<dyn std::erro
 fn csv_data_rows(path: &Path) -> Option<usize> {
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
-    let lines = reader.lines().filter_map(Result::ok).count();
+    let lines = reader.lines().map_while(Result::ok).count();
     Some(lines.saturating_sub(1))
 }
 

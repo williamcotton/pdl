@@ -1,12 +1,33 @@
 # PDL Detailed Specification
 
-Status: Draft 0.30.0
+Status: Draft 0.32.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.30.0`.
+The current repository implementation is `0.32.0`.
+
+Version 0.32.0 is a native execution performance foundation release tracked in
+`docs/V0_32_PLAN.md`. It adds an opaque `pdl-data` data-plan facade beside the
+existing `Table`, `Row`, and `Value` APIs; keeps concrete Polars, Arrow reader,
+and Parquet reader types private to `pdl-data`; and keeps the portable row
+runtime as the semantic reference and fallback. Native CLI execution may select
+the Polars-backed backend for whole-pipeline path-backed plans containing
+supported stages: `load` from a real path, `filter` with conservatively lowered
+expressions, `select`, `drop`, `rename`, `sort`, `limit`, `distinct`, and
+terminal `save` sinks. Unsupported stages, byte-backed inputs, named outputs,
+bindings, and unsupported expressions fall back to the row runtime in automatic
+mode. `pdl run --engine row|native|auto` makes backend selection observable for
+debugging and parity tests. Arrow IPC stream stdout remains a first-class typed
+handoff for both `--stdout-format arrow-stream` and terminal `save stdout format
+"arrow-stream"` plans.
+
+Version 0.31.0 is a benchmark infrastructure release tracked in
+`docs/V0_31_PLAN.md`. It adds the `pdl-bench` crate, generated/downloaded
+benchmark data lifecycle, tracked large workload programs, ignored
+`bench/runs/<label>/report.csv` outputs, and tracked baseline snapshots under
+`bench/baselines/`.
 
 Version 0.30.0 is an npm publication-readiness release tracked in
 `docs/V0_30_PLAN.md`. It keeps the v0.29 source language, execution semantics,
@@ -2282,6 +2303,7 @@ Recommended options:
 
 - `--stdin-format <format>`
 - `--stdout-format <format>`
+- `--engine <auto|row|native>`
 - `--output <path>`
 - `--manifest <path>`
 - `--dry-run`
@@ -2298,6 +2320,13 @@ If multiple named outputs would write distinct tables to one stdout stream, the
 CLI MUST produce `E1607` instead of interleaving or concatenating data streams.
 
 Operational logs MUST go to stderr so stdout remains a clean data stream.
+
+Since version 0.32.0, the native CLI accepts `--engine auto`, `--engine row`,
+and `--engine native` for `pdl run`. `auto` is the default and MAY choose the
+native backend for a whole pipeline when the implementation can prove semantic
+compatibility. `row` forces the portable row runtime. `native` requires native
+backend execution and MUST report an ordinary PDL diagnostic when the pipeline
+contains unsupported native operations.
 
 ### 14.3 pdl check
 
@@ -2474,6 +2503,29 @@ If the runtime cannot prove a cached table is valid, it MUST recompute.
 
 PDL SHOULD stream where semantics permit.
 
+### 15.5 Data Backend Facade
+
+The reference implementation keeps the public row API available through
+`pdl-data` while adding an opaque data-plan facade for execution engines.
+
+`pdl-data` MUST expose backend-neutral data source, sink, plan, and expression
+types. These types MAY report whether the selected backend is portable rows or
+native Polars, but public APIs above `pdl-data` MUST NOT expose Polars
+dataframes, lazy frames, expressions, Arrow reader internals, or Parquet reader
+internals.
+
+The portable row backend is the reference behavior. Native execution is enabled
+only for whole-pipeline plans whose inputs, expressions, stages, and output
+sinks have parity coverage. If parity is uncertain, automatic execution MUST
+use the row backend.
+
+The first native fast path in version 0.32.0 is limited to path-backed plans
+with supported stages. Byte-backed input, stdin, bindings, named outputs,
+multi-output execution, joins, unions, mutation, grouping, aggregation,
+`pivot_longer`, `complete`, windows, and unsupported expressions fall back to
+rows in automatic mode. Forced native mode reports a diagnostic instead of
+silently falling back.
+
 `filter`, `select`, `drop`, `rename`, and simple `mutate` can stream.
 
 `group_by` plus `agg`, `sort`, `join`, `distinct`, window expressions, and
@@ -2543,6 +2595,11 @@ pdl run prep.pdl --stdout-format arrow-stream | consumer --stdin-format arrow-st
 
 PDL's responsibility is to produce a valid Arrow IPC stream.
 
+The native backend SHOULD write Arrow IPC stream stdout directly through a
+writer-oriented data sink when the active native plan can do so without
+materializing a public row table. Diagnostics and logs MUST continue to use
+stderr so stdout remains stream bytes only.
+
 The consumer's responsibility is to consume stdin if it supports that mode.
 
 This PDL specification does not require downstream consumers to implement new
@@ -2609,7 +2666,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.30.0` LSP implementation provides diagnostics,
+The current `0.32.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3063,7 +3120,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.30.0"
+version = "0.32.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3094,18 +3151,12 @@ chrono = "0.4"
 indexmap = "2"
 thiserror = "2"
 polars = { version = "0.53", default-features = false, features = [
-    "lazy",
+    "abs",
     "csv",
-    "ipc",
-    "ipc_streaming",
-    "parquet",
-    "json",
-    "temporal",
-    "dtype-slim",
     "fmt",
-    "strings",
-    "regex",
-    "rank",
+    "ipc_streaming",
+    "lazy",
+    "parquet",
 ] }
 tower-lsp = "0.20"
 lsp-types = "0.94.1"
@@ -4655,7 +4706,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.30.0.
+PDL source does not require an explicit version declaration in draft 0.32.0.
 
 The implementation SHOULD report supported language version.
 

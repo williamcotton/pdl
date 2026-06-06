@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -18,6 +18,8 @@ pub enum Command {
         stdout_format: Option<String>,
         #[arg(long)]
         dry_run: bool,
+        #[arg(long, value_enum, default_value_t = EngineArg::Auto)]
+        engine: EngineArg,
     },
     Check {
         file: PathBuf,
@@ -58,4 +60,11 @@ pub enum Command {
     },
     Lsp,
     Version,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum EngineArg {
+    Auto,
+    Row,
+    Native,
 }
