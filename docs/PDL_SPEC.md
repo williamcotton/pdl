@@ -1,12 +1,22 @@
 # PDL Detailed Specification
 
-Status: Draft 0.33.0
+Status: Draft 0.34.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.33.0`.
+The current repository implementation is `0.34.0`.
+
+Version 0.34.0 is a production native-pipeline release tracked in
+`docs/V0_34_PLAN.md`. Its first implemented slice makes path-backed Arrow IPC
+stream inputs eligible for native Polars execution when the rest of the
+pipeline has native parity coverage. The implementation reads Arrow stream
+files into the native dataframe path without converting through public row
+`Value` objects, keeps byte-backed and stdin Arrow streams on the row runtime in
+automatic mode before native scans are opened, and preserves the existing
+browser/WASM rule that Polars, Parquet, and native Arrow dependencies MUST NOT
+enter the `pdl-wasm` target graph.
 
 Version 0.33.0 is a native execution performance follow-up release tracked in
 `docs/V0_33_PLAN.md`. It makes automatic native execution classify unsupported
@@ -2533,7 +2543,9 @@ use the row backend.
 The first native fast path in version 0.32.0 is limited to path-backed plans
 with supported stages. Since version 0.33.0, supported native stages include
 grouped `agg` for `count`, `sum`, `mean`, `min`, and `max` over simple column
-references on path-backed CSV and Parquet inputs. More complex aggregate
+references on path-backed CSV and Parquet inputs. Since version 0.34.0,
+path-backed Arrow IPC stream inputs are also eligible for native execution when
+the rest of the pipeline has native parity coverage. More complex aggregate
 arguments and aggregate functions remain row-runtime work until their native
 parity rules are specified. Byte-backed input, stdin, bindings, named outputs,
 multi-output execution, joins, unions, mutation, `pivot_longer`, `complete`,
@@ -2685,7 +2697,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.33.0` LSP implementation provides diagnostics,
+The current `0.34.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3139,7 +3151,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.33.0"
+version = "0.34.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -4725,7 +4737,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.33.0.
+PDL source does not require an explicit version declaration in draft 0.34.0.
 
 The implementation SHOULD report supported language version.
 

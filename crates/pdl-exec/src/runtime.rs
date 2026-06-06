@@ -470,7 +470,10 @@ fn check_native_load_eligibility(
         ));
     }
     let format = resolve_input_format(input, explicit_format, None, None, stage_span)?;
-    if !matches!(format, DataFormat::Csv | DataFormat::Parquet) {
+    if !matches!(
+        format,
+        DataFormat::Csv | DataFormat::Parquet | DataFormat::ArrowStream
+    ) {
         return Err(unsupported_native_pipeline(
             "input format is not supported by native execution",
         ));
@@ -3271,60 +3274,71 @@ mod tests {
     }
 
     #[test]
-    fn native_engine_runs_grouped_aggregate_csv_and_parquet() {
+    fn native_engine_runs_grouped_aggregate_csv_parquet_and_arrow_stream() {
         let workspace = temp_workspace("native-aggregate");
         let csv = "region,score,latency_ms\nWest,30,100\nEast,10,80\nWest,50,120\nEast,30,90\n";
         fs::write(workspace.join("sales.csv"), csv).expect("write csv");
+        let table = Table::new(
+            vec![
+                "region".to_string(),
+                "score".to_string(),
+                "latency_ms".to_string(),
+            ],
+            vec![
+                Row {
+                    values: vec![
+                        Value::String("West".to_string()),
+                        Value::Number(30.0),
+                        Value::Number(100.0),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("East".to_string()),
+                        Value::Number(10.0),
+                        Value::Number(80.0),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("West".to_string()),
+                        Value::Number(50.0),
+                        Value::Number(120.0),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("East".to_string()),
+                        Value::Number(30.0),
+                        Value::Number(90.0),
+                    ],
+                },
+            ],
+        );
         pdl_data::write_table_to_path(
             &workspace.join("sales.parquet"),
             DataFormat::Parquet,
-            &Table::new(
-                vec![
-                    "region".to_string(),
-                    "score".to_string(),
-                    "latency_ms".to_string(),
-                ],
-                vec![
-                    Row {
-                        values: vec![
-                            Value::String("West".to_string()),
-                            Value::Number(30.0),
-                            Value::Number(100.0),
-                        ],
-                    },
-                    Row {
-                        values: vec![
-                            Value::String("East".to_string()),
-                            Value::Number(10.0),
-                            Value::Number(80.0),
-                        ],
-                    },
-                    Row {
-                        values: vec![
-                            Value::String("West".to_string()),
-                            Value::Number(50.0),
-                            Value::Number(120.0),
-                        ],
-                    },
-                    Row {
-                        values: vec![
-                            Value::String("East".to_string()),
-                            Value::Number(30.0),
-                            Value::Number(90.0),
-                        ],
-                    },
-                ],
-            ),
+            &table,
         )
         .expect("write parquet");
+        pdl_data::write_table_to_path(
+            &workspace.join("sales.arrow"),
+            DataFormat::ArrowStream,
+            &table,
+        )
+        .expect("write arrow stream");
 
-        for input in ["sales.csv", "sales.parquet"] {
+        for (input, format_clause) in [
+            ("sales.csv", ""),
+            ("sales.parquet", ""),
+            ("sales.arrow", r#" format "arrow-stream""#),
+        ] {
             let program_path = workspace.join(format!("{input}.pdl"));
             let io = OsDriverIo;
             let prepared = prepare_source_with_io(
                 &program_path,
                 format!(
-                    r#"load "{input}"
+                    r#"load "{input}"{format_clause}
   | group_by region
   | agg
       row_count = count(),
@@ -3348,6 +3362,13 @@ mod tests {
                 BTreeMap::new(),
                 ExecutionEngine::Row,
             );
+            let auto = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Auto,
+            );
             let native = run_prepared_with_io_and_context_and_engine(
                 &prepared,
                 options,
@@ -3362,10 +3383,22 @@ mod tests {
                 "{input}: {:?}",
                 native.diagnostics
             );
+            assert!(
+                auto.diagnostics.is_empty(),
+                "{input}: {:?}",
+                auto.diagnostics
+            );
+            assert_eq!(auto.backend, DataBackend::NativePolars, "{input}");
             assert_eq!(native.backend, DataBackend::NativePolars);
+            let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
             assert_eq!(
                 String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
-                String::from_utf8(row.stdout.expect("row csv")).expect("utf8"),
+                row_csv,
+                "{input}"
+            );
+            assert_eq!(
+                String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+                row_csv,
                 "{input}"
             );
         }
@@ -3577,6 +3610,7 @@ output active_rankings =
         );
 
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.backend, DataBackend::PortableRows);
         assert_eq!(
             String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
             "region,amount\nWest,30\nEast,10\n"

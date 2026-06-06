@@ -13,7 +13,7 @@ use crate::frame::{NullsOrder, SortDirection};
 use crate::value::Value;
 
 #[cfg(feature = "polars-engine")]
-use native::{LazyFileListReader, SerWriter};
+use native::{IntoLazy, LazyFileListReader, SerReader, SerWriter};
 #[cfg(feature = "polars-engine")]
 use polars::prelude as native;
 
@@ -416,7 +416,20 @@ fn scan_native(source: DataSource<'_>) -> Result<DataPlan, Diagnostic> {
             native::LazyFrame::scan_parquet(native_path(path)?, Default::default())
                 .map_err(native_read_error(path, format))?
         }
-        DataFormat::ArrowFile | DataFormat::ArrowStream | DataFormat::JsonLines => {
+        DataFormat::ArrowStream => {
+            let file = std::fs::File::open(path).map_err(|error| {
+                Diagnostic::error(
+                    codes::E1802,
+                    format!("could not read data file `{}`: {error}", path.display()),
+                    Span::zero(),
+                )
+            })?;
+            native::IpcStreamReader::new(file)
+                .finish()
+                .map_err(native_read_error(path, format))?
+                .lazy()
+        }
+        DataFormat::ArrowFile | DataFormat::JsonLines => {
             return Err(unsupported_native_format(format));
         }
     };
