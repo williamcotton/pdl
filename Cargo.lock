@@ -2028,7 +2028,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pdl-bench"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "pdl-cli"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "clap",
  "pdl-core",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "pdl-core"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -2066,7 +2066,7 @@ dependencies = [
 
 [[package]]
 name = "pdl-data"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -2085,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "pdl-driver"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "pdl-core",
  "pdl-data",
@@ -2095,7 +2095,7 @@ dependencies = [
 
 [[package]]
 name = "pdl-editor-services"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "pdl-core",
  "pdl-data",
@@ -2107,7 +2107,7 @@ dependencies = [
 
 [[package]]
 name = "pdl-exec"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "chrono",
  "indexmap",
@@ -2122,7 +2122,7 @@ dependencies = [
 
 [[package]]
 name = "pdl-lsp"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "dashmap 6.2.1",
  "pdl-core",
@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "pdl-semantics"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "pdl-core",
  "pdl-data",
@@ -2142,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "pdl-syntax"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "logos",
  "pdl-core",
@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "pdl-wasm"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "lsp-types",
  "pdl-core",

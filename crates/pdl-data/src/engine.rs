@@ -327,7 +327,36 @@ impl DataPlan {
                 Ok(Self::from_table(aggregate_rows(&table, group_keys, items)?))
             }
             #[cfg(feature = "polars-engine")]
-            DataPlanInner::Native(_) => Err(unsupported_native_operation("aggregate")),
+            DataPlanInner::Native(plan) => {
+                let aggregations = items
+                    .iter()
+                    .map(native_agg_expr)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let aggregated = if group_keys.is_empty() {
+                    plan.plan.select(aggregations)
+                } else {
+                    let keys = group_keys
+                        .iter()
+                        .map(|key| native::col(key).cast(native::DataType::String).alias(key))
+                        .collect::<Vec<_>>();
+                    let options = native::SortMultipleOptions {
+                        descending: vec![false; group_keys.len()],
+                        nulls_last: vec![true; group_keys.len()],
+                        maintain_order: true,
+                        ..Default::default()
+                    };
+                    plan.plan
+                        .group_by(keys)
+                        .agg(aggregations)
+                        .sort(group_keys.to_vec(), options)
+                };
+                Ok(Self {
+                    inner: DataPlanInner::Native(NativePlan {
+                        format: plan.format,
+                        plan: aggregated,
+                    }),
+                })
+            }
         }
     }
 
@@ -849,6 +878,36 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
             }
         }
     })
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_agg_expr(item: &DataAggItem) -> Result<native::Expr, Diagnostic> {
+    let expr = match item.function.as_str() {
+        "count" if item.args.is_empty() => native::len(),
+        "count" => {
+            let [arg] = item.args.as_slice() else {
+                return Err(unsupported_native_operation("count aggregate arity"));
+            };
+            native_expr(arg)?.count()
+        }
+        "sum" => native_unary_agg(item, |expr| expr.sum())?,
+        "mean" => native_unary_agg(item, |expr| expr.mean())?,
+        "min" => native_unary_agg(item, |expr| expr.min())?,
+        "max" => native_unary_agg(item, |expr| expr.max())?,
+        _ => return Err(unsupported_native_operation("aggregate function")),
+    };
+    Ok(expr.alias(&item.alias))
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_unary_agg(
+    item: &DataAggItem,
+    aggregate: impl FnOnce(native::Expr) -> native::Expr,
+) -> Result<native::Expr, Diagnostic> {
+    let [arg] = item.args.as_slice() else {
+        return Err(unsupported_native_operation("aggregate arity"));
+    };
+    Ok(aggregate(native_expr(arg)?))
 }
 
 #[cfg(feature = "polars-engine")]

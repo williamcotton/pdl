@@ -123,9 +123,22 @@ fn exec_uses_ir_not_syntax_stage_inspection() {
 #[test]
 fn wasm_manifest_does_not_enable_native_format_features() {
     let wasm_manifest = read_workspace_file("crates/pdl-wasm/Cargo.toml");
+    let workspace_manifest = read_workspace_file("Cargo.toml");
 
     assert!(!wasm_manifest.contains("native-formats"));
     assert!(!wasm_manifest.contains("polars-engine"));
+    for dependency in [
+        r#"pdl-data = { path = "crates/pdl-data", default-features = false }"#,
+        r#"pdl-semantics = { path = "crates/pdl-semantics", default-features = false }"#,
+        r#"pdl-driver = { path = "crates/pdl-driver", default-features = false }"#,
+        r#"pdl-exec = { path = "crates/pdl-exec", default-features = false }"#,
+        r#"pdl-editor-services = { path = "crates/pdl-editor-services", default-features = false }"#,
+    ] {
+        assert!(
+            workspace_manifest.contains(dependency),
+            "workspace dependency must keep native default features disabled for wasm: {dependency}"
+        );
+    }
 }
 
 fn rust_files(dir: &Path) -> Vec<PathBuf> {

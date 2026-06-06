@@ -1,6 +1,8 @@
 # PDL Browser Package Development
 
-PDL v0.32 publishes package-shaped browser integrations for npm consumers.
+PDL browser integrations are published independently from every Rust/CLI
+version bump. Use versions that exist on npm for demo, Studio, and downstream
+package-surface checks.
 
 ## Published Package Mode
 
@@ -9,7 +11,7 @@ Use published packages for demo, Studio, and downstream package-surface checks:
 1. Install the published browser packages:
 
    ```bash
-   npm install pdl-wasm@0.32.0 pdl-editor@0.32.0
+   npm install pdl-wasm@0.30.0 pdl-editor@0.30.1
    ```
 
 2. Use the package-local WASM asset or pass an explicit host URL. Vite hosts
@@ -22,7 +24,8 @@ import { loadPdlRuntime } from "pdl-wasm";
 const runtime = await loadPdlRuntime({ wasmUrl: "/wasm/pdl.wasm" });
 ```
 
-The PDL demo consumes these published package versions.
+The PDL demo consumes these verified published package versions unless a newer
+browser package release has actually been published.
 
 ## Package Validation
 

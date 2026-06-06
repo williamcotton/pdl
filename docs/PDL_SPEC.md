@@ -1,12 +1,21 @@
 # PDL Detailed Specification
 
-Status: Draft 0.32.0
+Status: Draft 0.33.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.32.0`.
+The current repository implementation is `0.33.0`.
+
+Version 0.33.0 is a native execution performance follow-up release tracked in
+`docs/V0_33_PLAN.md`. It makes automatic native execution classify unsupported
+pipelines before opening native scans, adds native grouped aggregate coverage
+for path-backed CSV and Parquet pipelines using `count`, `sum`, `mean`, `min`,
+and `max`, keeps unsupported native cases on the row runtime in `auto` mode,
+and extends `pdl-bench` reports with engine attribution and baseline
+comparison. Browser/WASM builds continue to use the row runtime only and MUST
+NOT enable Polars-backed native features.
 
 Version 0.32.0 is a native execution performance foundation release tracked in
 `docs/V0_32_PLAN.md`. It adds an opaque `pdl-data` data-plan facade beside the
@@ -2324,9 +2333,11 @@ Operational logs MUST go to stderr so stdout remains a clean data stream.
 Since version 0.32.0, the native CLI accepts `--engine auto`, `--engine row`,
 and `--engine native` for `pdl run`. `auto` is the default and MAY choose the
 native backend for a whole pipeline when the implementation can prove semantic
-compatibility. `row` forces the portable row runtime. `native` requires native
-backend execution and MUST report an ordinary PDL diagnostic when the pipeline
-contains unsupported native operations.
+compatibility. Since version 0.33.0, `auto` MUST classify known-unsupported
+native plans before opening native scans so row-only pipelines do not pay
+failed-native execution overhead. `row` forces the portable row runtime.
+`native` requires native backend execution and MUST report an ordinary PDL
+diagnostic when the pipeline contains unsupported native operations.
 
 ### 14.3 pdl check
 
@@ -2520,11 +2531,19 @@ sinks have parity coverage. If parity is uncertain, automatic execution MUST
 use the row backend.
 
 The first native fast path in version 0.32.0 is limited to path-backed plans
-with supported stages. Byte-backed input, stdin, bindings, named outputs,
-multi-output execution, joins, unions, mutation, grouping, aggregation,
-`pivot_longer`, `complete`, windows, and unsupported expressions fall back to
-rows in automatic mode. Forced native mode reports a diagnostic instead of
-silently falling back.
+with supported stages. Since version 0.33.0, supported native stages include
+grouped `agg` for `count`, `sum`, `mean`, `min`, and `max` over simple column
+references on path-backed CSV and Parquet inputs. More complex aggregate
+arguments and aggregate functions remain row-runtime work until their native
+parity rules are specified. Byte-backed input, stdin, bindings, named outputs,
+multi-output execution, joins, unions, mutation, `pivot_longer`, `complete`,
+windows, and unsupported expressions fall back to rows in automatic mode before
+native scans are opened when they are known to be unsupported. Forced native
+mode reports a diagnostic instead of silently falling back.
+
+Browser/WASM builds MUST keep the native Polars feature set disabled. The WASM
+runtime MUST NOT enable `native-formats`, `polars-engine`, or any dependency
+path that pulls Polars into the wasm target dependency graph.
 
 `filter`, `select`, `drop`, `rename`, and simple `mutate` can stream.
 
@@ -2666,7 +2685,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.32.0` LSP implementation provides diagnostics,
+The current `0.33.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3120,7 +3139,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.32.0"
+version = "0.33.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -4706,7 +4725,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.32.0.
+PDL source does not require an explicit version declaration in draft 0.33.0.
 
 The implementation SHOULD report supported language version.
 

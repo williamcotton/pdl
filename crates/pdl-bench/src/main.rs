@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ const TLC_URL: &str =
 const TLC_ZONES_URL: &str = "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv";
 const SFO_URL: &str = "https://static.sfomuseum.org/parquet/sfomuseum-data-flights-2026-03.parquet";
 
-const REPORT_HEADER: [&str; 21] = [
+const REPORT_HEADER: [&str; 22] = [
     "repo",
     "tool",
     "run_label",
@@ -27,6 +28,7 @@ const REPORT_HEADER: [&str; 21] = [
     "tier",
     "input_format",
     "output_format",
+    "engine",
     "status",
     "command",
     "output_path",
@@ -91,9 +93,18 @@ enum Commands {
         run_label: Option<String>,
         #[arg(long, value_enum, default_value_t = BuildProfile::Debug)]
         profile: BuildProfile,
+        #[arg(long, value_enum, default_value_t = BenchmarkEngine::Auto)]
+        engine: BenchmarkEngine,
         /// Do not generate missing benchmark data before running.
         #[arg(long)]
         no_generate: bool,
+    },
+    /// Compare a run report with a baseline report.
+    Compare {
+        #[arg(long)]
+        baseline: String,
+        #[arg(long)]
+        run_label: String,
     },
     /// Copy an ignored run report into a tracked baseline directory.
     Snapshot {
@@ -156,6 +167,23 @@ impl BuildProfile {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum BenchmarkEngine {
+    Auto,
+    Row,
+    Native,
+}
+
+impl BenchmarkEngine {
+    fn as_str(self) -> &'static str {
+        match self {
+            BenchmarkEngine::Auto => "auto",
+            BenchmarkEngine::Row => "row",
+            BenchmarkEngine::Native => "native",
+        }
+    }
+}
+
 struct Workload {
     name: &'static str,
     program: &'static str,
@@ -183,9 +211,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             tier,
             run_label,
             profile,
+            engine,
             no_generate,
         } => {
-            run_suite(&root, suite, tier, run_label, profile, no_generate)?;
+            run_suite(&root, suite, tier, run_label, profile, engine, no_generate)?;
+        }
+        Commands::Compare {
+            baseline,
+            run_label,
+        } => {
+            compare_run(&root, &baseline, &run_label)?;
         }
         Commands::Snapshot {
             run_label,
@@ -211,6 +246,7 @@ fn run_suite(
     tier: Tier,
     run_label: Option<String>,
     profile: BuildProfile,
+    engine: BenchmarkEngine,
     no_generate: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !matches!(suite, Suite::Large) {
@@ -252,14 +288,20 @@ fn run_suite(
         run_timestamp: &run_timestamp,
         git_ref: &git_ref,
         run_label: &run_label,
+        engine,
     };
 
     let workloads = large_workloads();
     let mut failures = 0usize;
     for workload in workloads {
-        let row = run_workload(&context, workload);
-        match row {
-            Ok(record) => report.write_record(record)?,
+        let outcome = run_workload(&context, workload);
+        match outcome {
+            Ok(outcome) => {
+                if outcome.failed {
+                    failures += 1;
+                }
+                report.write_record(outcome.record)?;
+            }
             Err(err) => {
                 failures += 1;
                 report.write_record(failure_record(&context, workload, &err.to_string()))?;
@@ -273,6 +315,159 @@ fn run_suite(
         return Err(format!("{failures} workload(s) failed").into());
     }
     Ok(())
+}
+
+fn compare_run(
+    root: &Path,
+    baseline: &str,
+    run_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let baseline_path = resolve_report_path(root, "bench/baselines", baseline);
+    let run_path = resolve_report_path(root, "bench/runs", run_label);
+    if !baseline_path.exists() {
+        return Err(format!(
+            "missing baseline report: {}",
+            relative(root, &baseline_path)
+        )
+        .into());
+    }
+    if !run_path.exists() {
+        return Err(format!("missing run report: {}", relative(root, &run_path)).into());
+    }
+    let baseline_rows = read_report(&baseline_path)?;
+    let run_rows = read_report(&run_path)?;
+    let mut baseline_by_key = BTreeMap::new();
+    for row in baseline_rows {
+        baseline_by_key.insert(row.key_without_engine(), row);
+    }
+
+    println!(
+        "{:<43} {:<18} {:<7} {:<11} {:>10} {:>10} {:>11}",
+        "workload", "format", "engine", "status", "baseline", "current", "improvement"
+    );
+    for row in run_rows {
+        let Some(baseline) = baseline_by_key.get(&row.key_without_engine()) else {
+            println!(
+                "{:<43} {:<18} {:<7} {:<11} {:>10} {:>10} {:>11}",
+                row.workload,
+                row.format_label(),
+                row.engine,
+                row.status,
+                "-",
+                row.elapsed_ms.to_string(),
+                "no baseline"
+            );
+            continue;
+        };
+        if row.status != "ok" || baseline.status != "ok" {
+            println!(
+                "{:<43} {:<18} {:<7} {:<11} {:>10} {:>10} {:>11}",
+                row.workload,
+                row.format_label(),
+                row.engine,
+                row.status,
+                baseline.elapsed_ms,
+                row.elapsed_ms,
+                "-"
+            );
+            continue;
+        }
+        let improvement = if baseline.elapsed_ms > 0 {
+            (baseline.elapsed_ms as f64 - row.elapsed_ms as f64) * 100.0
+                / baseline.elapsed_ms as f64
+        } else {
+            0.0
+        };
+        println!(
+            "{:<43} {:<18} {:<7} {:<11} {:>10} {:>10} {:+10.1}%",
+            row.workload,
+            row.format_label(),
+            row.engine,
+            row.status,
+            baseline.elapsed_ms,
+            row.elapsed_ms,
+            improvement
+        );
+    }
+    Ok(())
+}
+
+fn resolve_report_path(root: &Path, parent: &str, label_or_path: &str) -> PathBuf {
+    let candidate = PathBuf::from(label_or_path);
+    if candidate.exists() {
+        return candidate;
+    }
+    root.join(parent)
+        .join(sanitize_label(label_or_path))
+        .join("report.csv")
+}
+
+#[derive(Clone, Debug)]
+struct ReportRow {
+    workload: String,
+    input_format: String,
+    output_format: String,
+    engine: String,
+    status: String,
+    elapsed_ms: u128,
+}
+
+impl ReportRow {
+    fn key_without_engine(&self) -> (String, String, String) {
+        (
+            self.workload.clone(),
+            self.input_format.clone(),
+            self.output_format.clone(),
+        )
+    }
+
+    fn format_label(&self) -> String {
+        format!("{}->{}", self.input_format, self.output_format)
+    }
+}
+
+fn read_report(path: &Path) -> Result<Vec<ReportRow>, Box<dyn std::error::Error>> {
+    let mut reader = csv::Reader::from_path(path)?;
+    let headers = reader.headers()?.clone();
+    let index = |name: &str| -> Result<usize, Box<dyn std::error::Error>> {
+        headers
+            .iter()
+            .position(|header| header == name)
+            .ok_or_else(|| format!("report {} is missing `{name}`", path.display()).into())
+    };
+    let workload_index = index("workload")?;
+    let input_format_index = index("input_format")?;
+    let output_format_index = index("output_format")?;
+    let engine_index = headers.iter().position(|header| header == "engine");
+    let status_index = index("status")?;
+    let elapsed_ms_index = index("elapsed_ms")?;
+    let mut rows = Vec::new();
+    for record in reader.records() {
+        let record = record?;
+        rows.push(ReportRow {
+            workload: record.get(workload_index).unwrap_or_default().to_string(),
+            input_format: record
+                .get(input_format_index)
+                .unwrap_or_default()
+                .to_string(),
+            output_format: record
+                .get(output_format_index)
+                .unwrap_or_default()
+                .to_string(),
+            engine: engine_index
+                .and_then(|index| record.get(index))
+                .filter(|value| !value.is_empty())
+                .unwrap_or("unspecified")
+                .to_string(),
+            status: record.get(status_index).unwrap_or_default().to_string(),
+            elapsed_ms: record
+                .get(elapsed_ms_index)
+                .unwrap_or_default()
+                .parse()
+                .unwrap_or(0),
+        });
+    }
+    Ok(rows)
 }
 
 fn snapshot_run(
@@ -429,12 +624,18 @@ struct RunContext<'a> {
     run_timestamp: &'a str,
     git_ref: &'a str,
     run_label: &'a str,
+    engine: BenchmarkEngine,
+}
+
+struct WorkloadRun {
+    record: Vec<String>,
+    failed: bool,
 }
 
 fn run_workload(
     context: &RunContext<'_>,
     workload: &Workload,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+) -> Result<WorkloadRun, Box<dyn std::error::Error>> {
     let root = context.root;
     let run_dir = context.run_dir;
     let required_path = root.join(workload.required_path);
@@ -442,16 +643,28 @@ fn run_workload(
         return Err(format!("missing {}", relative(root, &required_path)).into());
     }
     let ext = extension_for_format(workload.output_format);
-    let output_name = format!("{}-{}.{}", workload.name, workload.output_format, ext);
-    let log_name = format!("{}-{}.log", workload.name, workload.output_format);
+    let output_name = format!(
+        "{}-{}-{}.{}",
+        workload.name,
+        context.engine.as_str(),
+        workload.output_format,
+        ext
+    );
+    let log_name = format!(
+        "{}-{}-{}.log",
+        workload.name,
+        context.engine.as_str(),
+        workload.output_format
+    );
     let output_path = run_dir.join(output_name);
     let log_path = run_dir.join(log_name);
     let bin = root.join("target").join(context.profile.dir()).join("pdl");
     let command_text = format!(
-        "{} run {} --stdout-format {}",
+        "{} run {} --stdout-format {} --engine {}",
         relative(root, &bin),
         workload.program,
-        workload.output_format
+        workload.output_format,
+        context.engine.as_str()
     );
 
     let stdout = File::create(&output_path)?;
@@ -463,6 +676,8 @@ fn run_workload(
         .arg(workload.program)
         .arg("--stdout-format")
         .arg(workload.output_format)
+        .arg("--engine")
+        .arg(context.engine.as_str())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .status()?;
@@ -475,37 +690,59 @@ fn run_workload(
     } else {
         String::new()
     };
-    let status_text = if status.success() { "ok" } else { "failed" };
+    let log_text = fs::read_to_string(&log_path).unwrap_or_default();
+    let unsupported_native =
+        matches!(context.engine, BenchmarkEngine::Native) && log_text.contains("E1211");
+    let status_text = if status.success() {
+        "ok"
+    } else if unsupported_native {
+        "unsupported"
+    } else {
+        "failed"
+    };
+    let notes = if unsupported_native {
+        "native unsupported"
+    } else {
+        context.engine.as_str()
+    };
+    let failed = !status.success() && !unsupported_native;
 
-    Ok(vec![
-        "pdl".to_string(),
-        "pdl-bench".to_string(),
-        context.run_label.to_string(),
-        "large".to_string(),
-        workload.name.to_string(),
-        workload.dataset.to_string(),
-        context.tier.as_str().to_string(),
-        workload.input_format.to_string(),
-        workload.output_format.to_string(),
-        status_text.to_string(),
-        command_text,
-        relative(root, &output_path),
-        relative(root, &log_path),
-        context.input_rows.to_string(),
-        output_rows,
-        String::new(),
-        output_bytes.to_string(),
-        elapsed_ms.to_string(),
-        context.run_timestamp.to_string(),
-        context.git_ref.to_string(),
-        String::new(),
-    ])
+    Ok(WorkloadRun {
+        record: vec![
+            "pdl".to_string(),
+            "pdl-bench".to_string(),
+            context.run_label.to_string(),
+            "large".to_string(),
+            workload.name.to_string(),
+            workload.dataset.to_string(),
+            context.tier.as_str().to_string(),
+            workload.input_format.to_string(),
+            workload.output_format.to_string(),
+            context.engine.as_str().to_string(),
+            status_text.to_string(),
+            command_text,
+            relative(root, &output_path),
+            relative(root, &log_path),
+            context.input_rows.to_string(),
+            output_rows,
+            String::new(),
+            output_bytes.to_string(),
+            elapsed_ms.to_string(),
+            context.run_timestamp.to_string(),
+            context.git_ref.to_string(),
+            notes.to_string(),
+        ],
+        failed,
+    })
 }
 
 fn failure_record(context: &RunContext<'_>, workload: &Workload, notes: &str) -> Vec<String> {
-    let log_path = context
-        .run_dir
-        .join(format!("{}-{}.log", workload.name, workload.output_format));
+    let log_path = context.run_dir.join(format!(
+        "{}-{}-{}.log",
+        workload.name,
+        context.engine.as_str(),
+        workload.output_format
+    ));
     vec![
         "pdl".to_string(),
         "pdl-bench".to_string(),
@@ -516,6 +753,7 @@ fn failure_record(context: &RunContext<'_>, workload: &Workload, notes: &str) ->
         context.tier.as_str().to_string(),
         workload.input_format.to_string(),
         workload.output_format.to_string(),
+        context.engine.as_str().to_string(),
         "failed".to_string(),
         String::new(),
         String::new(),

@@ -1,9 +1,9 @@
 use pdl_core::{codes, Diagnostic, Span};
 use pdl_data::{
-    compare_values, read_table_from_bytes, sniff_format_from_bytes, DataBackend, DataBinaryOp,
-    DataExpr, DataFormat, DataLiteral, DataPlan, DataScalarFunction, DataSink, DataSource,
-    DataUnaryOp, NullsOrder as DataNullsOrder, Row, SortDirection as DataSortDirection, SortSpec,
-    Table, Value,
+    compare_values, read_table_from_bytes, sniff_format_from_bytes, DataAggItem, DataBackend,
+    DataBinaryOp, DataExpr, DataFormat, DataLiteral, DataPlan, DataScalarFunction, DataSink,
+    DataSource, DataUnaryOp, NullsOrder as DataNullsOrder, Row, SortDirection as DataSortDirection,
+    SortSpec, Table, Value,
 };
 use pdl_driver::{
     DriverIo, FormatDecision, OsDriverIo, PlanInputSource, PlanOutputSink, PreparedProgram,
@@ -331,11 +331,7 @@ fn try_execute_native(
     plan: &ExecutionPlan,
     context: &BTreeMap<String, Value>,
 ) -> Result<RunResult, Diagnostic> {
-    if !ir.outputs.is_empty() {
-        return Err(unsupported_native_pipeline(
-            "native execution for named outputs is deferred",
-        ));
-    }
+    check_native_program_eligibility(prepared, ir, plan, context)?;
     let main = ir
         .main
         .as_ref()
@@ -365,6 +361,140 @@ fn try_execute_native(
     })
 }
 
+fn check_native_program_eligibility(
+    prepared: &PreparedProgram,
+    ir: &pdl_semantics::ProgramIr,
+    plan: &ExecutionPlan,
+    context: &BTreeMap<String, Value>,
+) -> Result<(), Diagnostic> {
+    if !ir.outputs.is_empty() {
+        return Err(unsupported_native_pipeline(
+            "native execution for named outputs is deferred",
+        ));
+    }
+    let main = ir
+        .main
+        .as_ref()
+        .ok_or_else(|| unsupported_native_pipeline("no runnable main pipeline"))?;
+    check_native_pipeline_eligibility(prepared, main, plan, context)
+}
+
+fn check_native_pipeline_eligibility(
+    prepared: &PreparedProgram,
+    pipeline: &PipelineIr,
+    execution_plan: &ExecutionPlan,
+    context: &BTreeMap<String, Value>,
+) -> Result<(), Diagnostic> {
+    match &pipeline.start {
+        PipelineStartIr::Load { format, span, .. } => {
+            check_native_load_eligibility(prepared, *span, format.as_deref())?;
+        }
+        PipelineStartIr::Binding { .. } => {
+            return Err(unsupported_native_pipeline(
+                "native execution from bindings is deferred",
+            ));
+        }
+    }
+
+    for (stage_index, stage) in pipeline.stages.iter().enumerate() {
+        let is_terminal = stage_index + 1 == pipeline.stages.len();
+        match stage {
+            StageIr::Filter { expr, .. } => {
+                lower_data_expr(expr, context)?;
+            }
+            StageIr::Select { items, .. } => {
+                for item in items {
+                    resolve_native_column_name(&item.source, item.span, context)?;
+                    resolve_native_column_name(&item.output, item.span, context)?;
+                }
+            }
+            StageIr::Drop { columns, span } | StageIr::Distinct { columns, span } => {
+                resolve_native_column_names(columns, *span, context)?;
+            }
+            StageIr::Rename { items, .. } => {
+                for item in items {
+                    resolve_native_column_name(&item.old, item.span, context)?;
+                    resolve_native_column_name(&item.new, item.span, context)?;
+                }
+            }
+            StageIr::GroupBy { columns, span } => {
+                resolve_native_column_names(columns, *span, context)?;
+            }
+            StageIr::Agg { items, .. } => {
+                lower_data_agg_items(items, context)?;
+            }
+            StageIr::Sort { items, .. } => {
+                for item in items {
+                    resolve_native_column_name(&item.column, item.span, context)?;
+                }
+            }
+            StageIr::Limit { .. } => {}
+            StageIr::Save { format, span, .. } => {
+                if !is_terminal {
+                    return Err(unsupported_native_pipeline(
+                        "native save stages are supported only as terminal stages",
+                    ));
+                }
+                check_native_save_eligibility(prepared, execution_plan, *span, format.as_deref())?;
+            }
+            StageIr::Mutate { .. }
+            | StageIr::Join { .. }
+            | StageIr::Union { .. }
+            | StageIr::PivotLonger { .. }
+            | StageIr::Complete { .. }
+            | StageIr::Unsupported { .. } => {
+                return Err(unsupported_native_pipeline(
+                    "pipeline stage is not supported by native execution",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_native_load_eligibility(
+    prepared: &PreparedProgram,
+    stage_span: Span,
+    explicit_format: Option<&str>,
+) -> Result<(), Diagnostic> {
+    let Some(input) = prepared.driver_plan.input_for_stage_span(stage_span) else {
+        return Err(Diagnostic::error(
+            codes::E1505,
+            "driver source facts are unavailable for native execution",
+            stage_span,
+        ));
+    };
+    if !matches!(input.source, SourceDescriptor::Path { .. }) {
+        return Err(unsupported_native_pipeline(
+            "native execution requires a path-backed input",
+        ));
+    }
+    let format = resolve_input_format(input, explicit_format, None, None, stage_span)?;
+    if !matches!(format, DataFormat::Csv | DataFormat::Parquet) {
+        return Err(unsupported_native_pipeline(
+            "input format is not supported by native execution",
+        ));
+    }
+    Ok(())
+}
+
+fn check_native_save_eligibility(
+    prepared: &PreparedProgram,
+    _execution_plan: &ExecutionPlan,
+    stage_span: Span,
+    explicit_format: Option<&str>,
+) -> Result<(), Diagnostic> {
+    let Some(sink) = prepared.driver_plan.sink_for_stage_span(stage_span) else {
+        return Err(Diagnostic::error(
+            codes::E1505,
+            "driver sink facts are unavailable for native execution",
+            stage_span,
+        ));
+    };
+    resolve_output_format(sink, explicit_format, stage_span)?;
+    Ok(())
+}
+
 enum NativePipelineResult {
     Plan(DataPlan),
     Completed { stdout: Option<Vec<u8>> },
@@ -386,12 +516,17 @@ fn execute_native_pipeline(
             ));
         }
     };
+    let mut grouping: Option<Vec<String>> = None;
 
     for (stage_index, stage) in pipeline.stages.iter().enumerate() {
         let is_terminal = stage_index + 1 == pipeline.stages.len();
         plan = match stage {
-            StageIr::Filter { expr, .. } => plan.filter(lower_data_expr(expr, context)?)?,
+            StageIr::Filter { expr, .. } => {
+                grouping = None;
+                plan.filter(lower_data_expr(expr, context)?)?
+            }
             StageIr::Select { items, .. } => {
+                grouping = None;
                 let selection = items
                     .iter()
                     .map(|item| {
@@ -404,10 +539,12 @@ fn execute_native_pipeline(
                 plan.select(&selection)?
             }
             StageIr::Drop { columns, span } => {
+                grouping = None;
                 let columns = resolve_native_column_names(columns, *span, context)?;
                 plan.drop_columns(&columns)?
             }
             StageIr::Rename { items, .. } => {
+                grouping = None;
                 let renames = items
                     .iter()
                     .map(|item| {
@@ -448,8 +585,17 @@ fn execute_native_pipeline(
             }
             StageIr::Limit { n, .. } => plan.limit(*n)?,
             StageIr::Distinct { columns, span } => {
+                grouping = None;
                 let columns = resolve_native_column_names(columns, *span, context)?;
                 plan.distinct(&columns)?
+            }
+            StageIr::GroupBy { columns, span } => {
+                grouping = Some(resolve_native_column_names(columns, *span, context)?);
+                plan
+            }
+            StageIr::Agg { items, .. } => {
+                let items = lower_data_agg_items(items, context)?;
+                plan.aggregate(&grouping.take().unwrap_or_default(), &items)?
             }
             StageIr::Save { format, span, .. } => {
                 if !is_terminal {
@@ -466,8 +612,6 @@ fn execute_native_pipeline(
                 );
             }
             StageIr::Mutate { .. }
-            | StageIr::GroupBy { .. }
-            | StageIr::Agg { .. }
             | StageIr::Join { .. }
             | StageIr::Union { .. }
             | StageIr::PivotLonger { .. }
@@ -643,6 +787,52 @@ fn lower_data_expr(
     }
 }
 
+fn lower_data_agg_items(
+    items: &[AggItemIr],
+    context: &BTreeMap<String, Value>,
+) -> Result<Vec<DataAggItem>, Diagnostic> {
+    items
+        .iter()
+        .map(|item| {
+            let args = match item.function.as_str() {
+                "count" if item.args.is_empty() => Vec::new(),
+                "count" | "sum" | "mean" | "min" | "max" => {
+                    let [arg] = item.args.as_slice() else {
+                        return Err(unsupported_native_pipeline(
+                            "aggregate arity is not supported by native execution",
+                        ));
+                    };
+                    vec![lower_data_agg_arg(arg, context)?]
+                }
+                _ => {
+                    return Err(unsupported_native_pipeline(
+                        "aggregate function is not supported by native execution",
+                    ));
+                }
+            };
+            Ok(DataAggItem {
+                function: item.function.clone(),
+                args,
+                alias: item.alias.clone(),
+            })
+        })
+        .collect()
+}
+
+fn lower_data_agg_arg(
+    expr: &ExprIr,
+    context: &BTreeMap<String, Value>,
+) -> Result<DataExpr, Diagnostic> {
+    let expr = lower_data_expr(expr, context)?;
+    if matches!(expr, DataExpr::Column(_)) {
+        Ok(expr)
+    } else {
+        Err(unsupported_native_pipeline(
+            "aggregate argument is not supported by native execution",
+        ))
+    }
+}
+
 fn lower_data_call(
     name: &str,
     args: &[ExprIr],
@@ -668,9 +858,6 @@ fn lower_data_call(
     let function = match name {
         "is_null" => DataScalarFunction::IsNull,
         "not_null" => DataScalarFunction::NotNull,
-        "lower" => DataScalarFunction::Lower,
-        "upper" => DataScalarFunction::Upper,
-        "trim" => DataScalarFunction::Trim,
         "abs" => DataScalarFunction::Abs,
         _ => {
             return Err(unsupported_native_pipeline(
@@ -3049,6 +3236,139 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "E1211"));
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_eligibility_rejects_unsupported_stage_before_execution() {
+        let workspace = temp_workspace("native-eligibility");
+        fs::write(workspace.join("sales.csv"), "amount\n10\n").expect("write csv");
+        let program_path = workspace.join("main.pdl");
+        let io = OsDriverIo;
+        let prepared = prepare_source_with_io(
+            &program_path,
+            r#"load "sales.csv"
+  | mutate doubled = amount * 2"#,
+            &io,
+        );
+        let plan = plan_prepared(
+            &prepared,
+            PlanningOptions {
+                stdout_format: Some(DataFormat::Csv.canonical_name().to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+        )
+        .expect("execution plan");
+        let ir = prepared.analysis.ir.as_ref().expect("ir");
+
+        let diagnostic = check_native_program_eligibility(&prepared, ir, &plan, &BTreeMap::new())
+            .expect_err("unsupported native pipeline");
+
+        assert_eq!(diagnostic.code, "E1211");
+        assert!(diagnostic.message.contains("pipeline stage"));
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_runs_grouped_aggregate_csv_and_parquet() {
+        let workspace = temp_workspace("native-aggregate");
+        let csv = "region,score,latency_ms\nWest,30,100\nEast,10,80\nWest,50,120\nEast,30,90\n";
+        fs::write(workspace.join("sales.csv"), csv).expect("write csv");
+        pdl_data::write_table_to_path(
+            &workspace.join("sales.parquet"),
+            DataFormat::Parquet,
+            &Table::new(
+                vec![
+                    "region".to_string(),
+                    "score".to_string(),
+                    "latency_ms".to_string(),
+                ],
+                vec![
+                    Row {
+                        values: vec![
+                            Value::String("West".to_string()),
+                            Value::Number(30.0),
+                            Value::Number(100.0),
+                        ],
+                    },
+                    Row {
+                        values: vec![
+                            Value::String("East".to_string()),
+                            Value::Number(10.0),
+                            Value::Number(80.0),
+                        ],
+                    },
+                    Row {
+                        values: vec![
+                            Value::String("West".to_string()),
+                            Value::Number(50.0),
+                            Value::Number(120.0),
+                        ],
+                    },
+                    Row {
+                        values: vec![
+                            Value::String("East".to_string()),
+                            Value::Number(30.0),
+                            Value::Number(90.0),
+                        ],
+                    },
+                ],
+            ),
+        )
+        .expect("write parquet");
+
+        for input in ["sales.csv", "sales.parquet"] {
+            let program_path = workspace.join(format!("{input}.pdl"));
+            let io = OsDriverIo;
+            let prepared = prepare_source_with_io(
+                &program_path,
+                format!(
+                    r#"load "{input}"
+  | group_by region
+  | agg
+      row_count = count(),
+      total_score = sum(score),
+      avg_score = mean(score),
+      min_latency_ms = min(latency_ms),
+      max_latency_ms = max(latency_ms)
+  | sort region"#
+                ),
+                &io,
+            );
+            let options = RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            };
+            let row = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Row,
+            );
+            let native = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options,
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Native,
+            );
+
+            assert!(row.diagnostics.is_empty(), "{:?}", row.diagnostics);
+            assert!(
+                native.diagnostics.is_empty(),
+                "{input}: {:?}",
+                native.diagnostics
+            );
+            assert_eq!(native.backend, DataBackend::NativePolars);
+            assert_eq!(
+                String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+                String::from_utf8(row.stdout.expect("row csv")).expect("utf8"),
+                "{input}"
+            );
+        }
         fs::remove_dir_all(workspace).expect("clean temp workspace");
     }
 
