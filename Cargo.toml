@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.30.0"
+version = "0.32.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -44,7 +44,7 @@ insta = "1"
 logos = "0.14"
 lsp-types = "0.94.1"
 parquet = "53"
-polars = { version = "0.53", default-features = false, features = ["fmt"] }
+polars = { version = "0.53", default-features = false, features = ["abs", "csv", "fmt", "ipc_streaming", "lazy", "parquet"] }
 pretty_assertions = "1"
 rowan = "0.16"
 serde = { version = "1", features = ["derive"] }

@@ -4,7 +4,9 @@ use pdl_driver::{
     prepare_file, prepare_file_for_binding_schema, prepare_file_for_run, prepare_file_with_options,
     PrepareOptions,
 };
-use pdl_exec::{plan_prepared, planning::PlanningOptions, run_prepared, RunOptions};
+use pdl_exec::{
+    plan_prepared, planning::PlanningOptions, run_prepared_with_engine, ExecutionEngine, RunOptions,
+};
 use serde::Serialize;
 use std::fs;
 use std::io::{self, Write};
@@ -26,6 +28,7 @@ pub fn run_cli() -> Result<ExitCode, String> {
             stdin_format,
             stdout_format,
             dry_run,
+            engine,
         } => {
             let prepared = match prepare_file_for_run(&file, stdin_format) {
                 Ok(prepared) => prepared,
@@ -34,13 +37,14 @@ pub fn run_cli() -> Result<ExitCode, String> {
                     return Ok(ExitCode::from(1));
                 }
             };
-            let result = run_prepared(
+            let result = run_prepared_with_engine(
                 &prepared,
                 RunOptions {
                     stdout_format,
                     dry_run,
                     allow_binary_stdout: true,
                 },
+                engine.into(),
             );
             print_diagnostics(
                 &prepared.path.display().to_string(),
@@ -320,4 +324,14 @@ fn print_json(value: &impl Serialize) -> Result<(), String> {
     serde_json::to_writer_pretty(&mut lock, value)
         .map_err(|error| format!("json serialization failed: {error}"))?;
     writeln!(lock).map_err(|error| format!("stdout write failed: {error}"))
+}
+
+impl From<crate::args::EngineArg> for ExecutionEngine {
+    fn from(value: crate::args::EngineArg) -> Self {
+        match value {
+            crate::args::EngineArg::Auto => ExecutionEngine::Auto,
+            crate::args::EngineArg::Row => ExecutionEngine::Row,
+            crate::args::EngineArg::Native => ExecutionEngine::Native,
+        }
+    }
 }

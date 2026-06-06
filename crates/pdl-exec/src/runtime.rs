@@ -1,7 +1,9 @@
 use pdl_core::{codes, Diagnostic, Span};
 use pdl_data::{
-    compare_values, read_table_from_bytes, sniff_format_from_bytes, DataFormat,
-    NullsOrder as DataNullsOrder, Row, SortDirection as DataSortDirection, SortSpec, Table, Value,
+    compare_values, read_table_from_bytes, sniff_format_from_bytes, DataBackend, DataBinaryOp,
+    DataExpr, DataFormat, DataLiteral, DataPlan, DataScalarFunction, DataSink, DataSource,
+    DataUnaryOp, NullsOrder as DataNullsOrder, Row, SortDirection as DataSortDirection, SortSpec,
+    Table, Value,
 };
 use pdl_driver::{
     DriverIo, FormatDecision, OsDriverIo, PlanInputSource, PlanOutputSink, PreparedProgram,
@@ -16,13 +18,21 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::output::{emit_stdout, write_output};
-use crate::planning::{plan_prepared, PlanningOptions};
+use crate::planning::{plan_prepared, ExecutionPlan, PlanningOptions};
 
 #[derive(Clone, Debug)]
 pub struct RunOptions {
     pub stdout_format: Option<String>,
     pub dry_run: bool,
     pub allow_binary_stdout: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ExecutionEngine {
+    #[default]
+    Auto,
+    Row,
+    Native,
 }
 
 impl Default for RunOptions {
@@ -40,6 +50,7 @@ pub struct RunResult {
     pub stdout: Option<Vec<u8>>,
     pub named_outputs: Vec<NamedOutput>,
     pub diagnostics: Vec<Diagnostic>,
+    pub backend: DataBackend,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,11 +72,36 @@ pub fn run_prepared_with_io(
     run_prepared_with_io_and_context(prepared, options, io, BTreeMap::new())
 }
 
+pub fn run_prepared_with_engine(
+    prepared: &PreparedProgram,
+    options: RunOptions,
+    engine: ExecutionEngine,
+) -> RunResult {
+    let io = OsDriverIo;
+    run_prepared_with_io_and_context_and_engine(prepared, options, &io, BTreeMap::new(), engine)
+}
+
 pub fn run_prepared_with_io_and_context(
     prepared: &PreparedProgram,
     options: RunOptions,
     io: &dyn DriverIo,
     context: BTreeMap<String, Value>,
+) -> RunResult {
+    run_prepared_with_io_and_context_and_engine(
+        prepared,
+        options,
+        io,
+        context,
+        ExecutionEngine::Auto,
+    )
+}
+
+pub fn run_prepared_with_io_and_context_and_engine(
+    prepared: &PreparedProgram,
+    options: RunOptions,
+    io: &dyn DriverIo,
+    context: BTreeMap<String, Value>,
+    engine: ExecutionEngine,
 ) -> RunResult {
     let plan = match plan_prepared(
         prepared,
@@ -81,6 +117,7 @@ pub fn run_prepared_with_io_and_context(
                 stdout: None,
                 named_outputs: Vec::new(),
                 diagnostics,
+                backend: DataBackend::PortableRows,
             };
         }
     };
@@ -96,6 +133,7 @@ pub fn run_prepared_with_io_and_context(
             stdout: None,
             named_outputs: Vec::new(),
             diagnostics,
+            backend: DataBackend::PortableRows,
         };
     };
     let mut diagnostics = prepared.diagnostics();
@@ -108,7 +146,27 @@ pub fn run_prepared_with_io_and_context(
             stdout: None,
             named_outputs: Vec::new(),
             diagnostics,
+            backend: DataBackend::PortableRows,
         };
+    }
+
+    if !matches!(engine, ExecutionEngine::Row) {
+        match try_execute_native(prepared, ir, &plan, &context) {
+            Ok(result) => return result,
+            Err(diagnostic) if matches!(engine, ExecutionEngine::Native) => {
+                return RunResult {
+                    stdout: None,
+                    named_outputs: Vec::new(),
+                    diagnostics: {
+                        let mut diagnostics = prepared.diagnostics();
+                        diagnostics.push(diagnostic);
+                        diagnostics
+                    },
+                    backend: DataBackend::NativePolars,
+                };
+            }
+            Err(_) => {}
+        }
     }
 
     let mut runtime = Runtime {
@@ -134,6 +192,7 @@ pub fn run_prepared_with_io_and_context(
                 stdout: None,
                 named_outputs,
                 diagnostics: runtime.diagnostics,
+                backend: DataBackend::PortableRows,
             };
         };
         match runtime.execute_pipeline(main) {
@@ -144,6 +203,7 @@ pub fn run_prepared_with_io_and_context(
                     stdout: None,
                     named_outputs,
                     diagnostics: runtime.diagnostics,
+                    backend: DataBackend::PortableRows,
                 };
             }
         }
@@ -164,6 +224,7 @@ pub fn run_prepared_with_io_and_context(
                         stdout: None,
                         named_outputs,
                         diagnostics: runtime.diagnostics,
+                        backend: DataBackend::PortableRows,
                     };
                 }
             }
@@ -189,6 +250,7 @@ pub fn run_prepared_with_io_and_context(
         stdout,
         named_outputs,
         diagnostics: runtime.diagnostics,
+        backend: DataBackend::PortableRows,
     }
 }
 
@@ -261,6 +323,381 @@ fn context_kind_label(kind: ContextKindIr) -> &'static str {
         ContextKindIr::Param => "parameter",
         ContextKindIr::State => "state",
     }
+}
+
+fn try_execute_native(
+    prepared: &PreparedProgram,
+    ir: &pdl_semantics::ProgramIr,
+    plan: &ExecutionPlan,
+    context: &BTreeMap<String, Value>,
+) -> Result<RunResult, Diagnostic> {
+    if !ir.outputs.is_empty() {
+        return Err(unsupported_native_pipeline(
+            "native execution for named outputs is deferred",
+        ));
+    }
+    let main = ir
+        .main
+        .as_ref()
+        .ok_or_else(|| unsupported_native_pipeline("no runnable main pipeline"))?;
+    let stdout = match execute_native_pipeline(prepared, main, plan, context)? {
+        NativePipelineResult::Plan(data_plan) => {
+            if let Some(stdout_format) = plan.stdout_format {
+                data_plan
+                    .write_to_sink(DataSink::Bytes {
+                        format: stdout_format,
+                    })?
+                    .ok_or_else(|| {
+                        unsupported_native_pipeline("native stdout bytes were not returned")
+                    })?
+                    .into()
+            } else {
+                None
+            }
+        }
+        NativePipelineResult::Completed { stdout } => stdout,
+    };
+    Ok(RunResult {
+        stdout,
+        named_outputs: Vec::new(),
+        diagnostics: prepared.diagnostics(),
+        backend: DataBackend::NativePolars,
+    })
+}
+
+enum NativePipelineResult {
+    Plan(DataPlan),
+    Completed { stdout: Option<Vec<u8>> },
+}
+
+fn execute_native_pipeline(
+    prepared: &PreparedProgram,
+    pipeline: &PipelineIr,
+    execution_plan: &ExecutionPlan,
+    context: &BTreeMap<String, Value>,
+) -> Result<NativePipelineResult, Diagnostic> {
+    let mut plan = match &pipeline.start {
+        PipelineStartIr::Load { format, span, .. } => {
+            native_load_plan(prepared, *span, format.as_deref())?
+        }
+        PipelineStartIr::Binding { .. } => {
+            return Err(unsupported_native_pipeline(
+                "native execution from bindings is deferred",
+            ));
+        }
+    };
+
+    for (stage_index, stage) in pipeline.stages.iter().enumerate() {
+        let is_terminal = stage_index + 1 == pipeline.stages.len();
+        plan = match stage {
+            StageIr::Filter { expr, .. } => plan.filter(lower_data_expr(expr, context)?)?,
+            StageIr::Select { items, .. } => {
+                let selection = items
+                    .iter()
+                    .map(|item| {
+                        Ok((
+                            resolve_native_column_name(&item.source, item.span, context)?,
+                            resolve_native_column_name(&item.output, item.span, context)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
+                plan.select(&selection)?
+            }
+            StageIr::Drop { columns, span } => {
+                let columns = resolve_native_column_names(columns, *span, context)?;
+                plan.drop_columns(&columns)?
+            }
+            StageIr::Rename { items, .. } => {
+                let renames = items
+                    .iter()
+                    .map(|item| {
+                        Ok((
+                            resolve_native_column_name(&item.old, item.span, context)?,
+                            resolve_native_column_name(&item.new, item.span, context)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
+                plan.rename_columns(&renames)?
+            }
+            StageIr::Sort { items, .. } => {
+                let specs = items
+                    .iter()
+                    .map(|item| {
+                        let direction = match item.direction {
+                            SortDirectionIr::Asc => DataSortDirection::Asc,
+                            SortDirectionIr::Desc => DataSortDirection::Desc,
+                        };
+                        let nulls = item
+                            .nulls
+                            .map(|nulls| match nulls {
+                                NullsOrderIr::First => DataNullsOrder::First,
+                                NullsOrderIr::Last => DataNullsOrder::Last,
+                            })
+                            .unwrap_or(match direction {
+                                DataSortDirection::Asc => DataNullsOrder::Last,
+                                DataSortDirection::Desc => DataNullsOrder::First,
+                            });
+                        Ok(SortSpec {
+                            column: resolve_native_column_name(&item.column, item.span, context)?,
+                            direction,
+                            nulls,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
+                plan.sort(&specs)?
+            }
+            StageIr::Limit { n, .. } => plan.limit(*n)?,
+            StageIr::Distinct { columns, span } => {
+                let columns = resolve_native_column_names(columns, *span, context)?;
+                plan.distinct(&columns)?
+            }
+            StageIr::Save { format, span, .. } => {
+                if !is_terminal {
+                    return Err(unsupported_native_pipeline(
+                        "native save stages are supported only as terminal stages",
+                    ));
+                }
+                return execute_native_save(
+                    prepared,
+                    execution_plan,
+                    plan,
+                    *span,
+                    format.as_deref(),
+                );
+            }
+            StageIr::Mutate { .. }
+            | StageIr::GroupBy { .. }
+            | StageIr::Agg { .. }
+            | StageIr::Join { .. }
+            | StageIr::Union { .. }
+            | StageIr::PivotLonger { .. }
+            | StageIr::Complete { .. }
+            | StageIr::Unsupported { .. } => {
+                return Err(unsupported_native_pipeline(
+                    "pipeline stage is not supported by native execution",
+                ));
+            }
+        };
+    }
+    Ok(NativePipelineResult::Plan(plan))
+}
+
+fn execute_native_save(
+    prepared: &PreparedProgram,
+    execution_plan: &ExecutionPlan,
+    plan: DataPlan,
+    stage_span: Span,
+    explicit_format: Option<&str>,
+) -> Result<NativePipelineResult, Diagnostic> {
+    if execution_plan.dry_run {
+        return Ok(NativePipelineResult::Completed { stdout: None });
+    }
+    let Some(sink) = prepared.driver_plan.sink_for_stage_span(stage_span) else {
+        return Err(Diagnostic::error(
+            codes::E1505,
+            "driver sink facts are unavailable for native execution",
+            stage_span,
+        ));
+    };
+    let format = resolve_output_format(sink, explicit_format, stage_span)?;
+    match &sink.sink {
+        SinkDescriptor::Stdout => {
+            let stdout = plan
+                .write_to_sink(DataSink::Bytes { format })?
+                .ok_or_else(|| {
+                    unsupported_native_pipeline("native stdout bytes were not returned")
+                })?;
+            Ok(NativePipelineResult::Completed {
+                stdout: Some(stdout),
+            })
+        }
+        SinkDescriptor::Path { resolved_path, .. } => {
+            plan.write_to_sink(DataSink::Path {
+                path: resolved_path,
+                format,
+            })?;
+            Ok(NativePipelineResult::Completed { stdout: None })
+        }
+    }
+}
+
+fn native_load_plan(
+    prepared: &PreparedProgram,
+    stage_span: Span,
+    explicit_format: Option<&str>,
+) -> Result<DataPlan, Diagnostic> {
+    let Some(input) = prepared.driver_plan.input_for_stage_span(stage_span) else {
+        return Err(Diagnostic::error(
+            codes::E1505,
+            "driver source facts are unavailable for native execution",
+            stage_span,
+        ));
+    };
+    let SourceDescriptor::Path { resolved_path, .. } = &input.source else {
+        return Err(unsupported_native_pipeline(
+            "native execution requires a path-backed input",
+        ));
+    };
+    if !resolved_path.exists() {
+        return Err(unsupported_native_pipeline(
+            "native execution requires a real filesystem path",
+        ));
+    }
+    let format = resolve_input_format(input, explicit_format, None, None, stage_span)?;
+    DataPlan::scan_with_backend(
+        DataSource::Path {
+            path: resolved_path,
+            format,
+        },
+        DataBackend::NativePolars,
+    )
+}
+
+fn resolve_native_column_names(
+    columns: &[String],
+    span: Span,
+    context: &BTreeMap<String, Value>,
+) -> Result<Vec<String>, Diagnostic> {
+    columns
+        .iter()
+        .map(|column| resolve_native_column_name(column, span, context))
+        .collect()
+}
+
+fn resolve_native_column_name(
+    column: &str,
+    span: Span,
+    context: &BTreeMap<String, Value>,
+) -> Result<String, Diagnostic> {
+    let Some((kind, name)) = decode_context_column_ref_ir(column) else {
+        return Ok(column.to_string());
+    };
+    let Some(value) = context.get(name) else {
+        return Err(Diagnostic::error(
+            codes::E2002,
+            format!("unknown {} `{name}`", context_kind_label(kind)),
+            span,
+        ));
+    };
+    match value {
+        Value::String(value) => Ok(value.clone()),
+        _ => Err(Diagnostic::error(
+            codes::E2004,
+            format!("context value `{name}` must be a string to resolve a column name"),
+            span,
+        )),
+    }
+}
+
+fn lower_data_expr(
+    expr: &ExprIr,
+    context: &BTreeMap<String, Value>,
+) -> Result<DataExpr, Diagnostic> {
+    match expr {
+        ExprIr::Quoted { value, .. } => Ok(DataExpr::Literal(DataLiteral::String(value.clone()))),
+        ExprIr::Number { value, .. } => Ok(DataExpr::Literal(DataLiteral::Number(*value))),
+        ExprIr::Bool { value, .. } => Ok(DataExpr::Literal(DataLiteral::Bool(*value))),
+        ExprIr::Null { .. } => Ok(DataExpr::Literal(DataLiteral::Null)),
+        ExprIr::Ident { value, .. } => Ok(DataExpr::Column(value.clone())),
+        ExprIr::Context { name, span, .. } => {
+            context.get(name).map(value_to_data_literal).ok_or_else(|| {
+                Diagnostic::error(
+                    codes::E2002,
+                    format!("unknown context value `{name}`"),
+                    *span,
+                )
+            })
+        }
+        ExprIr::Unary { op, expr, .. } => Ok(DataExpr::Unary {
+            op: match op {
+                UnaryOpIr::Not => DataUnaryOp::Not,
+                UnaryOpIr::Neg => DataUnaryOp::Neg,
+            },
+            expr: Box::new(lower_data_expr(expr, context)?),
+        }),
+        ExprIr::Binary {
+            left, op, right, ..
+        } => Ok(DataExpr::Binary {
+            left: Box::new(lower_data_expr(left, context)?),
+            op: match op {
+                BinaryOpIr::Or => DataBinaryOp::Or,
+                BinaryOpIr::And => DataBinaryOp::And,
+                BinaryOpIr::Eq => DataBinaryOp::Eq,
+                BinaryOpIr::Ne => DataBinaryOp::Ne,
+                BinaryOpIr::Lt => DataBinaryOp::Lt,
+                BinaryOpIr::Lte => DataBinaryOp::Lte,
+                BinaryOpIr::Gt => DataBinaryOp::Gt,
+                BinaryOpIr::Gte => DataBinaryOp::Gte,
+                BinaryOpIr::Add => DataBinaryOp::Add,
+                BinaryOpIr::Sub => DataBinaryOp::Sub,
+                BinaryOpIr::Mul => DataBinaryOp::Mul,
+                BinaryOpIr::Div => DataBinaryOp::Div,
+                BinaryOpIr::Rem => DataBinaryOp::Rem,
+            },
+            right: Box::new(lower_data_expr(right, context)?),
+        }),
+        ExprIr::Call { name, args, span } => lower_data_call(name, args, *span, context),
+        ExprIr::Window { .. } => Err(unsupported_native_pipeline(
+            "window expressions are not supported by native execution",
+        )),
+    }
+}
+
+fn lower_data_call(
+    name: &str,
+    args: &[ExprIr],
+    span: Span,
+    context: &BTreeMap<String, Value>,
+) -> Result<DataExpr, Diagnostic> {
+    if name == "col" {
+        let [arg] = args else {
+            return Err(Diagnostic::error(
+                codes::E1402,
+                "col() expects one argument",
+                span,
+            ));
+        };
+        return match lower_data_expr(arg, context)? {
+            DataExpr::Literal(DataLiteral::String(column)) => Ok(DataExpr::Column(column)),
+            _ => Err(unsupported_native_pipeline(
+                "native col() requires a string literal or context string",
+            )),
+        };
+    }
+
+    let function = match name {
+        "is_null" => DataScalarFunction::IsNull,
+        "not_null" => DataScalarFunction::NotNull,
+        "lower" => DataScalarFunction::Lower,
+        "upper" => DataScalarFunction::Upper,
+        "trim" => DataScalarFunction::Trim,
+        "abs" => DataScalarFunction::Abs,
+        _ => {
+            return Err(unsupported_native_pipeline(
+                "scalar function is not supported by native execution",
+            ));
+        }
+    };
+    Ok(DataExpr::Call {
+        function,
+        args: args
+            .iter()
+            .map(|arg| lower_data_expr(arg, context))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn value_to_data_literal(value: &Value) -> DataExpr {
+    DataExpr::Literal(match value {
+        Value::Null => DataLiteral::Null,
+        Value::Bool(value) => DataLiteral::Bool(*value),
+        Value::Number(value) => DataLiteral::Number(*value),
+        Value::String(value) => DataLiteral::String(value.clone()),
+    })
+}
+
+fn unsupported_native_pipeline(reason: &'static str) -> Diagnostic {
+    Diagnostic::error(codes::E1211, reason, Span::zero())
 }
 
 struct Runtime<'a> {
@@ -2480,8 +2917,12 @@ fn is_comparison_op(op: BinaryOpIr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pdl_driver::{prepare_source_for_run_with_io, prepare_source_with_io, InMemoryDriverIo};
-    use std::path::Path;
+    use pdl_driver::{
+        prepare_source_for_run_with_io, prepare_source_with_io, InMemoryDriverIo, OsDriverIo,
+    };
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn runs_csv_stdin_with_explicit_format() {
@@ -2511,6 +2952,208 @@ mod tests {
             String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
             "amount\n10\n"
         );
+    }
+
+    #[test]
+    fn native_engine_runs_supported_path_backed_pipeline() {
+        let workspace = temp_workspace("native-supported");
+        fs::write(
+            workspace.join("sales.csv"),
+            "status,region,amount\ncompleted,West,30\npending,East,10\ncompleted,North,40\n",
+        )
+        .expect("write csv");
+        let program_path = workspace.join("main.pdl");
+        let io = OsDriverIo;
+        let prepared = prepare_source_with_io(
+            &program_path,
+            r#"load "sales.csv"
+  | filter status == "completed"
+  | select region, amount
+  | sort amount desc
+  | limit 1"#,
+            &io,
+        );
+
+        let result = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Native,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.backend, DataBackend::NativePolars);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "region,amount\nNorth,40\n"
+        );
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn auto_engine_falls_back_to_rows_for_unsupported_native_stage() {
+        let workspace = temp_workspace("native-fallback");
+        fs::write(
+            workspace.join("sales.csv"),
+            "region,amount\nWest,30\nEast,10\n",
+        )
+        .expect("write csv");
+        let program_path = workspace.join("main.pdl");
+        let io = OsDriverIo;
+        let prepared = prepare_source_with_io(
+            &program_path,
+            r#"load "sales.csv"
+  | mutate doubled = amount * 2
+  | select region, doubled
+  | sort region"#,
+            &io,
+        );
+
+        let auto = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Auto,
+        );
+        assert!(auto.diagnostics.is_empty(), "{:?}", auto.diagnostics);
+        assert_eq!(auto.backend, DataBackend::PortableRows);
+        assert_eq!(
+            String::from_utf8(auto.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "region,doubled\nEast,20\nWest,60\n"
+        );
+
+        let forced = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Native,
+        );
+        assert!(forced.stdout.is_none());
+        assert_eq!(forced.backend, DataBackend::NativePolars);
+        assert!(forced
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E1211"));
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_writes_readable_arrow_stream_stdout() {
+        let workspace = temp_workspace("native-arrow-stream");
+        fs::write(
+            workspace.join("sales.csv"),
+            "region,amount\nWest,30\nEast,10\n",
+        )
+        .expect("write csv");
+        let program_path = workspace.join("main.pdl");
+        let io = OsDriverIo;
+        let prepared = prepare_source_with_io(
+            &program_path,
+            r#"load "sales.csv"
+  | select region, amount
+  | sort amount desc"#,
+            &io,
+        );
+
+        let result = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("arrow-stream".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Native,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.backend, DataBackend::NativePolars);
+        let stdout = result.stdout.expect("arrow stdout");
+        assert!(stdout.starts_with(&[0xff, 0xff, 0xff, 0xff]));
+        assert_eq!(
+            pdl_data::read_table_from_bytes(
+                Path::new("stdout.arrow"),
+                DataFormat::ArrowStream,
+                &stdout,
+            )
+            .expect("read arrow stdout"),
+            Table::new(
+                vec!["region".to_string(), "amount".to_string()],
+                vec![
+                    Row {
+                        values: vec![Value::String("West".to_string()), Value::Number(30.0)],
+                    },
+                    Row {
+                        values: vec![Value::String("East".to_string()), Value::Number(10.0)],
+                    },
+                ],
+            )
+        );
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_supports_terminal_save_stdout_arrow_stream() {
+        let workspace = temp_workspace("native-save-stdout");
+        fs::write(
+            workspace.join("sales.csv"),
+            "region,amount\nWest,30\nEast,10\n",
+        )
+        .expect("write csv");
+        let program_path = workspace.join("main.pdl");
+        let io = OsDriverIo;
+        let prepared = prepare_source_with_io(
+            &program_path,
+            r#"load "sales.csv"
+  | select region, amount
+  | sort amount desc
+  | save stdout format "arrow-stream""#,
+            &io,
+        );
+
+        let result = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            RunOptions {
+                stdout_format: None,
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Native,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.backend, DataBackend::NativePolars);
+        let stdout = result.stdout.expect("arrow stdout");
+        assert!(stdout.starts_with(&[0xff, 0xff, 0xff, 0xff]));
+        assert_eq!(
+            pdl_data::read_table_from_bytes(
+                Path::new("stdout.arrow"),
+                DataFormat::ArrowStream,
+                &stdout,
+            )
+            .expect("read arrow stdout")
+            .columns,
+            vec!["region", "amount"]
+        );
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
     }
 
     #[test]
@@ -3124,6 +3767,16 @@ output dock_priority =
             pdl_data::write_table_to_bytes(DataFormat::Csv, table).expect("csv output"),
         )
         .expect("utf8 csv")
+    }
+
+    fn temp_workspace(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("pdl-{name}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&path).expect("create temp workspace");
+        path
     }
 
     #[test]
