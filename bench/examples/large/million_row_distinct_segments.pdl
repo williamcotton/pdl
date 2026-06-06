@@ -1,0 +1,4 @@
+load "../../../benchdata/generated/million-row.csv"
+  | distinct segment
+  | select segment
+  | sort segment

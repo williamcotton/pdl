@@ -1,0 +1,3 @@
+load "../../../benchdata/generated/million-row.csv"
+  | select row, segment, x, score
+  | limit 10000

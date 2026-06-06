@@ -1,0 +1,5 @@
+load "../../../benchdata/generated/million-row.csv"
+  | filter score >= 70
+  | select row, segment, x, score, latency_ms
+  | sort score desc
+  | limit 100
