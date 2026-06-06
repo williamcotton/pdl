@@ -1,0 +1,25 @@
+repo: pdl
+baseline: full-baseline-20260606
+run_label: full-baseline-20260606
+snapshot_timestamp_utc: 2026-06-06T14:05:04Z
+source_report: bench/runs/full-baseline-20260606/report.csv
+git_ref: v0.30.0-1-ga8ccab8-dirty
+git_status_short:
+   M .gitignore
+   M Cargo.lock
+   M Cargo.toml
+  RM bench/examples/large/million_row_distinct_segments.pdl -> bench/workloads/large/million_row_distinct_segments.pdl
+  RM bench/examples/large/million_row_projection_smoke.pdl -> bench/workloads/large/million_row_projection_smoke.pdl
+  RM bench/examples/large/million_row_segment_summary.pdl -> bench/workloads/large/million_row_segment_summary.pdl
+  RM bench/examples/large/million_row_top_scores.pdl -> bench/workloads/large/million_row_top_scores.pdl
+   M docs/V0_31_PLAN.md
+   M scripts/generate-million-row-csv.sh
+   M scripts/run-large-demos.sh
+  ?? bench/README.md
+  ?? bench/workloads/large/million_row_segment_summary_arrow_stream.pdl
+  ?? bench/workloads/large/million_row_segment_summary_parquet.pdl
+  ?? crates/pdl-bench/
+system: Darwin administrators-MacBook-Pro.local 23.6.0 Darwin Kernel Version 23.6.0: Tue Apr 21 20:18:56 PDT 2026; root:xnu-10063.141.1.712.16~1/RELEASE_ARM64_T6030 arm64
+rustc: rustc 1.95.0 (59807616e 2026-04-14) (Homebrew)
+cargo: cargo 1.95.0 (f2d3ce0bd 2026-03-21) (Homebrew)
+run_command: cargo run -p pdl-bench -- run --suite large --run-label full-baseline-20260606

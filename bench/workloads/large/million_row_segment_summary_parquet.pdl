@@ -1,4 +1,4 @@
-load "../../../benchdata/generated/million-row.csv"
+load "../../data/generated/million-row.parquet"
   | group_by segment
   | agg
       row_count = count(),

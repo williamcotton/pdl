@@ -1,434 +1,153 @@
 # PDL v0.31 Plan
 
-Status: Planned
+Status: Implemented
 Target version: 0.31.0
 Owner: PDL maintainers
 Related spec: [`PDL_SPEC.md`](PDL_SPEC.md)
 Predecessor plan: [`V0_30_PLAN.md`](V0_30_PLAN.md)
 Related Algraf plan: [`V0_68_PLAN.md`](../../algraf/docs/V0_68_PLAN.md)
-Promoted Algraf note: [`ARROW_PERFORMANCE.md`](../../algraf/docs/ARROW_PERFORMANCE.md)
-Cross-repo coordination: `../algraf/` for Arrow IPC stream visualization
-handoff smoke tests, reader-oriented Arrow ingestion, aggregate-first
-rendering, and bounded output expectations.
+Follow-on performance plan: [`V0_32_PLAN.md`](V0_32_PLAN.md)
+Roadmap theme: Benchmark infrastructure and cross-repo baseline alignment.
+Cross-repo coordination: `../algraf/` for matching dataset lifecycle,
+workload layout, CSV report schema, and baseline snapshot conventions.
 
 ## Purpose
 
-PDL v0.31 starts the native execution performance work by adding an
-engine-oriented `pdl-data` facade and a first Polars-backed fast path for
-semantically safe native pipelines. The current row runtime remains the
-portable reference implementation for WASM, editor previews, tests, small data,
-and unsupported operations.
+PDL v0.31 establishes the benchmark process needed before the native
+datapipeline performance work starts. The goal is not to optimize execution in
+this release. The goal is to make before/after performance evidence repeatable
+across PDL and Algraf by aligning datasets, workload locations, generated
+outputs, report files, and baseline snapshots.
 
-PDL currently declares Polars as an optional native data dependency, but the
-execution path still mostly runs through `Table`, `Row`, and `Value`:
+Before this release, benchmark assets were split across `bench/`,
+`bench-output/`, and `benchdata/`, with a mix of shell scripts, ad hoc Rust
+examples, generated files, and manually captured timing output. That made it
+hard to know which inputs were authoritative, which results were comparable, or
+which cleanup was safe.
 
-```text
-source bytes -> Table<Vec<Row>> -> row operations -> Table -> output bytes
-```
-
-That shape is simple, deterministic, and portable, but it prevents native builds
-from using Polars for lazy scans, projection pushdown, predicate pushdown,
-vectorized expression evaluation, parallel operators, and direct typed output.
-The v0.31 release should introduce the layer that lets native execution keep
-work lazy and columnar until materialization or writing is actually required:
+This release creates a single benchmark lifecycle:
 
 ```text
-source path -> lazy dataframe plan -> vectorized operations -> collect/write
+download/generate source data
+  -> run tracked workloads
+  -> write ignored per-run CSV reports
+  -> snapshot selected reports as tracked baselines
 ```
 
-The release must protect the PDL-to-Algraf visualization workflow:
-
-```bash
-pdl run prep.pdl --stdout-format arrow-stream \
-  | algraf render chart.ag --data - --data-format arrow-stream --output chart.svg
-```
-
-For large visualization inputs, PDL should reduce and type the data before
-handoff, avoid CSV formatting/parsing, and preserve Arrow IPC streams as the
-preferred Unix-pipe boundary.
-
-The neighboring Algraf v0.68 performance plan owns the consumer-side work:
-reading caller-provided Arrow streams through a reader path, keeping
-Arrow/Parquet internals private to `algraf-data`, moving stats and scale
-training toward column-oriented scans, and rendering bounded aggregate outputs
-rather than millions of raw SVG marks. This PDL plan owns the producer side:
-native tabular reduction, typed Arrow IPC stream stdout, row fallback, and
-backend privacy.
-
-This plan is not normative until behavior is promoted into
-[`PDL_SPEC.md`](PDL_SPEC.md) with concrete API, CLI, format, and diagnostic
-language. Implementation must keep examples runnable against the accepted PDL
-syntax in the working tree.
-
-## Must
-
-- Add an opaque data-plan facade beside the existing row API.
-
-  Status: Planned.
-
-  `pdl-data` MUST keep the existing public `Table`, `Row`, `Value`,
-  `read_table_from_bytes`, and `write_table_to_bytes` APIs. It must add
-  engine-neutral planning types that can represent either portable row work or
-  native Polars work without exposing concrete Polars types above `pdl-data`.
-
-  The exact names may change during implementation, but the API shape should
-  preserve these properties:
-
-  ```rust
-  pub enum DataBackend {
-      PortableRows,
-      NativePolars,
-  }
-
-  pub struct DataPlan {
-      inner: DataPlanInner,
-  }
-
-  pub enum DataSource<'a> {
-      Path {
-          path: &'a std::path::Path,
-          format: DataFormat,
-      },
-      Bytes {
-          logical_path: &'a std::path::Path,
-          format: DataFormat,
-          bytes: &'a [u8],
-      },
-  }
-
-  pub enum DataSink<'a> {
-      Path {
-          path: &'a std::path::Path,
-          format: DataFormat,
-      },
-      Writer {
-          format: DataFormat,
-          writer: &'a mut dyn std::io::Write,
-      },
-      Bytes {
-          format: DataFormat,
-      },
-  }
-  ```
-
-  Acceptance criteria:
-
-  - Existing row APIs remain source-compatible.
-  - `DataPlan` can report its selected `DataBackend`.
-  - `DataSource::Path` and `DataSource::Bytes` are both supported.
-  - `DataSink::Writer` exists so stdout formats can stream through an
-    `io::Write` boundary instead of requiring a whole output `Vec<u8>`.
-  - Public APIs above `pdl-data` do not expose `polars::DataFrame`,
-    `polars::LazyFrame`, Polars expressions, Arrow reader internals, or Parquet
-    reader internals.
-
-- Keep dependency layering and feature gates intact.
-
-  Status: Planned.
-
-  Polars must remain private to `pdl-data` behind the native feature set.
-  `pdl-exec`, `pdl-driver`, `pdl-semantics`, CLI, LSP, editor services, and
-  WASM must stay free of concrete Polars imports.
-
-  Acceptance criteria:
-
-  - No crate above `pdl-data` imports or mentions Polars symbols.
-  - `pdl-wasm` does not enable `native-formats` or `polars-engine`.
-  - Native format support remains feature-gated.
-  - Backend selection and unsupported-operation handling use normal PDL
-    diagnostics when execution cannot continue.
-
-- Implement the facade with the row runtime first.
-
-  Status: Planned.
-
-  The first `DataPlan` implementation MUST be able to wrap the current row
-  engine so the new API can land without changing source-language semantics.
-  The row engine remains the semantic reference for native parity tests and the
-  default portable fallback.
-
-  Acceptance criteria:
-
-  - Row-backed `DataPlan` supports the operations needed by existing execution:
-    scan, filter, select, drop, rename, mutate, sort, limit, distinct,
-    group/aggregate where already supported by the row runtime, collect to
-    `Table`, and write to supported sinks.
-  - Existing runtime tests pass through the row-backed facade or an equivalent
-    compatibility path.
-  - WASM continues to use the portable row backend by default.
-  - Browser dry-run save behavior remains row/text based.
-
-- Add conservative expression lowering into `pdl_data::DataExpr`.
-
-  Status: Planned.
-
-  `pdl-exec` SHOULD translate semantic expressions into a smaller data-layer
-  expression type. `pdl-data` then maps that expression to either the row
-  evaluator or Polars expressions.
-
-  Initial native expression support MUST stay conservative:
-
-  - column references;
-  - string, number, bool, and null literals;
-  - boolean `and`, `or`, and `not`;
-  - comparisons;
-  - numeric arithmetic where type compatibility is clear;
-  - scalar functions that have direct Polars equivalents and matching PDL
-    semantics.
-
-  Acceptance criteria:
-
-  - `pdl-exec` does not import Polars.
-  - Unsupported native expressions cause whole-pipeline row fallback until
-    mid-pipeline materialization exists.
-  - Expression parity tests compare row and native results before a native
-    expression is enabled.
+The follow-on [`V0_32_PLAN.md`](V0_32_PLAN.md) owns the native Polars/data-plan
+performance changes. This plan owns the measurement harness those changes will
+be evaluated against.
 
-- Add the first native Polars fast path for path-backed pipelines.
-
-  Status: Planned.
-
-  Native execution MUST prefer path sources when the driver has a real resolved
-  path, allowing Polars lazy scanners to push work toward the source:
-
-  ```text
-  DataSource::Path
-    -> Polars lazy plan
-    -> vectorized operations
-    -> collect or write
-  ```
-
-  The v0.31 native fast path should cover the lowest-risk stages:
-
-  - `load` from real paths;
-  - `filter`;
-  - `select`;
-  - `drop`;
-  - `rename`;
-  - `limit`;
-  - `sort`;
-  - `distinct` for simple column sets.
-
-  Acceptance criteria:
-
-  - Backend selection is explicit and testable.
-  - The first implementation chooses the backend for the whole pipeline before
-    execution.
-  - Unsupported stages, byte-backed inputs, and uncertain semantics fall back to
-    the row runtime.
-  - Native path-backed pipelines can avoid `Table<Vec<Row>>` materialization
-    until collect or write.
-  - Benchmarks show a meaningful improvement for medium path-backed inputs.
-
-- Preserve Arrow IPC stream stdout as a first-class output target.
-
-  Status: Planned.
-
-  The native backend MUST treat Arrow IPC stream output as a primary typed
-  handoff, not as a compatibility afterthought. `--stdout-format arrow-stream`
-  and `save stdout format "arrow-stream"` should share the same writer-oriented
-  path where practical.
+## Scope
 
-  The ideal native path is:
+### Benchmark Crate
 
-  ```text
-  DataSource::Path
-    -> Polars lazy plan
-    -> Polars/Arrow batches
-    -> Arrow IPC stream writer on stdout
-    -> Algraf caller data reader
-    -> Algraf render
-  ```
+Status: Implemented.
 
-  Acceptance criteria:
+Acceptance criteria:
 
-  - Stdout contains only Arrow IPC stream bytes.
-  - Diagnostics, progress messages, and human-readable logs go to stderr.
-  - Output schema preserves PDL column order.
-  - Arrow batch order and row order are deterministic for deterministic PDL
-    plans.
-  - Unsupported Arrow column types or unsupported native output plans fail
-    before writing partial stdout bytes where practical.
-  - Native Arrow output avoids converting through `Table<Vec<Row>>` when the
-    active native plan can write directly.
+- Add a workspace `pdl-bench` crate.
+- Provide Rust commands for `generate`, `download`, `prepare`, `run`, and
+  `snapshot` so the primary benchmark lifecycle is not shell-script driven.
+- Keep legacy scripts as thin compatibility wrappers around `cargo run -p
+  pdl-bench`.
+- Support repeatable run labels so PDL and Algraf can be benchmarked with the
+  same label.
+- Write report output as CSV, not TSV.
 
-- Define the native compatibility policy before enabling each operation.
+### Directory Layout
 
-  Status: Planned.
+Status: Implemented.
 
-  The row engine is the reference behavior. Polars defaults will not always
-  match it, especially for CSV type inference, mixed dynamic values, null
-  ordering, null equality, joins, distinct operations, grouped output ordering,
-  floating-point formatting, integer-to-float normalization, and lazy error
-  timing.
+Acceptance criteria:
 
-  Acceptance criteria:
+- Tracked workloads live under `bench/workloads/`.
+- Ignored source and generated data live under `bench/data/`.
+- Ignored per-run outputs live under `bench/runs/<run-label>/`.
+- Tracked curated baselines live under `bench/baselines/<baseline>/`.
+- Old `benchdata/`, `bench-output/`, and `bench/examples/` paths are removed or
+  migrated.
+- `.gitignore` documents only the active ignored benchmark directories.
 
-  - If parity is uncertain, execution uses the row engine.
-  - Native materialization normalizes Polars output back into PDL `Value`
-    semantics where a public `Table` is required.
-  - Any intentional behavior change is documented in `PDL_SPEC.md` before it is
-    enabled.
-  - CSV native scans have an explicit policy for PDL-compatible parsing versus
-    Polars type inference.
+### Dataset Family
 
-- Prove native behavior with parity tests and benchmarks.
+Status: Implemented.
 
-  Status: Planned.
+Acceptance criteria:
 
-  Every native-backed operation MUST have parity coverage against the row
-  runtime. Tests should run the same PDL program through both engines and
-  compare user-visible results.
+- Generate a deterministic million-row dataset.
+- Write the generated dataset in CSV, Parquet, and Arrow IPC stream formats.
+- Download and preserve external source files under `bench/data/raw/` when
+  requested.
+- Keep large downloaded/generated inputs out of git.
+- Make full-size and smaller smoke/local tiers available from the same command
+  surface.
 
-  Acceptance criteria:
+### Workloads And Reports
 
-  - Parity tests compare CSV output bytes, final `Table` values, diagnostics,
-    named output ordering, saved text outputs, and Arrow IPC stream output where
-    applicable.
-  - Fixtures cover empty input, nulls, booleans, numbers, strings, mixed CSV
-    columns, duplicate columns, rename collisions, sorted output, grouped
-    output, joins with unmatched rows where supported, save stages, and stdout
-    formats.
-  - Boundary tests assert that Polars does not leak above `pdl-data`.
-- Benchmarks compare row and native runtime for CSV filter/select, CSV
-  group/aggregate where supported, Parquet filter/projection, sort/limit,
-  distinct, and the PDL-to-Algraf Arrow stream handoff.
-- `scripts/run-large-demos.sh` appends timestamped rows to
-  `bench-output/large-demos/report.tsv` so before/after large-demo runs can be
-  compared with the same workflow used by Algraf's large-demo script.
+Status: Implemented.
 
-- Keep spec, versions, and release documents aligned when implementation lands.
+Acceptance criteria:
 
-  Status: Planned.
+- Run the large workload suite from `bench/workloads/large/`.
+- Include comparable CSV, Parquet, and Arrow-stream workloads where the current
+  runtime supports them.
+- Emit `bench/runs/<run-label>/report.csv` with one row per benchmark case.
+- Capture command, workload, input/output formats, status, elapsed time, byte
+  counts, and output path in the report.
+- Treat expected diagnostics as report rows rather than silent failures.
 
-  Acceptance criteria:
+### Baseline Snapshots
 
-  - `PDL_SPEC.md` records any promoted data backend, stdout, CLI, format,
-    diagnostics, and release-table behavior before this plan is marked
-    implemented.
-  - Workspace/package version stamps that track the release are aligned to
-    `0.31.0` when this numbered plan is implemented.
-  - If the release closes with all Must items implemented, the next minor plan
-    is started.
+Status: Implemented.
 
-## Should
+Acceptance criteria:
 
-- Add a debug-visible backend selection mode.
+- Add `pdl-bench snapshot --run-label <label> --baseline <name>`.
+- Copy a selected ignored run report into
+  `bench/baselines/<baseline>/report.csv`.
+- Record environment metadata in
+  `bench/baselines/<baseline>/environment.txt`.
+- Capture git ref, git status, toolchain versions, host information, source
+  report path, and run command.
+- Capture git status before writing the baseline files so snapshots do not
+  describe themselves as new untracked files.
 
-  Status: Planned.
+### Baseline Run
 
-  A CLI flag such as `--engine row`, `--engine native`, or equivalent test-only
-  hooks should make backend selection observable enough for parity tests and
-  performance diagnosis without exposing concrete backend internals as normal
-  user-facing API.
+Status: Implemented.
 
-- Include a PDL-to-Algraf smoke test where practical.
+Acceptance criteria:
 
-  Status: Planned.
+- Run the full benchmark lifecycle from scratch using downloaded/generated data.
+- Capture a shared baseline label that can be compared with Algraf.
+- Store the tracked baseline report under
+  `bench/baselines/full-baseline-20260606/report.csv`.
 
-  The canonical pipe should be covered when a local Algraf binary is available:
+Observed baseline:
 
-  ```bash
-  pdl run prep.pdl --stdout-format arrow-stream \
-    | algraf render chart.ag --data - --data-format arrow-stream --output chart.svg
-  ```
-
-  Normal PDL tests may use a fake Arrow stream consumer when cross-repo binaries
-  are unavailable.
-
-- Pilot grouped aggregate native coverage if the core fast path is stable.
-
-  Status: Planned.
-
-  Simple `group_by` plus `agg` for `count`, `sum`, `mean`, `min`, and `max` can
-  be included in v0.31 only after null behavior, output ordering, and type
-  normalization are covered by parity tests.
-
-- Keep small and browser-style workloads from regressing noticeably.
-
-  Status: Planned.
-
-  Performance work should not be considered successful only because one large
-  benchmark improves. The native path should be beneficial for medium and large
-  path-backed inputs without adding meaningful overhead to small row-runtime
-  workloads.
+- Run label: `full-baseline-20260606`.
+- Report path: `bench/runs/full-baseline-20260606/report.csv`.
+- Snapshot path: `bench/baselines/full-baseline-20260606/report.csv`.
+- Result: 7 benchmark rows, all `ok`.
+- Dataset formats covered: CSV, Parquet, and Arrow IPC stream.
 
 ## Non-Goals
 
-- Enabling Polars in the default browser/WASM runtime.
-- Removing the existing `Table`, `Row`, or `Value` API.
-- Changing source-language syntax or user-visible dataframe semantics as part
-  of the performance foundation.
-- Requiring every PDL stage to be Polars-backed before the first native speedup
-  lands.
-- Building a distributed execution engine or general plugin API.
-- Making Algraf incrementally render unbounded raw streams as part of this PDL
-  release.
-- Solving Algraf-side reader buffering, column-view stat paths, mark-budget
-  diagnostics, or aggregate-first rendering UX inside the PDL repository.
+- Implementing the native Polars execution engine.
+- Changing PDL source-language semantics.
+- Changing the normative format or CLI behavior in `PDL_SPEC.md` beyond
+  documenting benchmark process if desired.
+- Treating local baseline timings as CI thresholds before a reference machine,
+  variance policy, and release-mode benchmark process are defined.
 
 ## Validation
 
-Required repository checks before this plan can be marked implemented:
-
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets
-cargo test --workspace
-```
-
-WASM validation when shared APIs change:
-
-```bash
-cargo check -p pdl-wasm --target wasm32-unknown-unknown
-```
-
-Focused validation should cover:
-
-- Row-backed `DataPlan` behavior for existing runtime operations.
-- Native backend selection for supported and unsupported pipelines.
-- Path-backed native scans for CSV, Parquet, and Arrow formats where supported
-  by the feature set.
-- Whole-pipeline fallback for unsupported stages and expressions.
-- Writer-sink stdout behavior for Arrow IPC stream output.
-- Stderr-only diagnostics when stdout is used as a data stream.
-- Boundary checks proving Polars remains private to `pdl-data`.
-- PDL-to-Algraf smoke testing aligned with
-  [`V0_68_PLAN.md`](../../algraf/docs/V0_68_PLAN.md) when a local Algraf binary
-  is available.
-- Benchmarks at small, medium, and large data sizes:
-  1,000 rows, 100,000 rows, and 1,000,000 or more rows.
-- `scripts/run-large-demos.sh` exercises checked-in large `.pdl` demo programs
-  against ignored generated fixtures and writes report rows with status,
-  output path, row count where available, byte count, elapsed milliseconds, run
-  timestamp, and git ref.
-
-## Deferred
-
-- Mid-pipeline fallback that materializes a native `DataPlan` into `Table` at
-  the first unsupported stage and continues through the row engine.
-- Byte-backed Polars readers for stdin, in-memory tests, and browser-hosted
-  files.
-- Native coverage for `mutate` beyond simple expressions, `union`, and simple
-  inner/left joins.
-- Native coverage for full, right, semi, and anti joins.
-- Native coverage for window expressions, `pivot_longer`, `complete`, and
-  functions with PDL-specific stringification or null behavior.
-- Direct native writes for every output format beyond the initial Arrow stream
-  and simplest supported sinks.
-- Algraf streaming stats, scale training, GPU/raster large-mark paths, or other
-  cross-repo rendering changes.
-
-## Open Questions
-
-- Should native CSV scans use Polars type inference, or a PDL-compatible
-  string-first strategy that casts during expressions?
-- Should `RunResult` grow a mode that omits materialized named-output tables for
-  native CLI execution?
-- Should backend selection be user-visible through a stable CLI flag, or only
-  exposed through tests and debug diagnostics?
-- How should parity tests force a specific backend without exposing backend
-  internals in public APIs?
-- Which output-order differences, if any, are acceptable enough to specify?
-- Which Arrow logical types should PDL commit to emitting for native Polars
-  columns that are richer than current `Value` types?
+- `cargo fmt --all`
+- `cargo check -p pdl-bench`
+- `cargo run -p pdl-bench -- generate --rows 100`
+- `cargo run -p pdl-bench -- run --suite large --tier smoke --run-label smoke-pdl-bench --no-generate`
+- `cargo run -p pdl-bench -- download --dataset all --force`
+- `cargo run -p pdl-bench -- generate --tier stress`
+- `cargo run -p pdl-bench -- run --suite large --tier stress --run-label full-baseline-20260606 --no-generate`
+- `cargo run -p pdl-bench -- snapshot --run-label full-baseline-20260606 --baseline full-baseline-20260606`

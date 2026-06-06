@@ -1,0 +1,7 @@
+load "../../data/generated/million-row.arrow" format "arrow-stream"
+  | group_by segment
+  | agg
+      row_count = count(),
+      avg_score = mean(score),
+      max_latency_ms = max(latency_ms)
+  | sort segment

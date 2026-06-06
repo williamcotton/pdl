@@ -10,6 +10,7 @@ members = [
     "crates/pdl-editor-services",
     "crates/pdl-lsp",
     "crates/pdl-cli",
+    "crates/pdl-bench",
     "crates/pdl-wasm",
 ]
 
