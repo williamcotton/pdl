@@ -379,9 +379,16 @@ where
                     source, on, kind, ..
                 } => {
                     let right_schema = self.analyze_binding(&source.value, source.span, stack)?;
-                    let _left_key = self.resolved_column_name(&schema, on.left());
-                    let right_key = self.resolved_column_name(&right_schema, on.right());
-                    match joined_schema(&schema, &right_schema, &right_key, *kind) {
+                    let keys = on
+                        .keys()
+                        .iter()
+                        .map(|key| {
+                            let left = self.resolved_column_name(&schema, &key.left);
+                            let right = self.resolved_column_name(&right_schema, &key.right);
+                            (left, right)
+                        })
+                        .collect::<Vec<_>>();
+                    match joined_schema(&schema, &right_schema, &keys, *kind) {
                         Ok(output) => schema = output,
                         Err(collision) => {
                             self.diagnostics.push(Diagnostic::error(
@@ -1027,16 +1034,17 @@ where
 fn joined_schema(
     left_schema: &[String],
     right_schema: &[String],
-    right_key: &str,
+    keys: &[(String, String)],
     kind: JoinKind,
 ) -> Result<Vec<String>, String> {
     if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
         return Ok(left_schema.to_vec());
     }
 
+    let right_keys = keys.iter().map(|(_, right)| right).collect::<BTreeSet<_>>();
     let mut output = left_schema.to_vec();
     for column in right_schema {
-        if column == right_key {
+        if right_keys.contains(column) {
             continue;
         }
         let mut output_name = column.clone();

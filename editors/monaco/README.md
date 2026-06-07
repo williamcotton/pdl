@@ -1,6 +1,6 @@
 # pdl-editor
 
-Reusable Monaco and React editor integration for PDL `0.30.x` browser hosts.
+Reusable Monaco and React editor integration for PDL `0.39.x` browser hosts.
 
 The package owns editor wiring only: language registration, TextMate grammar
 setup, the default light theme, marker conversion, Monaco providers, structural

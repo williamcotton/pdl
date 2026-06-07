@@ -1,0 +1,15 @@
+load "../../data/generated/million-row.csv"
+  | mutate
+      previous_score = lag(score) over (partition_by segment order_by row),
+      next_score = lead(score) over (partition_by segment order_by row),
+      segment_top_row = first_value(row) over (partition_by segment order_by score desc),
+      segment_low_row = last_value(row) over (
+        partition_by segment
+        order_by score desc
+        rows between unbounded_preceding and unbounded_following
+      ),
+      score_percent_rank = percent_rank() over (partition_by segment order_by score desc),
+      score_cume_dist = cume_dist() over (partition_by segment order_by score desc)
+  | filter row % 1000 == 0
+  | select row, segment, score, previous_score, next_score, segment_top_row, segment_low_row, score_percent_rank, score_cume_dist
+  | sort segment, row

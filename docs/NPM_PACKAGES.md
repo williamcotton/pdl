@@ -1,17 +1,21 @@
 # PDL Browser Package Development
 
 PDL browser integrations are published independently from every Rust/CLI
-version bump. Use versions that exist on npm for demo, Studio, and downstream
-package-surface checks.
+version bump. Use versions that exist on npm for ordinary demo, Studio, and
+downstream package-surface checks. During a browser package release, update the
+package manifests and consumer pins before publishing, then regenerate or verify
+consumer lockfiles after npm has the new tarballs.
 
 ## Published Package Mode
 
-Use published packages for demo, Studio, and downstream package-surface checks:
+Use published packages for demo, Studio, and downstream package-surface checks.
+For v0.39, this command applies after `pdl-wasm@0.39.0` and
+`pdl-editor@0.39.0` are published:
 
 1. Install the published browser packages:
 
    ```bash
-   npm install pdl-wasm@0.30.0 pdl-editor@0.30.1
+   npm install pdl-wasm@0.39.0 pdl-editor@0.39.0
    ```
 
 2. Use the package-local WASM asset or pass an explicit host URL. Vite hosts
@@ -24,14 +28,14 @@ import { loadPdlRuntime } from "pdl-wasm";
 const runtime = await loadPdlRuntime({ wasmUrl: "/wasm/pdl.wasm" });
 ```
 
-The PDL demo consumes these verified published package versions unless a newer
-browser package release has actually been published.
+The PDL demo consumes the v0.39 browser package versions for the v0.39 release.
 
-For the v0.38 Rust/CLI release, npm was checked before changing package fields:
-`pdl-wasm` publishes `0.30.0`; `pdl-editor` publishes `0.30.0` and `0.30.1`.
-No `0.38.0` browser packages are published, so `packages/wasm`,
-`editors/monaco`, demo dependencies, and downstream install instructions remain
-on the verified 0.30.x package line.
+Before the v0.39 browser package bump, npm was checked:
+`pdl-wasm` published only `0.30.0`; `pdl-editor` published `0.30.0` and
+`0.30.1`. The v0.39 release prepares new `pdl-wasm@0.39.0` and
+`pdl-editor@0.39.0` packages so browser consumers receive the updated parser,
+runtime, editor-service behavior, and peer dependency range. Consumer lockfile
+integrity hashes for those packages must be regenerated after publication.
 
 ## Package Validation
 
@@ -39,7 +43,9 @@ Use packed mode for package-surface validation before publishing:
 
 1. From `packages/wasm`, run `npm pack --dry-run`.
 2. From `editors/monaco`, run `npm pack --dry-run`.
-3. Run the host app's normal type, build, and browser checks against the
+3. Publish `pdl-wasm@0.39.0` and `pdl-editor@0.39.0`.
+4. Regenerate consumer lockfiles against the published packages.
+5. Run the host app's normal type, build, and browser checks against the
    published package versions.
 
 Generated `dist/` contents, local tarballs, and copied WASM artifacts are

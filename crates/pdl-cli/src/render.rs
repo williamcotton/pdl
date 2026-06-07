@@ -154,9 +154,9 @@ pub fn plan_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> PlanOutput
 pub fn manifest_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> ManifestJson {
     let stdout_format = plan.stdout_format.map(|format| format.canonical_name());
     ManifestJson {
-        manifest_version: "0.38.0",
+        manifest_version: "0.39.0",
         implementation_version: env!("CARGO_PKG_VERSION"),
-        language_version: "0.38.0",
+        language_version: "0.39.0",
         source_path: prepared.path.display().to_string(),
         driver: driver_plan_json(&prepared.driver_plan),
         execution: execution_plan_json(plan),
@@ -783,6 +783,17 @@ enum JoinOnJson {
         right: SpannedJson<String>,
         span: Span,
     },
+    Composite {
+        keys: Vec<JoinKeyJson>,
+        span: Span,
+    },
+}
+
+#[derive(Serialize)]
+struct JoinKeyJson {
+    left: SpannedJson<String>,
+    right: SpannedJson<String>,
+    span: Span,
 }
 
 #[derive(Serialize)]
@@ -1115,6 +1126,17 @@ fn join_on_json(on: &JoinOn) -> JoinOnJson {
             right: spanned_json(right),
             span: *span,
         },
+        JoinOn::Composite { keys, span } => JoinOnJson::Composite {
+            keys: keys
+                .iter()
+                .map(|key| JoinKeyJson {
+                    left: spanned_json(&key.left),
+                    right: spanned_json(&key.right),
+                    span: key.span,
+                })
+                .collect(),
+            span: *span,
+        },
     }
 }
 
@@ -1364,6 +1386,8 @@ enum StageIrJson {
         source_span: Span,
         left_key: String,
         right_key: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        keys: Vec<JoinKeyIrJson>,
         join_kind: &'static str,
         span: Span,
     },
@@ -1444,6 +1468,12 @@ struct SortItemIrJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     nulls: Option<&'static str>,
     span: Span,
+}
+
+#[derive(Serialize)]
+struct JoinKeyIrJson {
+    left: String,
+    right: String,
 }
 
 #[derive(Serialize)]
@@ -1673,6 +1703,7 @@ fn stage_ir_json(stage: &StageIr) -> StageIrJson {
             source_span,
             left_key,
             right_key,
+            keys,
             kind,
             span,
         } => StageIrJson::Join {
@@ -1680,6 +1711,16 @@ fn stage_ir_json(stage: &StageIr) -> StageIrJson {
             source_span: *source_span,
             left_key: left_key.clone(),
             right_key: right_key.clone(),
+            keys: if keys.len() > 1 {
+                keys.iter()
+                    .map(|key| JoinKeyIrJson {
+                        left: key.left.clone(),
+                        right: key.right.clone(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             join_kind: join_kind_ir_text(*kind),
             span: *span,
         },

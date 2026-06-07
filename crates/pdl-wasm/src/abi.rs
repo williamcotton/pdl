@@ -548,6 +548,37 @@ mod tests {
     }
 
     #[test]
+    fn run_json_executes_window_functions_against_in_memory_csv_bytes() {
+        let request = serde_json::json!({
+            "source": r#"load "orders.csv"
+  | mutate
+      customer_row = row_number() over (partition_by customer_id order_by order_date),
+      customer_running_amount = sum(amount) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row),
+      previous_amount = lag(amount) over (partition_by customer_id order_by order_date),
+      next_amount = lead(amount, 1, null) over (partition_by customer_id order_by order_date),
+      region_top_order = first_value(order_id) over (partition_by region order_by amount desc),
+      region_percent_rank = percent_rank() over (partition_by region order_by amount desc),
+      region_cume_dist = cume_dist() over (partition_by region order_by amount desc)
+  | select order_id, customer_row, customer_running_amount, previous_amount, next_amount, region_top_order, region_percent_rank, region_cume_dist
+  | sort order_id"#,
+            "files": {
+                "orders.csv": "order_id,customer_id,region,order_date,amount\nA1,C1,North,2026-02-01,10\nA2,C1,North,2026-02-03,25\nA3,C2,North,2026-02-02,15\nA4,C2,South,2026-02-01,40\nA5,C1,North,2026-02-04,5\n"
+            },
+            "stdout_format": "csv"
+        });
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&run_json(&request.to_string())).expect("json");
+
+        assert!(payload["error"].is_null(), "{payload}");
+        assert_eq!(
+            payload["stdout"],
+            "order_id,customer_row,customer_running_amount,previous_amount,next_amount,region_top_order,region_percent_rank,region_cume_dist\nA1,1,10,,25,A2,0.6666666666666666,0.75\nA2,2,35,10,5,A2,0,0.25\nA3,2,55,40,,A2,0.3333333333333333,0.5\nA4,1,40,,15,A4,0,1\nA5,3,40,25,,A2,1,1\n"
+        );
+        assert_eq!(payload["diagnostics"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
     fn run_json_executes_against_in_memory_json_lines_bytes() {
         let request = serde_json::json!({
             "source": r#"load "sales.jsonl"

@@ -441,9 +441,11 @@ fn collect_stage_semantic_names(
                 binding.span,
                 SemanticTokenKind::BindingReference,
             );
-            push_column_reference(source, names, on.left().span);
-            if on.right().span != on.left().span {
-                push_column_reference(source, names, on.right().span);
+            for key in on.keys() {
+                push_column_reference(source, names, key.left.span);
+                if key.right.span != key.left.span {
+                    push_column_reference(source, names, key.right.span);
+                }
             }
         }
         Stage::Union {
@@ -916,8 +918,10 @@ fn collect_pipeline_columns(pipeline: &Pipeline, columns: &mut BTreeSet<String>)
                 }
             }
             Stage::Join { on, .. } => {
-                columns.insert(on.left().value.clone());
-                columns.insert(on.right().value.clone());
+                for key in on.keys() {
+                    columns.insert(key.left.value);
+                    columns.insert(key.right.value);
+                }
             }
             Stage::Union { .. } => {}
             Stage::Distinct { columns: keys, .. } => {
@@ -1158,12 +1162,13 @@ fn apply_stage_to_schema(facts: &DocumentFacts, schema: &mut SchemaState, stage:
                 .get(&source.value)
                 .and_then(|binding| binding.schema.as_ref())
             {
-                schema.columns = join_schema_for_editor(
-                    &schema.columns,
-                    &right_schema.columns,
-                    &on.right().value,
-                    *kind,
-                );
+                let keys = on
+                    .keys()
+                    .iter()
+                    .map(|key| (key.left.value.clone(), key.right.value.clone()))
+                    .collect::<Vec<_>>();
+                schema.columns =
+                    join_schema_for_editor(&schema.columns, &right_schema.columns, &keys, *kind);
             }
             schema.grouping = None;
         }
@@ -1197,15 +1202,19 @@ fn apply_stage_to_schema(facts: &DocumentFacts, schema: &mut SchemaState, stage:
 fn join_schema_for_editor(
     left_schema: &[String],
     right_schema: &[String],
-    right_key: &str,
+    keys: &[(String, String)],
     kind: JoinKind,
 ) -> Vec<String> {
     if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
         return left_schema.to_vec();
     }
+    let right_keys = keys
+        .iter()
+        .map(|(_, right_key)| right_key)
+        .collect::<BTreeSet<_>>();
     let mut output = left_schema.to_vec();
     for column in right_schema {
-        if column == right_key {
+        if right_keys.contains(column) {
             continue;
         }
         let mut output_name = column.clone();
@@ -1363,8 +1372,10 @@ fn collect_stage_context_references(stage: &Stage, spans: &mut Vec<(ContextKind,
             }
         }
         Stage::Join { on, .. } => {
-            push_context_column_reference(on.left(), spans);
-            push_context_column_reference(on.right(), spans);
+            for key in on.keys() {
+                push_context_column_reference(&key.left, spans);
+                push_context_column_reference(&key.right, spans);
+            }
         }
         Stage::Union { .. } => {}
         Stage::PivotLonger {

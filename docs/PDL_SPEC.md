@@ -1,24 +1,31 @@
 # PDL Detailed Specification
 
-Status: Draft 0.38.0
+Status: Draft 0.39.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current released repository implementation line is `0.38.0`, tracked in
-`docs/V0_38_PLAN.md`. Version 0.38.0 promotes the next safe native parity
-slices while keeping browser execution and PDL-visible row semantics separate
-from Polars internals.
+The current repository implementation line is `0.39.0`, tracked in
+`docs/V0_39_PLAN.md`. Version 0.39.0 promotes the advanced native window and
+composite-key equi-join slices while keeping browser execution and PDL-visible
+row semantics separate from Polars internals.
+
+The native v0.39 implementation promotes row-preserving windows for
+`percent_rank`, `cume_dist`, `lag`, `lead`, `first_value`, `last_value`, and
+`rows between unbounded_preceding and current_row` aggregate frames where native
+ordering, null handling, types, and frames match rows. It also promotes
+single-key and composite-key equi-joins for `inner`, `left`, `right`, `full`,
+`semi`, and `anti` at the existing native-safe binding boundary. Multi-key
+window ordering, non-null `lag`/`lead` defaults, non-equi joins,
+incompatible-schema union extensions, `pivot_longer`, `complete`, JSON Lines
+input, CSV/JSON Lines text writers, browser/WASM execution, binding starts, and
+named outputs continue to use the portable row runtime in automatic mode.
 
 The native v0.38 implementation promotes row-preserving window expressions for
 `row_number`, `rank`, `dense_rank`, and whole-partition `count`, `sum`, `mean`,
 `min`, and `max`; and extends binding-backed single-key equi-joins to include
-`right` and `full` joins. Bounded-frame windows, offset/value/distribution
-window functions, multi-key window ordering, non-equi joins, true composite-key
-join syntax, `pivot_longer`, `complete`, JSON Lines input, CSV/JSON Lines text
-writers, browser/WASM execution, binding starts, and named outputs continue to
-use the portable row runtime in automatic mode.
+`right` and `full` joins.
 
 The native v0.37 implementation promoted path-backed Arrow IPC file inputs,
 Arrow IPC stdin and host-byte inputs, `to_number` and `if_else` scalar
@@ -1266,8 +1273,9 @@ sort direction or null-order word.
 ```ebnf
 JoinStage     ::= "join" JoinSource JoinOn JoinKind? ;
 JoinSource    ::= Ident ;
-JoinOn        ::= "on" ColumnRef
-                | "on" "(" ColumnRef "," ColumnRef ")" ;
+JoinOn        ::= "on" JoinKey ("," JoinKey)* ;
+JoinKey       ::= ColumnRef
+                | "(" ColumnRef "," ColumnRef ")" ;
 JoinKind      ::= "kind" JoinKindName ;
 JoinKindName  ::= "inner" | "left" | "right" | "full" | "semi" | "anti" ;
 ```
@@ -1275,6 +1283,11 @@ JoinKindName  ::= "inner" | "left" | "right" | "full" | "semi" | "anti" ;
 `join customers on customer_id` joins the current table to the `customers` binding.
 
 `on (left_id, right_id)` joins differently named keys.
+
+`on customer_id, order_date` joins on a same-named composite key.
+
+`on (sku, product_sku), (region, market)` joins on a differently named
+composite key.
 
 The default kind is `inner`.
 
@@ -1867,6 +1880,11 @@ Using `limit` after a stage with unstable order SHOULD produce `W2004`.
 
 `join binding on (left_key, right_key)` joins differently named keys.
 
+`join binding on left_a, left_b` joins on a same-named composite key tuple.
+
+`join binding on (left_a, right_a), (left_b, right_b)` joins on a differently
+named composite key tuple.
+
 Supported kinds:
 
 - `inner`
@@ -1878,14 +1896,17 @@ Supported kinds:
 
 Default kind is `inner`.
 
-Join key types MUST be compatible. The CSV-backed reference implementation
-checks observed non-null key value classes at execution time and produces
-`E1208` when the left and right key classes are incompatible.
+Join key types MUST be compatible for every key pair. The CSV-backed reference
+implementation checks observed non-null key value classes at execution time and
+produces `E1208` when any left and right key classes are incompatible.
+
+Composite-key joins compare the complete key tuple. If any key component on
+either side is null, that row does not match.
 
 For `inner`, `left`, `right`, and `full`, output columns are the left input
-columns followed by right input non-key columns. The right join key is not
-duplicated in output. For unmatched right rows in `right` and `full` joins, the
-left key output column is populated from the right key value.
+columns followed by right input non-key columns. Right join key columns are not
+duplicated in output. For unmatched right rows in `right` and `full` joins, each
+left key output column is populated from the corresponding right key value.
 
 For `semi` and `anti`, output columns are the left input columns.
 
@@ -1896,11 +1917,11 @@ The default collision policy SHOULD suffix right-side columns with `_right`.
 If a suffix creates another collision, the analyzer MUST produce `E1207` unless
 an explicit suffix option is introduced.
 
-Row ordering for `inner` and `left` preserves left input order and emits matching
-right rows in right input order. `right` preserves right input order and emits
-matching left rows in left input order. `full` emits matched and unmatched left
-rows in left input order, then unmatched right rows sorted by join key. `semi`
-and `anti` preserve left input order.
+Row ordering for `inner` and `left` preserves left input order and emits
+matching right rows in right input order. `right` preserves right input order
+and emits matching left rows in left input order. `full` emits matched and
+unmatched left rows in left input order, then unmatched right rows sorted by the
+join key tuple. `semi` and `anti` preserve left input order.
 
 ### 11.12 Union
 
@@ -2468,6 +2489,10 @@ The version 0.26.0 implementation exits non-zero on parse errors. When parsing
 succeeds, its JSON payload includes the parsed program, output declarations, and
 parse diagnostics.
 
+Since version 0.39.0, AST JSON preserves the existing join `same` and `pair`
+shapes for existing `on key` and `on (left, right)` source. Composite join
+syntax emits an additive `composite` join-on shape with ordered key pairs.
+
 ### 14.8 pdl ir
 
 `pdl ir file.pdl` prints deterministic JSON for the semantic IR.
@@ -2477,6 +2502,10 @@ It MUST NOT execute data pipelines or write output artifacts.
 The version 0.26.0 implementation exits non-zero when syntax, schema, or
 semantic errors prevent IR construction. Successful IR JSON includes output
 declarations when present.
+
+Since version 0.39.0, join IR JSON continues to emit `left_key` and `right_key`
+for compatibility. Composite joins additionally emit a `keys` array only when a
+join has more than one key pair.
 
 ### 14.9 pdl manifest
 
@@ -2624,16 +2653,32 @@ The native implementation maps window results back to original dataframe rows;
 it does not use exploding or list-joining window mappings that would change PDL
 row order or shape.
 
+Since version 0.39.0, the native subset also supports composite-key equi-joins
+for `inner`, `left`, `right`, `full`, `semi`, and `anti` joins at the same
+path-backed main input and native-safe binding-backed right input boundary.
+Composite native joins preserve the row runtime's null-key non-match rule,
+right non-key suffixing, coalesced key output, and deterministic output order.
+
+Native row-preserving window coverage also includes `percent_rank`,
+`cume_dist`, `lag`, `lead`, `first_value`, `last_value`, and
+`rows between unbounded_preceding and current_row` aggregate frames when each
+argument lowers through the supported native expression subset. Native
+`lag`/`lead` require exactly one order key, a non-negative integer literal
+offset, and an omitted or `null` default; non-null defaults remain on the row
+runtime because PDL row values can be mixed while native columns require a
+stable dtype. Native ranking, distribution, and offset windows currently require
+at most one order key so per-key direction, null placement, and tie behavior
+remain exactly aligned with the row runtime.
+
 Unsupported aggregate functions, non-Arrow byte-backed input, non-Arrow stdin,
-binding starts, named outputs, multi-output execution, non-equi joins, true
-composite-key join syntax, incompatible-schema union extensions,
-`pivot_longer`, `complete`, JSON Lines input, CSV/JSON Lines text writers,
-bounded-frame windows, offset/value/distribution windows, multi-key window
-ordering, data-dependent dynamic `col(...)`, uncertain coercions, and other
-unsupported expressions fall back to rows in automatic mode before native scans
-are opened when they are known to be unsupported. Forced native mode reports an
-`E1211` diagnostic with a stable unsupported native reason category instead of
-silently falling back.
+binding starts, named outputs, multi-output execution, non-equi joins,
+incompatible-schema union extensions, `pivot_longer`, `complete`, JSON Lines
+input, CSV/JSON Lines text writers, unsupported bounded-frame windows, multi-key
+window ordering, non-null offset-window defaults, data-dependent dynamic
+`col(...)`, uncertain coercions, and other unsupported expressions fall back to
+rows in automatic mode before native scans are opened when they are known to be
+unsupported. Forced native mode reports an `E1211` diagnostic with a stable
+unsupported native reason category instead of silently falling back.
 
 Browser/WASM builds MUST keep the native Polars feature set disabled. The WASM
 runtime MUST NOT enable `native-formats`, `polars-engine`, or any dependency
@@ -2653,7 +2698,7 @@ plan output also includes the same facts. Observability MUST NOT write to binary
 stdout during `run`; it is exposed through plan/manifest JSON, text plan output,
 stderr diagnostics, or benchmark sidecar reports.
 
-Version 0.38.0 defines the native coverage matrix in
+Version 0.39.0 defines the native coverage matrix in
 `docs/PDL_NATIVE_COVERAGE.csv` and documents it in
 `docs/PDL_NATIVE_COVERAGE.md`. Matrix statuses are limited to `native parity`,
 `native partial`, `row-only by design`, `planned native`, `unsupported`, and
@@ -2817,7 +2862,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.38.0` LSP implementation provides diagnostics,
+The current `0.39.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3201,6 +3246,12 @@ assets. Browser hosts that want package-provided Monaco worker setup MUST pass
 a `createEditorWorker` setup option, and hosts MUST pass an `onigasmWasmUrl`
 setup option when using TextMate grammar loading.
 
+Since version 0.39.0, the browser package version line aligns with the
+Rust/CLI release when syntax, runtime, editor-service, or WASM-visible behavior
+changes. `pdl-wasm@0.39.0` carries the updated parser and in-memory runtime, and
+`pdl-editor@0.39.0` peers on `pdl-wasm@0.39.x` so Monaco hosts can consume the
+matching editor-service ABI without a stale peer dependency range.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3271,7 +3322,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.38.0"
+version = "0.39.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -4865,7 +4916,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.38.0.
+PDL source does not require an explicit version declaration in draft 0.39.0.
 
 The implementation SHOULD report supported language version.
 
@@ -4930,7 +4981,8 @@ NullsOrder       ::= "nulls_first" | "nulls_last" ;
 LimitStage       ::= "limit" IntLiteral ;
 JoinStage        ::= "join" JoinSource JoinOn JoinKind? ;
 JoinSource       ::= Ident ;
-JoinOn           ::= "on" ColumnRef | "on" "(" ColumnRef "," ColumnRef ")" ;
+JoinOn           ::= "on" JoinKey ("," JoinKey)* ;
+JoinKey          ::= ColumnRef | "(" ColumnRef "," ColumnRef ")" ;
 JoinKind         ::= "kind" JoinKindName ;
 JoinKindName     ::= "inner" | "left" | "right" | "full" | "semi" | "anti" ;
 UnionStage       ::= "union" Ident UnionOptions? ;

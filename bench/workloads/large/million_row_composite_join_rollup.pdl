@@ -1,0 +1,14 @@
+let segment_rollup =
+  load "../../data/generated/million-row.csv"
+    | mutate segment_key = segment
+    | group_by segment, segment_key
+    | agg
+        segment_rows = count(),
+        avg_score = mean(score)
+
+load "../../data/generated/million-row.csv"
+  | mutate segment_key = segment
+  | join segment_rollup on segment, segment_key kind left
+  | filter row % 1000 == 0
+  | select row, segment, segment_rows, avg_score
+  | sort segment, row

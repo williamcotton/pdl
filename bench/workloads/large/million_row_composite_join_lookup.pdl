@@ -1,0 +1,11 @@
+let score_lookup =
+  load "../../data/generated/million-row.csv"
+    | select row, segment, score
+    | rename lookup_score = score
+
+load "../../data/generated/million-row.csv"
+  | join score_lookup on row, segment kind inner
+  | mutate score_delta = score - lookup_score
+  | filter row % 1000 == 0
+  | select row, segment, score, lookup_score, score_delta
+  | sort segment, row

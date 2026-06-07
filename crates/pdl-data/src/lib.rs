@@ -16,7 +16,7 @@ pub use csv::{
 };
 pub use engine::{
     native_engine_name, DataAggItem, DataBackend, DataBinaryOp, DataExpr, DataJoinKind,
-    DataLiteral, DataPlan, DataScalarFunction, DataSink, DataSource, DataUnaryOp,
+    DataLiteral, DataPlan, DataScalarFunction, DataSink, DataSource, DataUnaryOp, DataWindowFrame,
     DataWindowFunction, DataWindowSpec,
 };
 pub use format::{

@@ -115,6 +115,7 @@ pub enum StageIr {
         source_span: Span,
         left_key: String,
         right_key: String,
+        keys: Vec<JoinKeyIr>,
         kind: JoinKindIr,
         span: Span,
     },
@@ -215,6 +216,12 @@ pub enum JoinKindIr {
     Full,
     Semi,
     Anti,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinKeyIr {
+    pub left: String,
+    pub right: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -472,6 +479,14 @@ fn lower_stage(stage: &Stage) -> StageIr {
             source_span: source.span,
             left_key: on.left().value.clone(),
             right_key: on.right().value.clone(),
+            keys: on
+                .keys()
+                .iter()
+                .map(|key| JoinKeyIr {
+                    left: key.left.value.clone(),
+                    right: key.right.value.clone(),
+                })
+                .collect(),
             kind: match kind {
                 pdl_syntax::JoinKind::Inner => JoinKindIr::Inner,
                 pdl_syntax::JoinKind::Left => JoinKindIr::Left,

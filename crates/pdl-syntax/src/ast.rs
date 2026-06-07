@@ -1,8 +1,8 @@
 pub use crate::parser::{
     AggItem, BinaryOp, Binding, CompleteFillItem, ContextDecl, ContextKind, Expr, FrameBound,
-    JoinKind, JoinOn, LoadStage, MutateItem, NullsOrder, OutputDecl, Pipeline, PipelineStart,
-    Program, RenameItem, SaveStage, SelectItem, SinkRef, SortDirection, SortItem, SourceRef,
-    Spanned, Stage, UnaryOp, UnionOption, UnionOptionKind, WindowFrame, WindowSpec,
+    JoinKey, JoinKind, JoinOn, LoadStage, MutateItem, NullsOrder, OutputDecl, Pipeline,
+    PipelineStart, Program, RenameItem, SaveStage, SelectItem, SinkRef, SortDirection, SortItem,
+    SourceRef, Spanned, Stage, UnaryOp, UnionOption, UnionOptionKind, WindowFrame, WindowSpec,
 };
 
 use pdl_core::Span;

@@ -351,6 +351,17 @@ pub enum JoinOn {
         right: Spanned<String>,
         span: Span,
     },
+    Composite {
+        keys: Vec<JoinKey>,
+        span: Span,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinKey {
+    pub left: Spanned<String>,
+    pub right: Spanned<String>,
+    pub span: Span,
 }
 
 impl JoinOn {
@@ -358,6 +369,7 @@ impl JoinOn {
         match self {
             JoinOn::Same(column) => column.span,
             JoinOn::Pair { span, .. } => *span,
+            JoinOn::Composite { span, .. } => *span,
         }
     }
 
@@ -365,6 +377,7 @@ impl JoinOn {
         match self {
             JoinOn::Same(column) => column,
             JoinOn::Pair { left, .. } => left,
+            JoinOn::Composite { keys, .. } => &keys[0].left,
         }
     }
 
@@ -372,6 +385,23 @@ impl JoinOn {
         match self {
             JoinOn::Same(column) => column,
             JoinOn::Pair { right, .. } => right,
+            JoinOn::Composite { keys, .. } => &keys[0].right,
+        }
+    }
+
+    pub fn keys(&self) -> Vec<JoinKey> {
+        match self {
+            JoinOn::Same(column) => vec![JoinKey {
+                left: column.clone(),
+                right: column.clone(),
+                span: column.span,
+            }],
+            JoinOn::Pair { left, right, span } => vec![JoinKey {
+                left: left.clone(),
+                right: right.clone(),
+                span: *span,
+            }],
+            JoinOn::Composite { keys, .. } => keys.clone(),
         }
     }
 }
@@ -843,6 +873,35 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_join_on(&mut self) -> Option<JoinOn> {
+        let first = self.parse_join_key()?;
+        if !self.consume_comma() {
+            if first.left == first.right {
+                return Some(JoinOn::Same(first.left));
+            }
+            return Some(JoinOn::Pair {
+                left: first.left,
+                right: first.right,
+                span: first.span,
+            });
+        }
+
+        let start = first.span.start;
+        let mut keys = vec![first];
+        let key = self.parse_join_key()?;
+        let mut end = key.span.end;
+        keys.push(key);
+        while self.consume_comma() {
+            let key = self.parse_join_key()?;
+            end = key.span.end;
+            keys.push(key);
+        }
+        Some(JoinOn::Composite {
+            keys,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_join_key(&mut self) -> Option<JoinKey> {
         if self.consume_lparen() {
             let start = self.previous_span().start;
             let left = self.expect_column_name()?;
@@ -856,14 +915,18 @@ impl<'a> Parser<'a> {
             let right = self.expect_column_name()?;
             let close = self.expect_rparen();
             let end = close.map_or(right.span.end, |token| token.span.end);
-            return Some(JoinOn::Pair {
+            return Some(JoinKey {
                 left,
                 right,
                 span: Span::new(start, end),
             });
         }
 
-        self.expect_column_name().map(JoinOn::Same)
+        self.expect_column_name().map(|column| JoinKey {
+            left: column.clone(),
+            right: column.clone(),
+            span: column.span,
+        })
     }
 
     fn parse_join_kind(&mut self) -> (JoinKind, Span) {
@@ -2588,6 +2651,39 @@ load "sales.csv"
         assert!(options[0].value.value);
         assert_eq!(options[1].kind, UnionOptionKind::Distinct);
         assert!(!options[1].value.value);
+    }
+
+    #[test]
+    fn parses_composite_join_keys() {
+        let result = parse(
+            r#"load "sales.csv"
+  | join customers on customer_id, order_date
+  | join products on (sku, product_sku), (region, market)"#,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let main = result.program.main.expect("main pipeline");
+        let Stage::Join { on, .. } = &main.stages[0] else {
+            panic!("same-name composite join stage");
+        };
+        let JoinOn::Composite { keys, .. } = on else {
+            panic!("composite join");
+        };
+        assert_eq!(keys[0].left.value, "customer_id");
+        assert_eq!(keys[0].right.value, "customer_id");
+        assert_eq!(keys[1].left.value, "order_date");
+        assert_eq!(keys[1].right.value, "order_date");
+
+        let Stage::Join { on, .. } = &main.stages[1] else {
+            panic!("paired composite join stage");
+        };
+        let JoinOn::Composite { keys, .. } = on else {
+            panic!("composite join");
+        };
+        assert_eq!(keys[0].left.value, "sku");
+        assert_eq!(keys[0].right.value, "product_sku");
+        assert_eq!(keys[1].left.value, "region");
+        assert_eq!(keys[1].right.value, "market");
     }
 
     #[test]

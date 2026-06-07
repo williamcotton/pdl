@@ -3,6 +3,12 @@ load "../../data/generated/million-row.csv"
   | mutate
       score_per_latency = round(score / latency_ms, 6),
       adjusted_score = score + x * 0.5
-  | select row, segment, adjusted_score, score_per_latency, latency_ms
+  | mutate
+      segment_score_rank =
+        dense_rank() over (
+          partition_by segment
+          order_by adjusted_score desc
+        )
+  | select row, segment, adjusted_score, score_per_latency, latency_ms, segment_score_rank
   | sort adjusted_score desc
   | limit 250000

@@ -1,0 +1,8 @@
+load "../../data/generated/million-row.csv"
+  | mutate
+      segment_row = row_number() over (partition_by segment order_by score desc),
+      score_rank = dense_rank() over (partition_by segment order_by score desc),
+      segment_rows = count() over (partition_by segment)
+  | filter segment_row <= 25
+  | select segment, row, score, segment_row, score_rank, segment_rows
+  | sort segment, segment_row

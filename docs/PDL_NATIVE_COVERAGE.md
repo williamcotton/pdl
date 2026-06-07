@@ -1,9 +1,9 @@
 # PDL Native Coverage Matrix
 
-Status: v0.38 source of truth
+Status: v0.39 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
-This matrix records what the native execution strategy may claim in v0.38. The
+This matrix records what the native execution strategy may claim in v0.39. The
 portable row runtime remains the semantic reference. A matrix row may use only
 one of these statuses:
 
@@ -33,7 +33,7 @@ boundary changes status, update the CSV and the tests in the same change.
 | `sort` | native parity | Blocking stage with deterministic sort options. |
 | `limit` | native parity | Row-preserving limit. |
 | `distinct` | native parity | Stable first-row distinct. |
-| `join` | native partial | Native covers path-backed main inputs joined to native-safe binding inputs for `inner`/`left`/`right`/`full`/`semi`/`anti` single-key equi-joins; non-equi and true composite-key syntax stay row-only. |
+| `join` | native partial | Native covers path-backed main inputs joined to native-safe binding inputs for `inner`/`left`/`right`/`full`/`semi`/`anti` single-key and composite-key equi-joins; non-equi joins stay row-only by design. |
 | `union` | native partial | Native covers compatible-schema binding inputs by name or position with optional `distinct`; incompatible schemas, language-level null padding, and browser byte boundaries stay row-only. |
 | `pivot_longer` | row-only by design | Row runtime preserves deterministic long output and mixed value behavior. |
 | `complete` | row-only by design | Row runtime preserves key expansion and fill expression semantics. |
@@ -56,7 +56,13 @@ boundary changes status, update the CSV and the tests in the same change.
 | cast-style functions | native partial | `to_number` lowers natively with row-identical whitespace, parse-failure, and null behavior; other cast-style functions remain row-only. |
 | conditional functions | native partial | `if_else` lowers natively for supported native condition and branch expressions; typed native branch output must remain compatible. |
 | aggregate arguments | native partial | Supported scalar expressions lower for `count`, `sum`, `mean`, `min`, `max`, and `count_distinct`. |
-| window expressions | native partial | `row_number`, `rank`, `dense_rank`, and whole-partition `count`, `sum`, `mean`, `min`, and `max` lower natively for row-preserving mutate windows with at most one order key; bounded frames, offset/value windows, distribution windows, and multi-key ordering stay row-only. |
+| window ranking functions | native partial | `row_number`, `rank`, and `dense_rank` lower natively for row-preserving mutate windows; `rank` and `dense_rank` require exactly one order key and `row_number` supports zero or one order key. |
+| window whole-partition aggregates | native partial | `count`, `sum`, `mean`, `min`, and `max` lower natively for whole-partition row-preserving mutate windows over supported native expressions with zero or one order key. |
+| window running aggregates | native partial | `count`, `sum`, `mean`, `min`, and `max` lower natively for `rows between unbounded_preceding and current_row` over supported native expressions with zero or one order key. |
+| window offset functions | native partial | `lag` and `lead` lower natively with one order key, a non-negative integer literal offset, and an omitted or `null` default; non-null defaults remain row-only. |
+| window value functions | native partial | `first_value` and `last_value` lower natively for whole-partition and unbounded-preceding-to-current-row frames over supported native expressions with zero or one order key. |
+| window distribution functions | native partial | `percent_rank` and `cume_dist` lower natively with exactly one order key. |
+| window multi-key ordering | row-only by design | Multi-key window order stays on the row runtime until per-key direction, null placement, and tie behavior are proven identical in native execution. |
 
 ## Source Coverage
 
@@ -88,6 +94,6 @@ boundary changes status, update the CSV and the tests in the same change.
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| WASM | row-only by design | Polars, Arrow, Parquet, object-store, and native filesystem assumptions are excluded from the wasm target graph. |
+| WASM | row-only by design | Polars, Parquet, object-store, and native filesystem assumptions are excluded from the wasm target graph; Arrow IPC byte support remains behind browser-safe row/WASM APIs. |
 | LSP/editor | row-only by design | Language services expose no native dataframe internals. |
 | PDL-to-Algraf Arrow IPC | native partial | PDL emits Arrow IPC stream; Algraf consumes it across the process boundary. |

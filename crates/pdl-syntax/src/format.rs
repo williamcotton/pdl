@@ -332,6 +332,21 @@ fn format_join_on(on: &JoinOn) -> String {
                 format_column_reference(&right.value)
             )
         }
+        JoinOn::Composite { keys, .. } => keys
+            .iter()
+            .map(|key| {
+                if key.left == key.right {
+                    format_column_reference(&key.left.value)
+                } else {
+                    format!(
+                        "({}, {})",
+                        format_column_reference(&key.left.value),
+                        format_column_reference(&key.right.value)
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 

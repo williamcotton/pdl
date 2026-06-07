@@ -723,20 +723,35 @@ fn native_window_unsupported_reason(
         return Some(NativeUnsupportedReason::WindowExpression);
     }
     match function {
-        "row_number" if args.is_empty() => None,
-        "rank" | "dense_rank" if args.is_empty() && spec.order_by.len() == 1 => None,
-        "count" if args.is_empty() => native_whole_partition_window_reason(spec),
-        "count" if args.len() == 1 => native_whole_partition_window_reason(spec)
+        "row_number" if args.is_empty() => native_supported_window_frame_reason(spec),
+        "rank" | "dense_rank" if args.is_empty() && spec.order_by.len() == 1 => {
+            native_supported_window_frame_reason(spec)
+        }
+        "percent_rank" | "cume_dist" if args.is_empty() && spec.order_by.len() == 1 => {
+            native_supported_window_frame_reason(spec)
+        }
+        "lag" | "lead" if !args.is_empty() && args.len() <= 3 && spec.order_by.len() == 1 => {
+            native_supported_window_frame_reason(spec)
+                .or_else(|| native_expr_unsupported_reason(&args[0]))
+                .or_else(|| native_offset_arg_reason(args.get(1)))
+                .or_else(|| native_offset_default_reason(args.get(2)))
+        }
+        "first_value" | "last_value" if args.len() == 1 => {
+            native_supported_window_frame_reason(spec)
+                .or_else(|| native_expr_unsupported_reason(&args[0]))
+        }
+        "count" if args.is_empty() => native_supported_window_frame_reason(spec),
+        "count" if args.len() == 1 => native_supported_window_frame_reason(spec)
             .or_else(|| native_expr_unsupported_reason(&args[0])),
         "sum" | "mean" | "min" | "max" if args.len() == 1 => {
-            native_whole_partition_window_reason(spec)
+            native_supported_window_frame_reason(spec)
                 .or_else(|| native_expr_unsupported_reason(&args[0]))
         }
         _ => Some(NativeUnsupportedReason::WindowExpression),
     }
 }
 
-fn native_whole_partition_window_reason(spec: &WindowSpecIr) -> Option<NativeUnsupportedReason> {
+fn native_supported_window_frame_reason(spec: &WindowSpecIr) -> Option<NativeUnsupportedReason> {
     match spec.frame.as_ref() {
         None => None,
         Some(WindowFrameIr {
@@ -744,6 +759,26 @@ fn native_whole_partition_window_reason(spec: &WindowSpecIr) -> Option<NativeUns
             end: FrameBoundIr::UnboundedFollowing { .. },
             ..
         }) => None,
+        Some(WindowFrameIr {
+            start: FrameBoundIr::UnboundedPreceding { .. },
+            end: FrameBoundIr::CurrentRow { .. },
+            ..
+        }) => None,
+        Some(_) => Some(NativeUnsupportedReason::WindowExpression),
+    }
+}
+
+fn native_offset_arg_reason(offset: Option<&ExprIr>) -> Option<NativeUnsupportedReason> {
+    match offset {
+        None => None,
+        Some(ExprIr::Number { value, .. }) if *value >= 0.0 && value.fract() == 0.0 => None,
+        Some(_) => Some(NativeUnsupportedReason::WindowExpression),
+    }
+}
+
+fn native_offset_default_reason(default: Option<&ExprIr>) -> Option<NativeUnsupportedReason> {
+    match default {
+        None | Some(ExprIr::Null { .. }) => None,
         Some(_) => Some(NativeUnsupportedReason::WindowExpression),
     }
 }
@@ -1126,7 +1161,7 @@ load "sales.csv"
         }
         assert!(
             planned_native_rows.is_empty(),
-            "v0.38 coverage matrix must close planned-native rows: {planned_native_rows:?}"
+            "v0.39 coverage matrix must close planned-native rows: {planned_native_rows:?}"
         );
         for stage in [
             "load",

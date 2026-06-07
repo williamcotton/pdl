@@ -48,19 +48,21 @@ Snapshots copy `report.csv` and write `environment.txt` with the git ref,
 system, Rust/Cargo versions, source report, and snapshot timestamp.
 
 The current generated source family is `million-row` in CSV, Parquet, and Arrow
-IPC stream form. v0.36 also generates CSV partition files and a segment
-dimension table so large join and union fallback workloads are tracked.
+IPC stream form. The large suite also includes CSV partition files, a segment
+dimension table, composite-key join workloads, and window-heavy rank, running,
+offset, value, and distribution workloads.
 
 ## PDL-to-Algraf Arrow Smoke
 
 The tracked smoke command keeps the process boundary as Arrow IPC. It runs a
-PDL workload that filters, mutates, projects, sorts, and limits a large table,
-then renders a bounded Algraf histogram from Arrow-stream stdin:
+PDL workload that filters, mutates, ranks rows with a window expression,
+projects, sorts, and limits a large table, then renders a bounded Algraf
+histogram from Arrow-stream stdin:
 
 ```bash
 cargo build -p pdl-cli --release
 (cd ../algraf && cargo build -p algraf-cli --release)
-scripts/pdl-algraf-arrow-smoke.sh v0_36_pdl_algraf_smoke
+scripts/pdl-algraf-arrow-smoke.sh v0_39_pdl_algraf_smoke
 ```
 
 Set `PDL_BIN` or `ALGRAF_BIN` to override the binaries. The smoke writes

@@ -1,6 +1,6 @@
 # pdl-wasm
 
-Browser runtime loader and structural TypeScript ABI types for PDL `0.30.x`.
+Browser runtime loader and structural TypeScript ABI types for PDL `0.39.x`.
 
 The browser ABI accepts a typed context map for reactive `param` and
 `state` declarations, and its editor-service ABI includes parser-backed semantic
