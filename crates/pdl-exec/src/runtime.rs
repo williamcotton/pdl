@@ -2,8 +2,8 @@ use pdl_core::{codes, Diagnostic, Span};
 use pdl_data::{
     compare_values, read_table_from_bytes, sniff_format_from_bytes, DataAggItem, DataBackend,
     DataBinaryOp, DataExpr, DataFormat, DataJoinKind, DataLiteral, DataPlan, DataScalarFunction,
-    DataSink, DataSource, DataUnaryOp, NullsOrder as DataNullsOrder, Row,
-    SortDirection as DataSortDirection, SortSpec, Table, Value,
+    DataSink, DataSource, DataUnaryOp, DataWindowFunction, DataWindowSpec,
+    NullsOrder as DataNullsOrder, Row, SortDirection as DataSortDirection, SortSpec, Table, Value,
 };
 use pdl_driver::{
     DriverIo, FormatDecision, OsDriverIo, PlanInputSource, PlanOutputSink, PreparedProgram,
@@ -449,15 +449,7 @@ fn check_native_pipeline_eligibility(
                 }
                 check_native_save_eligibility(prepared, execution_plan, *span, format.as_deref())?;
             }
-            StageIr::Join { source, kind, .. } => {
-                if !matches!(
-                    kind,
-                    JoinKindIr::Inner | JoinKindIr::Left | JoinKindIr::Semi | JoinKindIr::Anti
-                ) {
-                    return Err(unsupported_native_pipeline(
-                        "pipeline stage is not supported by native execution",
-                    ));
-                }
+            StageIr::Join { source, .. } => {
                 let binding = ir_binding(prepared, source).ok_or_else(|| {
                     Diagnostic::error(
                         codes::E1007,
@@ -711,13 +703,10 @@ fn execute_native_pipeline(
                 let kind = match kind {
                     JoinKindIr::Inner => DataJoinKind::Inner,
                     JoinKindIr::Left => DataJoinKind::Left,
+                    JoinKindIr::Right => DataJoinKind::Right,
+                    JoinKindIr::Full => DataJoinKind::Full,
                     JoinKindIr::Semi => DataJoinKind::Semi,
                     JoinKindIr::Anti => DataJoinKind::Anti,
-                    JoinKindIr::Right | JoinKindIr::Full => {
-                        return Err(unsupported_native_pipeline(
-                            "pipeline stage is not supported by native execution",
-                        ));
-                    }
                 };
                 let left_key = resolve_native_column_name(left_key, *span, context)?;
                 let right_key = resolve_native_column_name(right_key, *span, context)?;
@@ -1019,9 +1008,12 @@ fn lower_data_expr(
             right: Box::new(lower_data_expr(right, context)?),
         }),
         ExprIr::Call { name, args, span } => lower_data_call(name, args, *span, context),
-        ExprIr::Window { .. } => Err(unsupported_native_pipeline(
-            "window expressions are not supported by native execution",
-        )),
+        ExprIr::Window {
+            function,
+            args,
+            spec,
+            span,
+        } => lower_data_window(function, args, spec, *span, context),
     }
 }
 
@@ -1140,6 +1132,134 @@ fn lower_data_call(
     })
 }
 
+fn lower_data_window(
+    function: &str,
+    args: &[ExprIr],
+    spec: &WindowSpecIr,
+    span: Span,
+    context: &BTreeMap<String, Value>,
+) -> Result<DataExpr, Diagnostic> {
+    let function = match function {
+        "row_number" => {
+            if !args.is_empty() {
+                return Err(unsupported_native_pipeline(
+                    "window function arity is not supported by native execution",
+                ));
+            }
+            DataWindowFunction::RowNumber
+        }
+        "rank" | "dense_rank" => {
+            if !args.is_empty() {
+                return Err(unsupported_native_pipeline(
+                    "window function arity is not supported by native execution",
+                ));
+            }
+            if spec.order_by.len() != 1 {
+                return Err(unsupported_native_pipeline(
+                    "native rank windows require one order key",
+                ));
+            }
+            if function == "rank" {
+                DataWindowFunction::Rank
+            } else {
+                DataWindowFunction::DenseRank
+            }
+        }
+        "count" => {
+            if args.len() > 1 {
+                return Err(unsupported_native_pipeline(
+                    "window function arity is not supported by native execution",
+                ));
+            }
+            ensure_native_whole_partition_window(spec)?;
+            DataWindowFunction::Count
+        }
+        "sum" | "mean" | "min" | "max" => {
+            let [_] = args else {
+                return Err(unsupported_native_pipeline(
+                    "window function arity is not supported by native execution",
+                ));
+            };
+            ensure_native_whole_partition_window(spec)?;
+            match function {
+                "sum" => DataWindowFunction::Sum,
+                "mean" => DataWindowFunction::Mean,
+                "min" => DataWindowFunction::Min,
+                "max" => DataWindowFunction::Max,
+                _ => unreachable!("matched aggregate window"),
+            }
+        }
+        _ => {
+            return Err(unsupported_native_pipeline(
+                "window function is not supported by native execution",
+            ));
+        }
+    };
+    Ok(DataExpr::Window {
+        function,
+        args: args
+            .iter()
+            .map(|arg| lower_data_expr(arg, context))
+            .collect::<Result<Vec<_>, _>>()?,
+        spec: lower_data_window_spec(spec, span, context)?,
+    })
+}
+
+fn lower_data_window_spec(
+    spec: &WindowSpecIr,
+    span: Span,
+    context: &BTreeMap<String, Value>,
+) -> Result<DataWindowSpec, Diagnostic> {
+    if spec.order_by.len() > 1 {
+        return Err(unsupported_native_pipeline(
+            "multi-key window order is not supported by native execution",
+        ));
+    }
+    Ok(DataWindowSpec {
+        partition_by: resolve_native_column_names(&spec.partition_by, span, context)?,
+        order_by: spec
+            .order_by
+            .iter()
+            .map(|item| {
+                let direction = match item.direction {
+                    SortDirectionIr::Asc => DataSortDirection::Asc,
+                    SortDirectionIr::Desc => DataSortDirection::Desc,
+                };
+                let nulls = item
+                    .nulls
+                    .map(|nulls| match nulls {
+                        NullsOrderIr::First => DataNullsOrder::First,
+                        NullsOrderIr::Last => DataNullsOrder::Last,
+                    })
+                    .unwrap_or(match direction {
+                        DataSortDirection::Asc => DataNullsOrder::Last,
+                        DataSortDirection::Desc => DataNullsOrder::First,
+                    });
+                Ok(SortSpec {
+                    column: resolve_native_column_name(&item.column, item.span, context)?,
+                    direction,
+                    nulls,
+                })
+            })
+            .collect::<Result<Vec<_>, Diagnostic>>()?,
+        row_index: None,
+    })
+}
+
+fn ensure_native_whole_partition_window(spec: &WindowSpecIr) -> Result<(), Diagnostic> {
+    match spec.frame.as_ref() {
+        None => Ok(()),
+        Some(WindowFrameIr {
+            start: FrameBoundIr::UnboundedPreceding { .. },
+            end: FrameBoundIr::UnboundedFollowing { .. },
+            ..
+        }) => Ok(()),
+        Some(_) => Err(unsupported_native_pipeline(
+            "bounded window frames are not supported by native execution",
+        )),
+    }
+}
+
 fn value_to_data_literal(value: &Value) -> DataExpr {
     DataExpr::Literal(match value {
         Value::Null => DataLiteral::Null,
@@ -1177,7 +1297,7 @@ fn unsupported_native_reason_category(reason: &str) -> NativeUnsupportedReason {
         NativeUnsupportedReason::SaveNotTerminal
     } else if reason.contains("stdout bytes") {
         NativeUnsupportedReason::NativeStdoutBytes
-    } else if reason.contains("window expressions") {
+    } else if reason.contains("window") {
         NativeUnsupportedReason::WindowExpression
     } else if reason.contains("col()") {
         NativeUnsupportedReason::DynamicColumn
@@ -4148,6 +4268,99 @@ load "sales.csv"
     }
 
     #[test]
+    fn native_engine_right_and_full_join_match_rows_for_binding_input() {
+        let workspace = temp_workspace("native-right-full-join");
+        fs::write(
+            workspace.join("left.csv"),
+            "id,left_value,shared\nB,L-B,LS-B\nD,L-D,LS-D\n",
+        )
+        .expect("write left");
+        fs::write(
+            workspace.join("right.csv"),
+            "right_id,right_value,shared\nC,R-C,RS-C\nA,R-A,RS-A\nB,R-B,RS-B\n,R-null,RS-null\n",
+        )
+        .expect("write right");
+
+        for (kind, expected) in [
+            (
+                "right",
+                "id,left_value,shared,right_value,shared_right\nC,,,R-C,RS-C\nA,,,R-A,RS-A\nB,L-B,LS-B,R-B,RS-B\n,,,R-null,RS-null\n",
+            ),
+            (
+                "full",
+                "id,left_value,shared,right_value,shared_right\nB,L-B,LS-B,R-B,RS-B\nD,L-D,LS-D,,\n,,,R-null,RS-null\nA,,,R-A,RS-A\nC,,,R-C,RS-C\n",
+            ),
+        ] {
+            let io = OsDriverIo;
+            let prepared = prepare_source_with_io(
+                workspace.join(format!("{kind}.pdl")),
+                format!(
+                    r#"let right_side =
+  load "right.csv"
+
+load "left.csv"
+  | join right_side on (id, right_id) kind {kind}"#
+                ),
+                &io,
+            );
+            let options = RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            };
+            let row = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Row,
+            );
+            let auto = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Auto,
+            );
+            let native = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options,
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Native,
+            );
+
+            assert!(row.diagnostics.is_empty(), "{kind}: {:?}", row.diagnostics);
+            assert!(
+                auto.diagnostics.is_empty(),
+                "{kind}: {:?}",
+                auto.diagnostics
+            );
+            assert!(
+                native.diagnostics.is_empty(),
+                "{kind}: {:?}",
+                native.diagnostics
+            );
+            assert_eq!(auto.backend, DataBackend::NativePolars, "{kind}");
+            assert_eq!(native.backend, DataBackend::NativePolars, "{kind}");
+            let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+            assert_eq!(row_csv, expected, "{kind}");
+            assert_eq!(
+                String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+                row_csv,
+                "{kind}"
+            );
+            assert_eq!(
+                String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+                row_csv,
+                "{kind}"
+            );
+        }
+
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
     fn native_engine_semi_and_anti_join_match_rows_for_binding_input() {
         let workspace = temp_workspace("native-semi-anti-join");
         fs::write(
@@ -4233,6 +4446,81 @@ load "sales.csv"
                 "{kind}"
             );
         }
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_window_subset_matches_rows_for_path_input() {
+        let workspace = temp_workspace("native-window-subset");
+        fs::write(
+            workspace.join("orders.csv"),
+            "order_id,region,amount\nA,West,30\nB,West,\nC,West,10\nD,East,20\nE,East,20\nF,,5\n",
+        )
+        .expect("write orders");
+        let io = OsDriverIo;
+        let prepared = prepare_source_with_io(
+            workspace.join("main.pdl"),
+            r#"load "orders.csv"
+  | mutate
+      seq = row_number() over (partition_by region order_by amount asc nulls_first),
+      amount_rank = rank() over (partition_by region order_by amount asc nulls_first),
+      amount_dense = dense_rank() over (partition_by region order_by amount asc nulls_first),
+      region_rows = count() over (partition_by region),
+      known_amounts = count(amount) over (partition_by region),
+      amount_total = sum(amount) over (partition_by region),
+      amount_mean = mean(amount) over (partition_by region),
+      amount_min = min(amount) over (partition_by region),
+      amount_max = max(amount) over (partition_by region)
+  | select order_id, region, amount, seq, amount_rank, amount_dense, region_rows, known_amounts, amount_total, amount_mean, amount_min, amount_max
+  | sort order_id"#,
+            &io,
+        );
+        let options = RunOptions {
+            stdout_format: Some("csv".to_string()),
+            dry_run: false,
+            allow_binary_stdout: true,
+        };
+        let row = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options.clone(),
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Row,
+        );
+        let auto = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options.clone(),
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Auto,
+        );
+        let native = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options,
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Native,
+        );
+
+        assert!(row.diagnostics.is_empty(), "{:?}", row.diagnostics);
+        assert!(auto.diagnostics.is_empty(), "{:?}", auto.diagnostics);
+        assert!(native.diagnostics.is_empty(), "{:?}", native.diagnostics);
+        assert_eq!(auto.backend, DataBackend::NativePolars);
+        assert_eq!(native.backend, DataBackend::NativePolars);
+        let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+        assert_eq!(
+            String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+            row_csv
+        );
+        assert_eq!(
+            String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+            row_csv
+        );
+        assert_eq!(
+            row_csv,
+            "order_id,region,amount,seq,amount_rank,amount_dense,region_rows,known_amounts,amount_total,amount_mean,amount_min,amount_max\nA,West,30,3,3,3,3,2,40,20,10,30\nB,West,,1,1,1,3,2,40,20,10,30\nC,West,10,2,2,2,3,2,40,20,10,30\nD,East,20,1,1,1,2,2,40,20,20,20\nE,East,20,2,1,1,2,2,40,20,20,20\nF,,5,1,1,1,1,1,5,5,5,5\n"
+        );
+
         fs::remove_dir_all(workspace).expect("clean temp workspace");
     }
 

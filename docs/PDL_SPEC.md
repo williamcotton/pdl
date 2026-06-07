@@ -1,17 +1,26 @@
 # PDL Detailed Specification
 
-Status: Draft 0.37.0
+Status: Draft 0.38.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current released repository implementation line is `0.37.0`, tracked in
-`docs/V0_37_PLAN.md`. Version 0.37.0 closes the native language-gap slice for
-the highest-value whole-pipeline cases after the v0.36 native execution
-maturity release.
+The current released repository implementation line is `0.38.0`, tracked in
+`docs/V0_38_PLAN.md`. Version 0.38.0 promotes the next safe native parity
+slices while keeping browser execution and PDL-visible row semantics separate
+from Polars internals.
 
-The native v0.37 implementation promotes path-backed Arrow IPC file inputs,
+The native v0.38 implementation promotes row-preserving window expressions for
+`row_number`, `rank`, `dense_rank`, and whole-partition `count`, `sum`, `mean`,
+`min`, and `max`; and extends binding-backed single-key equi-joins to include
+`right` and `full` joins. Bounded-frame windows, offset/value/distribution
+window functions, multi-key window ordering, non-equi joins, true composite-key
+join syntax, `pivot_longer`, `complete`, JSON Lines input, CSV/JSON Lines text
+writers, browser/WASM execution, binding starts, and named outputs continue to
+use the portable row runtime in automatic mode.
+
+The native v0.37 implementation promoted path-backed Arrow IPC file inputs,
 Arrow IPC stdin and host-byte inputs, `to_number` and `if_else` scalar
 lowering, binding-backed `inner`, `left`, `semi`, and `anti` single-key
 equi-joins, and compatible-schema binding-backed `union` with optional
@@ -2603,17 +2612,32 @@ by name or by position, with optional `distinct` when the existing native
 native dataframe before lazy transforms continue; PDL does not expose Arrow
 reader internals.
 
+Since version 0.38.0, the native subset also supports `right` and `full`
+single-key equi-joins for path-backed main inputs joined to native-safe
+binding-backed inputs. Null join keys do not match, output columns follow the
+row runtime's coalesced-key and `_right` suffix contract, right joins preserve
+right input order, and full joins preserve left rows before appending unmatched
+right rows sorted by key. Native row-preserving window coverage includes
+`row_number`, `rank`, `dense_rank`, and whole-partition `count`, `sum`, `mean`,
+`min`, and `max` over supported native expressions with at most one order key.
+The native implementation maps window results back to original dataframe rows;
+it does not use exploding or list-joining window mappings that would change PDL
+row order or shape.
+
 Unsupported aggregate functions, non-Arrow byte-backed input, non-Arrow stdin,
-binding starts, named outputs, multi-output execution, unsupported joins and
-unions, `pivot_longer`, `complete`, windows, data-dependent dynamic `col(...)`,
-uncertain coercions, and other unsupported expressions fall back to rows in
-automatic mode before native scans are opened when they are known to be
-unsupported. Forced native mode reports an `E1211` diagnostic with a stable
-unsupported native reason category instead of silently falling back.
+binding starts, named outputs, multi-output execution, non-equi joins, true
+composite-key join syntax, incompatible-schema union extensions,
+`pivot_longer`, `complete`, JSON Lines input, CSV/JSON Lines text writers,
+bounded-frame windows, offset/value/distribution windows, multi-key window
+ordering, data-dependent dynamic `col(...)`, uncertain coercions, and other
+unsupported expressions fall back to rows in automatic mode before native scans
+are opened when they are known to be unsupported. Forced native mode reports an
+`E1211` diagnostic with a stable unsupported native reason category instead of
+silently falling back.
 
 Browser/WASM builds MUST keep the native Polars feature set disabled. The WASM
 runtime MUST NOT enable `native-formats`, `polars-engine`, or any dependency
-path that pulls Polars into the wasm target dependency graph.
+path that pulls Polars, Arrow, or Parquet into the wasm target dependency graph.
 
 `filter`, `select`, `drop`, `rename`, and simple `mutate` can stream.
 
@@ -2629,7 +2653,7 @@ plan output also includes the same facts. Observability MUST NOT write to binary
 stdout during `run`; it is exposed through plan/manifest JSON, text plan output,
 stderr diagnostics, or benchmark sidecar reports.
 
-Version 0.37.0 defines the native coverage matrix in
+Version 0.38.0 defines the native coverage matrix in
 `docs/PDL_NATIVE_COVERAGE.csv` and documents it in
 `docs/PDL_NATIVE_COVERAGE.md`. Matrix statuses are limited to `native parity`,
 `native partial`, `row-only by design`, `planned native`, `unsupported`, and
@@ -2793,7 +2817,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.37.0` LSP implementation provides diagnostics,
+The current `0.38.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3247,7 +3271,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.37.0"
+version = "0.38.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3281,14 +3305,17 @@ polars = { version = "0.53", default-features = false, features = [
     "abs",
     "concat_str",
     "csv",
+    "cum_agg",
     "fmt",
     "ipc_streaming",
     "lazy",
     "parquet",
+    "rank",
     "round_series",
     "semi_anti_join",
     "strings",
     "temporal",
+    "timezones",
 ] }
 tower-lsp = "0.20"
 lsp-types = "0.94.1"
@@ -4838,7 +4865,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.37.0.
+PDL source does not require an explicit version declaration in draft 0.38.0.
 
 The implementation SHOULD report supported language version.
 

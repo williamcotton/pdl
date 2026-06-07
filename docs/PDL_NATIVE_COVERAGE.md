@@ -1,9 +1,9 @@
 # PDL Native Coverage Matrix
 
-Status: v0.37 source of truth
+Status: v0.38 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
-This matrix records what the native execution strategy may claim in v0.37. The
+This matrix records what the native execution strategy may claim in v0.38. The
 portable row runtime remains the semantic reference. A matrix row may use only
 one of these statuses:
 
@@ -27,14 +27,14 @@ boundary changes status, update the CSV and the tests in the same change.
 | `select` | native parity | Row-preserving projection and aliasing. |
 | `drop` | native parity | Row-preserving projection. |
 | `rename` | native parity | Row-preserving aliasing. |
-| `mutate` | native partial | Supported scalar expressions lower to native with parallel assignment semantics. |
+| `mutate` | native partial | Supported scalar expressions and supported row-preserving window expressions lower to native with parallel assignment semantics. |
 | `group_by` | native partial | Native only when followed by supported aggregate coverage. |
 | `agg` | native partial | `count`, `sum`, `mean`, `min`, `max`, and `count_distinct` over supported expressions. |
 | `sort` | native parity | Blocking stage with deterministic sort options. |
 | `limit` | native parity | Row-preserving limit. |
 | `distinct` | native parity | Stable first-row distinct. |
-| `join` | native partial | Native covers path-backed main inputs joined to native-safe binding inputs for `inner`/`left`/`semi`/`anti` single-key equi-joins; right/full and composite-key language support stay row-only. |
-| `union` | native partial | Native covers compatible-schema binding inputs by name or position with optional `distinct`; incompatible schemas and browser byte boundaries stay row-only. |
+| `join` | native partial | Native covers path-backed main inputs joined to native-safe binding inputs for `inner`/`left`/`right`/`full`/`semi`/`anti` single-key equi-joins; non-equi and true composite-key syntax stay row-only. |
+| `union` | native partial | Native covers compatible-schema binding inputs by name or position with optional `distinct`; incompatible schemas, language-level null padding, and browser byte boundaries stay row-only. |
 | `pivot_longer` | row-only by design | Row runtime preserves deterministic long output and mixed value behavior. |
 | `complete` | row-only by design | Row runtime preserves key expansion and fill expression semantics. |
 | `save` | native partial | Binary Parquet and Arrow sinks use native direct writers; CSV/JSON Lines use the row-format writer. |
@@ -56,7 +56,7 @@ boundary changes status, update the CSV and the tests in the same change.
 | cast-style functions | native partial | `to_number` lowers natively with row-identical whitespace, parse-failure, and null behavior; other cast-style functions remain row-only. |
 | conditional functions | native partial | `if_else` lowers natively for supported native condition and branch expressions; typed native branch output must remain compatible. |
 | aggregate arguments | native partial | Supported scalar expressions lower for `count`, `sum`, `mean`, `min`, `max`, and `count_distinct`. |
-| window expressions | row-only by design | Window parity is deferred. |
+| window expressions | native partial | `row_number`, `rank`, `dense_rank`, and whole-partition `count`, `sum`, `mean`, `min`, and `max` lower natively for row-preserving mutate windows with at most one order key; bounded frames, offset/value windows, distribution windows, and multi-key ordering stay row-only. |
 
 ## Source Coverage
 
@@ -88,6 +88,6 @@ boundary changes status, update the CSV and the tests in the same change.
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| WASM | row-only by design | Polars, Arrow native readers, Parquet, object-store, and native filesystem assumptions are excluded. |
+| WASM | row-only by design | Polars, Arrow, Parquet, object-store, and native filesystem assumptions are excluded from the wasm target graph. |
 | LSP/editor | row-only by design | Language services expose no native dataframe internals. |
 | PDL-to-Algraf Arrow IPC | native partial | PDL emits Arrow IPC stream; Algraf consumes it across the process boundary. |

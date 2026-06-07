@@ -2,7 +2,8 @@ use pdl_core::{codes, has_errors, Diagnostic, Span};
 use pdl_data::DataFormat;
 use pdl_driver::{PreparedProgram, SinkDescriptor, SourceDescriptor};
 use pdl_semantics::{
-    AggItemIr, ExprIr, JoinKindIr, PipelineIr, PipelineStartIr, ProgramIr, StageIr,
+    AggItemIr, ExprIr, FrameBoundIr, PipelineIr, PipelineStartIr, ProgramIr, StageIr,
+    WindowFrameIr, WindowSpecIr,
 };
 use std::collections::BTreeSet;
 
@@ -554,13 +555,7 @@ fn native_pipeline_unsupported_reason(
                 return Some(NativeUnsupportedReason::SaveNotTerminal);
             }
             StageIr::Save { .. } => {}
-            StageIr::Join { source, kind, .. } => {
-                if !matches!(
-                    kind,
-                    JoinKindIr::Inner | JoinKindIr::Left | JoinKindIr::Semi | JoinKindIr::Anti
-                ) {
-                    return Some(NativeUnsupportedReason::Stage);
-                }
+            StageIr::Join { source, .. } => {
                 let Some(binding) = prepared
                     .analysis
                     .ir
@@ -679,7 +674,12 @@ fn native_expr_unsupported_reason(expr: &ExprIr) -> Option<NativeUnsupportedReas
         ExprIr::Binary { left, right, .. } => {
             native_expr_unsupported_reason(left).or_else(|| native_expr_unsupported_reason(right))
         }
-        ExprIr::Window { .. } => Some(NativeUnsupportedReason::WindowExpression),
+        ExprIr::Window {
+            function,
+            args,
+            spec,
+            ..
+        } => native_window_unsupported_reason(function, args, spec),
         ExprIr::Call { name, args, .. } => {
             if name == "col" {
                 return match args.as_slice() {
@@ -714,6 +714,40 @@ fn native_expr_unsupported_reason(expr: &ExprIr) -> Option<NativeUnsupportedReas
     }
 }
 
+fn native_window_unsupported_reason(
+    function: &str,
+    args: &[ExprIr],
+    spec: &WindowSpecIr,
+) -> Option<NativeUnsupportedReason> {
+    if spec.order_by.len() > 1 {
+        return Some(NativeUnsupportedReason::WindowExpression);
+    }
+    match function {
+        "row_number" if args.is_empty() => None,
+        "rank" | "dense_rank" if args.is_empty() && spec.order_by.len() == 1 => None,
+        "count" if args.is_empty() => native_whole_partition_window_reason(spec),
+        "count" if args.len() == 1 => native_whole_partition_window_reason(spec)
+            .or_else(|| native_expr_unsupported_reason(&args[0])),
+        "sum" | "mean" | "min" | "max" if args.len() == 1 => {
+            native_whole_partition_window_reason(spec)
+                .or_else(|| native_expr_unsupported_reason(&args[0]))
+        }
+        _ => Some(NativeUnsupportedReason::WindowExpression),
+    }
+}
+
+fn native_whole_partition_window_reason(spec: &WindowSpecIr) -> Option<NativeUnsupportedReason> {
+    match spec.frame.as_ref() {
+        None => None,
+        Some(WindowFrameIr {
+            start: FrameBoundIr::UnboundedPreceding { .. },
+            end: FrameBoundIr::UnboundedFollowing { .. },
+            ..
+        }) => None,
+        Some(_) => Some(NativeUnsupportedReason::WindowExpression),
+    }
+}
+
 fn blocking_stages(pipeline: &PipelineIr) -> Vec<String> {
     pipeline
         .stages
@@ -726,6 +760,11 @@ fn blocking_stages(pipeline: &PipelineIr) -> Vec<String> {
             StageIr::Union { .. } => Some("union"),
             StageIr::PivotLonger { .. } => Some("pivot_longer"),
             StageIr::Complete { .. } => Some("complete"),
+            StageIr::Mutate { items, .. }
+                if items.iter().any(|item| expr_contains_window(&item.expr)) =>
+            {
+                Some("window")
+            }
             StageIr::Filter { .. }
             | StageIr::Select { .. }
             | StageIr::Drop { .. }
@@ -738,6 +777,23 @@ fn blocking_stages(pipeline: &PipelineIr) -> Vec<String> {
         })
         .map(ToString::to_string)
         .collect()
+}
+
+fn expr_contains_window(expr: &ExprIr) -> bool {
+    match expr {
+        ExprIr::Window { .. } => true,
+        ExprIr::Call { args, .. } => args.iter().any(expr_contains_window),
+        ExprIr::Unary { expr, .. } => expr_contains_window(expr),
+        ExprIr::Binary { left, right, .. } => {
+            expr_contains_window(left) || expr_contains_window(right)
+        }
+        ExprIr::Quoted { .. }
+        | ExprIr::Number { .. }
+        | ExprIr::Bool { .. }
+        | ExprIr::Null { .. }
+        | ExprIr::Ident { .. }
+        | ExprIr::Context { .. } => false,
+    }
 }
 
 fn required_source_columns(
@@ -868,10 +924,17 @@ fn collect_expr_columns(expr: &ExprIr, columns: &mut BTreeSet<String>) {
                 }
             }
         }
-        ExprIr::Call { args, .. } | ExprIr::Window { args, .. } => {
+        ExprIr::Call { args, .. } => {
             for arg in args {
                 collect_expr_columns(arg, columns);
             }
+        }
+        ExprIr::Window { args, spec, .. } => {
+            for arg in args {
+                collect_expr_columns(arg, columns);
+            }
+            columns.extend(spec.partition_by.iter().cloned());
+            columns.extend(spec.order_by.iter().map(|item| item.column.clone()));
         }
         ExprIr::Unary { expr, .. } => collect_expr_columns(expr, columns),
         ExprIr::Binary { left, right, .. } => {
@@ -1002,16 +1065,11 @@ load "sales.csv"
 
     #[test]
     fn forced_native_plan_reports_unsupported_reason_without_selecting_rows() {
-        let io = InMemoryDriverIo::default()
-            .with_schema("memory/sales.csv", ["customer_id", "amount"])
-            .with_schema("memory/customers.csv", ["customer_id", "segment"]);
+        let io = InMemoryDriverIo::default().with_schema("memory/sales.csv", ["region", "amount"]);
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
-            r#"let customers =
-  load "customers.csv"
-
-load "sales.csv"
-  | join customers on customer_id kind full"#,
+            r#"load "sales.csv"
+  | pivot_longer amount names_to metric values_to value"#,
             &io,
         );
 
@@ -1068,7 +1126,7 @@ load "sales.csv"
         }
         assert!(
             planned_native_rows.is_empty(),
-            "v0.37 coverage matrix must close planned-native rows: {planned_native_rows:?}"
+            "v0.38 coverage matrix must close planned-native rows: {planned_native_rows:?}"
         );
         for stage in [
             "load",

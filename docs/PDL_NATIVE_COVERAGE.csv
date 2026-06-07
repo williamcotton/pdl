@@ -4,14 +4,14 @@ stage,filter,native parity,supported scalar expressions lower to native predicat
 stage,select,native parity,row-preserving projection and aliasing
 stage,drop,native parity,row-preserving projection
 stage,rename,native parity,row-preserving aliasing
-stage,mutate,native partial,supported scalar expressions lower to native with parallel assignment semantics
+stage,mutate,native partial,supported scalar expressions and supported row-preserving window expressions lower to native with parallel assignment semantics
 stage,group_by,native partial,native only when followed by supported aggregate coverage
 stage,agg,native partial,count/sum/mean/min/max/count_distinct over supported expressions
 stage,sort,native parity,blocking stage with deterministic sort options
 stage,limit,native parity,row-preserving limit
 stage,distinct,native parity,stable first-row distinct
-stage,join,native partial,native covers path-backed main inputs joined to native-safe binding inputs for inner/left/semi/anti single-key equi-joins; right/full and composite-key language support stay row-only
-stage,union,native partial,native covers compatible-schema binding inputs by name or position with optional distinct; incompatible schemas and browser byte boundaries stay row-only
+stage,join,native partial,native covers path-backed main inputs joined to native-safe binding inputs for inner/left/right/full/semi/anti single-key equi-joins; non-equi and true composite-key syntax stay row-only
+stage,union,native partial,native covers compatible-schema binding inputs by name or position with optional distinct; incompatible schemas language-level null padding and browser byte boundaries stay row-only
 stage,pivot_longer,row-only by design,row runtime preserves deterministic long output and mixed value behavior
 stage,complete,row-only by design,row runtime preserves key expansion/fill expression semantics
 stage,save,native partial,binary Parquet/Arrow sinks use native direct writers; CSV/JSON Lines use row-format writer
@@ -28,7 +28,7 @@ expression,numeric functions,native partial,abs and round lower natively; uncert
 expression,cast-style functions,native partial,to_number lowers natively with row-identical whitespace parse-failure and null behavior; other cast-style functions remain row-only
 expression,conditional functions,native partial,if_else lowers natively for supported native condition and branch expressions; typed native branch output must remain compatible
 expression,aggregate arguments,native partial,supported scalar expressions lower for count/sum/mean/min/max/count_distinct
-expression,window expressions,row-only by design,window parity is deferred
+expression,window expressions,native partial,row_number rank dense_rank and whole-partition count/sum/mean/min/max lower natively for row-preserving mutate windows with at most one order key; bounded frames offset/value windows distribution windows and multi-key ordering stay row-only
 source,path-backed CSV,native parity,Polars lazy CSV scan is eligible
 source,path-backed Parquet,native parity,Polars lazy Parquet scan is eligible
 source,path-backed Arrow IPC file,native partial,Arrow IPC file is read into the native dataframe path then the lazy pipeline continues
@@ -45,6 +45,6 @@ sink,JSON Lines,row-only by design,text formatting remains PDL-visible
 sink,Parquet,native parity,native direct writer
 sink,Arrow IPC file,native parity,native direct writer
 sink,Arrow IPC stream,native parity,native direct writer
-host,WASM,row-only by design,Polars Arrow native readers Parquet object-store and native filesystem assumptions are excluded
+host,WASM,row-only by design,Polars Arrow Parquet object-store and native filesystem assumptions are excluded from the wasm target graph
 host,LSP/editor,row-only by design,language services expose no native dataframe internals
 host,PDL-to-Algraf Arrow IPC,native partial,PDL emits Arrow IPC stream; Algraf consumes it across the process boundary

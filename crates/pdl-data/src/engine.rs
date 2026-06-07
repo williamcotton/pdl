@@ -97,6 +97,11 @@ pub enum DataExpr {
         function: DataScalarFunction,
         args: Vec<DataExpr>,
     },
+    Window {
+        function: DataWindowFunction,
+        args: Vec<DataExpr>,
+        spec: DataWindowSpec,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -146,6 +151,25 @@ pub enum DataScalarFunction {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct DataWindowSpec {
+    pub partition_by: Vec<String>,
+    pub order_by: Vec<SortSpec>,
+    pub row_index: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DataWindowFunction {
+    RowNumber,
+    Rank,
+    DenseRank,
+    Count,
+    Sum,
+    Mean,
+    Min,
+    Max,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct DataAggItem {
     pub function: String,
     pub args: Vec<DataExpr>,
@@ -156,6 +180,8 @@ pub struct DataAggItem {
 pub enum DataJoinKind {
     Inner,
     Left,
+    Right,
+    Full,
     Semi,
     Anti,
 }
@@ -258,14 +284,36 @@ impl DataPlan {
             DataPlanInner::Rows(table) => Ok(Self::from_table(mutate_rows(table, items)?)),
             #[cfg(feature = "polars-engine")]
             DataPlanInner::Native(plan) => {
+                let row_index_name = items
+                    .iter()
+                    .any(|(_, expr)| data_expr_contains_row_number_window(expr))
+                    .then(|| native_hidden_column_name(&plan.plan, plan.format))
+                    .transpose()?;
+                let native_plan = if let Some(name) = &row_index_name {
+                    plan.plan.with_row_index(name.clone(), None)
+                } else {
+                    plan.plan
+                };
                 let expressions = items
                     .iter()
-                    .map(|(column, expr)| Ok(native_expr(expr)?.alias(column)))
+                    .map(|(column, expr)| {
+                        let expr = row_index_name
+                            .as_deref()
+                            .map(|name| data_expr_with_window_row_index(expr, name))
+                            .unwrap_or_else(|| expr.clone());
+                        Ok(native_expr(&expr)?.alias(column))
+                    })
                     .collect::<Result<Vec<_>, Diagnostic>>()?;
+                let native_plan = native_plan.with_columns(expressions);
+                let native_plan = if let Some(name) = &row_index_name {
+                    native_plan.drop(native::cols([name.as_str()]))
+                } else {
+                    native_plan
+                };
                 Ok(Self {
                     inner: DataPlanInner::Native(NativePlan {
                         format: plan.format,
-                        plan: plan.plan.with_columns(expressions),
+                        plan: native_plan,
                     }),
                 })
             }
@@ -290,7 +338,7 @@ impl DataPlan {
                     .collect::<Vec<_>>();
                 let nulls_last = specs
                     .iter()
-                    .map(|spec| spec.nulls == NullsOrder::Last)
+                    .map(|spec| native_sort_nulls_last(spec.direction, spec.nulls))
                     .collect::<Vec<_>>();
                 let options = native::SortMultipleOptions {
                     descending,
@@ -396,26 +444,47 @@ impl DataPlan {
         match (self.inner, right.inner) {
             #[cfg(feature = "polars-engine")]
             (DataPlanInner::Native(left), DataPlanInner::Native(right)) => {
+                if _kind == DataJoinKind::Full {
+                    return native_full_join(left, right, _left_key, _right_key);
+                }
+                let output_selection =
+                    native_join_output_selection(&left, &right, _left_key, _right_key, _kind)?;
                 let how = match _kind {
                     DataJoinKind::Inner => native::JoinType::Inner,
                     DataJoinKind::Left => native::JoinType::Left,
+                    DataJoinKind::Right => native::JoinType::Right,
+                    DataJoinKind::Full => unreachable!("handled full join"),
                     DataJoinKind::Semi => native::JoinType::Semi,
                     DataJoinKind::Anti => native::JoinType::Anti,
+                };
+                let maintain_order = match _kind {
+                    DataJoinKind::Inner
+                    | DataJoinKind::Left
+                    | DataJoinKind::Semi
+                    | DataJoinKind::Anti => native::MaintainOrderJoin::Left,
+                    DataJoinKind::Right => native::MaintainOrderJoin::Right,
+                    DataJoinKind::Full => native::MaintainOrderJoin::LeftRight,
+                };
+                let joined = left
+                    .plan
+                    .join_builder()
+                    .with(right.plan)
+                    .left_on([native::col(_left_key)])
+                    .right_on([native::col(_right_key)])
+                    .how(how)
+                    .suffix("_right")
+                    .coalesce(native::JoinCoalesce::CoalesceColumns)
+                    .join_nulls(false)
+                    .maintain_order(maintain_order)
+                    .finish();
+                let joined = match output_selection {
+                    Some(selection) => joined.select(selection),
+                    None => joined,
                 };
                 Ok(Self {
                     inner: DataPlanInner::Native(NativePlan {
                         format: left.format,
-                        plan: left
-                            .plan
-                            .join_builder()
-                            .with(right.plan)
-                            .left_on([native::col(_left_key)])
-                            .right_on([native::col(_right_key)])
-                            .how(how)
-                            .suffix("_right")
-                            .join_nulls(false)
-                            .maintain_order(native::MaintainOrderJoin::Left)
-                            .finish(),
+                        plan: joined,
                     }),
                 })
             }
@@ -507,6 +576,271 @@ impl DataPlan {
             #[cfg(feature = "polars-engine")]
             DataPlanInner::Native(plan) => write_native_to_sink(plan, sink),
         }
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_full_join(
+    left: NativePlan,
+    right: NativePlan,
+    left_key: &str,
+    right_key: &str,
+) -> Result<DataPlan, Diagnostic> {
+    let left_schema = left
+        .plan
+        .clone()
+        .collect_schema()
+        .map_err(native_collect_error(left.format))?;
+    let right_schema = right
+        .plan
+        .clone()
+        .collect_schema()
+        .map_err(native_collect_error(right.format))?;
+    let left_names = left_schema
+        .iter_names()
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+    let right_names = right_schema
+        .iter_names()
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+    let right_non_keys = native_join_right_outputs(&left_names, &right_names, right_key)?;
+
+    let left_rows = left
+        .plan
+        .clone()
+        .join_builder()
+        .with(right.plan.clone())
+        .left_on([native::col(left_key)])
+        .right_on([native::col(right_key)])
+        .how(native::JoinType::Left)
+        .suffix("_right")
+        .coalesce(native::JoinCoalesce::CoalesceColumns)
+        .join_nulls(false)
+        .maintain_order(native::MaintainOrderJoin::Left)
+        .finish();
+
+    let mut right_only_selection = left_names
+        .iter()
+        .map(|column| {
+            if column == left_key {
+                native::col(right_key).alias(column)
+            } else {
+                native::lit(native::NULL).alias(column)
+            }
+        })
+        .collect::<Vec<_>>();
+    right_only_selection.extend(
+        right_non_keys
+            .iter()
+            .map(|(source, output)| native::col(source).alias(output)),
+    );
+    let output_names = left_names
+        .iter()
+        .cloned()
+        .chain(right_non_keys.iter().map(|(_, output)| output.clone()))
+        .collect::<Vec<_>>();
+    let sort_key = native_hidden_column_name_from_names(&output_names, "__pdl_full_join_right_key");
+    let right_only = right
+        .plan
+        .join_builder()
+        .with(left.plan)
+        .left_on([native::col(right_key)])
+        .right_on([native::col(left_key)])
+        .how(native::JoinType::Anti)
+        .join_nulls(false)
+        .maintain_order(native::MaintainOrderJoin::Left)
+        .finish()
+        .select(right_only_selection)
+        .with_column(
+            native::col(left_key)
+                .cast(native::DataType::String)
+                .alias(&sort_key),
+        )
+        .sort(
+            [&sort_key],
+            native::SortMultipleOptions {
+                descending: vec![false],
+                nulls_last: vec![false],
+                maintain_order: true,
+                ..Default::default()
+            },
+        )
+        .drop(native::cols([sort_key.as_str()]));
+
+    let plan = native::concat(
+        [left_rows, right_only],
+        native::UnionArgs {
+            parallel: false,
+            strict: false,
+            to_supertypes: true,
+            maintain_order: true,
+            ..Default::default()
+        },
+    )
+    .map_err(native_collect_error(left.format))?;
+
+    Ok(DataPlan {
+        inner: DataPlanInner::Native(NativePlan {
+            format: left.format,
+            plan,
+        }),
+    })
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_join_output_selection(
+    left: &NativePlan,
+    right: &NativePlan,
+    left_key: &str,
+    right_key: &str,
+    kind: DataJoinKind,
+) -> Result<Option<Vec<native::Expr>>, Diagnostic> {
+    if matches!(kind, DataJoinKind::Semi | DataJoinKind::Anti) {
+        return Ok(None);
+    }
+    let left_schema = left
+        .plan
+        .clone()
+        .collect_schema()
+        .map_err(native_collect_error(left.format))?;
+    let right_schema = right
+        .plan
+        .clone()
+        .collect_schema()
+        .map_err(native_collect_error(right.format))?;
+    let left_names = left_schema
+        .iter_names()
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+    let right_names = right_schema
+        .iter_names()
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+    let right_outputs = native_join_right_outputs(&left_names, &right_names, right_key)?;
+    let mut selection = left_names
+        .iter()
+        .map(|name| {
+            if kind == DataJoinKind::Right && name == left_key && left_key != right_key {
+                native::col(right_key).alias(left_key)
+            } else {
+                native::col(name)
+            }
+        })
+        .collect::<Vec<_>>();
+    selection.extend(right_outputs.iter().map(|(_, output)| native::col(output)));
+    Ok(Some(selection))
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_join_right_outputs(
+    left_names: &[String],
+    right_names: &[String],
+    right_key: &str,
+) -> Result<Vec<(String, String)>, Diagnostic> {
+    let mut output_names = left_names.to_vec();
+    let mut outputs = Vec::new();
+    for column in right_names {
+        if column == right_key {
+            continue;
+        }
+        let mut output = column.clone();
+        if output_names.iter().any(|existing| existing == &output) {
+            output.push_str("_right");
+            if output_names.iter().any(|existing| existing == &output) {
+                return Err(unsupported_native_operation("join output column collision"));
+            }
+        }
+        output_names.push(output.clone());
+        outputs.push((column.clone(), output));
+    }
+    Ok(outputs)
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_hidden_column_name(
+    plan: &native::LazyFrame,
+    format: DataFormat,
+) -> Result<String, Diagnostic> {
+    let schema = plan
+        .clone()
+        .collect_schema()
+        .map_err(native_collect_error(format))?;
+    let names = schema
+        .iter_names()
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+    Ok(native_hidden_column_name_from_names(
+        &names,
+        "__pdl_window_row_index",
+    ))
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_hidden_column_name_from_names(names: &[String], base: &str) -> String {
+    let mut candidate = base.to_string();
+    let mut suffix = 1usize;
+    while names.iter().any(|name| name == &candidate) {
+        candidate = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    candidate
+}
+
+#[cfg(feature = "polars-engine")]
+fn data_expr_contains_row_number_window(expr: &DataExpr) -> bool {
+    match expr {
+        DataExpr::Window { function, .. } if *function == DataWindowFunction::RowNumber => true,
+        DataExpr::Unary { expr, .. } => data_expr_contains_row_number_window(expr),
+        DataExpr::Binary { left, right, .. } => {
+            data_expr_contains_row_number_window(left)
+                || data_expr_contains_row_number_window(right)
+        }
+        DataExpr::Call { args, .. } | DataExpr::Window { args, .. } => {
+            args.iter().any(data_expr_contains_row_number_window)
+        }
+        DataExpr::Column(_) | DataExpr::Literal(_) => false,
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn data_expr_with_window_row_index(expr: &DataExpr, row_index: &str) -> DataExpr {
+    match expr {
+        DataExpr::Unary { op, expr } => DataExpr::Unary {
+            op: *op,
+            expr: Box::new(data_expr_with_window_row_index(expr, row_index)),
+        },
+        DataExpr::Binary { left, op, right } => DataExpr::Binary {
+            left: Box::new(data_expr_with_window_row_index(left, row_index)),
+            op: *op,
+            right: Box::new(data_expr_with_window_row_index(right, row_index)),
+        },
+        DataExpr::Call { function, args } => DataExpr::Call {
+            function: *function,
+            args: args
+                .iter()
+                .map(|arg| data_expr_with_window_row_index(arg, row_index))
+                .collect(),
+        },
+        DataExpr::Window {
+            function,
+            args,
+            spec,
+        } => {
+            let mut spec = spec.clone();
+            if *function == DataWindowFunction::RowNumber {
+                spec.row_index = Some(row_index.to_string());
+            }
+            DataExpr::Window {
+                function: *function,
+                args: args
+                    .iter()
+                    .map(|arg| data_expr_with_window_row_index(arg, row_index))
+                    .collect(),
+                spec,
+            }
+        }
+        DataExpr::Column(_) | DataExpr::Literal(_) => expr.clone(),
     }
 }
 
@@ -911,6 +1245,7 @@ fn eval_row_expr(expr: &DataExpr, table: &Table, row: &Row) -> Result<Value, Dia
             eval_binary_value(left_value, *op, right_value)
         }
         DataExpr::Call { function, args } => eval_scalar_function(*function, args, table, row),
+        DataExpr::Window { .. } => Err(unsupported_native_operation("row data window expression")),
     }
 }
 
@@ -1216,7 +1551,189 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
                 }
             }
         },
+        DataExpr::Window {
+            function,
+            args,
+            spec,
+        } => native_window_expr(*function, args, spec)?,
     })
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_window_expr(
+    function: DataWindowFunction,
+    args: &[DataExpr],
+    spec: &DataWindowSpec,
+) -> Result<native::Expr, Diagnostic> {
+    match function {
+        DataWindowFunction::RowNumber => {
+            if !args.is_empty() {
+                return Err(unsupported_native_operation("row_number window arity"));
+            }
+            let Some(row_index) = &spec.row_index else {
+                return Err(unsupported_native_operation("row_number window row index"));
+            };
+            let row_number = native::col(row_index).cum_count(false);
+            native_window_over(row_number, spec, true)
+        }
+        DataWindowFunction::Rank => native_rank_window_expr(args, spec, native::RankMethod::Min),
+        DataWindowFunction::DenseRank => {
+            native_rank_window_expr(args, spec, native::RankMethod::Dense)
+        }
+        DataWindowFunction::Count if args.is_empty() => {
+            native_window_over(native::len(), spec, false)
+        }
+        DataWindowFunction::Count => {
+            let [arg] = args else {
+                return Err(unsupported_native_operation("count window arity"));
+            };
+            native_window_over(native_expr(arg)?.count(), spec, false)
+        }
+        DataWindowFunction::Sum
+        | DataWindowFunction::Mean
+        | DataWindowFunction::Min
+        | DataWindowFunction::Max => {
+            let [arg] = args else {
+                return Err(unsupported_native_operation("aggregate window arity"));
+            };
+            let expr = native_expr(arg)?;
+            let expr = match function {
+                DataWindowFunction::Sum => expr.sum(),
+                DataWindowFunction::Mean => expr.mean(),
+                DataWindowFunction::Min => expr.min(),
+                DataWindowFunction::Max => expr.max(),
+                DataWindowFunction::RowNumber
+                | DataWindowFunction::Rank
+                | DataWindowFunction::DenseRank
+                | DataWindowFunction::Count => unreachable!("handled aggregate window"),
+            };
+            native_window_over(expr, spec, false)
+        }
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_rank_window_expr(
+    args: &[DataExpr],
+    spec: &DataWindowSpec,
+    method: native::RankMethod,
+) -> Result<native::Expr, Diagnostic> {
+    if !args.is_empty() {
+        return Err(unsupported_native_operation("rank window arity"));
+    }
+    let [order] = spec.order_by.as_slice() else {
+        return Err(unsupported_native_operation("rank window order"));
+    };
+    let order_expr = native::col(&order.column);
+    let partition_by = native_partition_exprs(spec);
+    let descending = order.direction == SortDirection::Desc;
+    let nulls_first = !native_sort_nulls_last(order.direction, order.nulls);
+    let rank = native_window_over_partition(
+        order_expr
+            .clone()
+            .rank(native::RankOptions { method, descending }, None),
+        partition_by.clone(),
+    )?;
+    let null_count =
+        native_window_over_partition(order_expr.clone().is_null().sum(), partition_by.clone())?;
+    let non_null_count =
+        native_window_over_partition(order_expr.clone().is_not_null().sum(), partition_by.clone())?;
+
+    let expr = match method {
+        native::RankMethod::Min if nulls_first => native::when(order_expr.clone().is_null())
+            .then(native::lit(1u32))
+            .otherwise(rank + null_count),
+        native::RankMethod::Min => native::when(order_expr.clone().is_null())
+            .then(non_null_count + native::lit(1u32))
+            .otherwise(rank),
+        native::RankMethod::Dense if nulls_first => {
+            let null_offset = native::when(null_count.clone().gt(native::lit(0u32)))
+                .then(native::lit(1u32))
+                .otherwise(native::lit(0u32));
+            native::when(order_expr.clone().is_null())
+                .then(native::lit(1u32))
+                .otherwise(rank + null_offset)
+        }
+        native::RankMethod::Dense => {
+            let non_null_unique = native_window_over_partition(
+                order_expr.clone().drop_nulls().n_unique(),
+                partition_by,
+            )?;
+            native::when(order_expr.is_null())
+                .then(non_null_unique + native::lit(1u32))
+                .otherwise(rank)
+        }
+        _ => return Err(unsupported_native_operation("rank method")),
+    };
+    Ok(expr)
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_window_over(
+    expr: native::Expr,
+    spec: &DataWindowSpec,
+    include_order: bool,
+) -> Result<native::Expr, Diagnostic> {
+    let partition_by = native_partition_exprs(spec);
+    let order_by = if include_order {
+        native_window_order(spec)?
+    } else {
+        None
+    };
+    expr.over_with_options(
+        Some(partition_by),
+        order_by,
+        native::WindowMapping::GroupsToRows,
+    )
+    .map_err(native_window_error)
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_window_over_partition(
+    expr: native::Expr,
+    partition_by: Vec<native::Expr>,
+) -> Result<native::Expr, Diagnostic> {
+    expr.over_with_options(
+        Some(partition_by),
+        None::<(Vec<native::Expr>, native::SortOptions)>,
+        native::WindowMapping::GroupsToRows,
+    )
+    .map_err(native_window_error)
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_partition_exprs(spec: &DataWindowSpec) -> Vec<native::Expr> {
+    if spec.partition_by.is_empty() {
+        vec![native::lit(1i32)]
+    } else {
+        spec.partition_by.iter().map(native::col).collect()
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_window_order(
+    spec: &DataWindowSpec,
+) -> Result<Option<(Vec<native::Expr>, native::SortOptions)>, Diagnostic> {
+    match spec.order_by.as_slice() {
+        [] => Ok(None),
+        [item] => {
+            let options = native::SortOptions::default()
+                .with_order_descending(item.direction == SortDirection::Desc)
+                .with_nulls_last(native_sort_nulls_last(item.direction, item.nulls))
+                .with_multithreaded(false)
+                .with_maintain_order(true);
+            Ok(Some((vec![native::col(&item.column)], options)))
+        }
+        _ => Err(unsupported_native_operation("multi-key window order")),
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_sort_nulls_last(direction: SortDirection, nulls: NullsOrder) -> bool {
+    match direction {
+        SortDirection::Asc => nulls == NullsOrder::Last,
+        SortDirection::Desc => nulls == NullsOrder::First,
+    }
 }
 
 #[cfg(feature = "polars-engine")]
@@ -1367,6 +1884,15 @@ fn native_collect_error(format: DataFormat) -> impl FnOnce(native::PolarsError) 
             Span::zero(),
         )
     }
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_window_error(error: native::PolarsError) -> Diagnostic {
+    Diagnostic::error(
+        codes::E1211,
+        format!("native window expression failed: {error}"),
+        Span::zero(),
+    )
 }
 
 #[cfg(feature = "polars-engine")]
