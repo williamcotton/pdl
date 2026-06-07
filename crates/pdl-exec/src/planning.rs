@@ -1,7 +1,9 @@
 use pdl_core::{codes, has_errors, Diagnostic, Span};
 use pdl_data::DataFormat;
 use pdl_driver::{PreparedProgram, SinkDescriptor, SourceDescriptor};
-use pdl_semantics::{AggItemIr, ExprIr, PipelineIr, PipelineStartIr, ProgramIr, StageIr};
+use pdl_semantics::{
+    AggItemIr, ExprIr, JoinKindIr, PipelineIr, PipelineStartIr, ProgramIr, StageIr,
+};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -552,9 +554,43 @@ fn native_pipeline_unsupported_reason(
                 return Some(NativeUnsupportedReason::SaveNotTerminal);
             }
             StageIr::Save { .. } => {}
-            StageIr::Join { .. }
-            | StageIr::Union { .. }
-            | StageIr::PivotLonger { .. }
+            StageIr::Join { source, kind, .. } => {
+                if !matches!(
+                    kind,
+                    JoinKindIr::Inner | JoinKindIr::Left | JoinKindIr::Semi | JoinKindIr::Anti
+                ) {
+                    return Some(NativeUnsupportedReason::Stage);
+                }
+                let Some(binding) = prepared
+                    .analysis
+                    .ir
+                    .as_ref()
+                    .and_then(|ir| ir.bindings.iter().find(|binding| binding.name == *source))
+                else {
+                    return Some(NativeUnsupportedReason::DriverFacts);
+                };
+                if let Some(reason) =
+                    native_pipeline_unsupported_reason(prepared, &binding.pipeline)
+                {
+                    return Some(reason);
+                }
+            }
+            StageIr::Union { source, .. } => {
+                let Some(binding) = prepared
+                    .analysis
+                    .ir
+                    .as_ref()
+                    .and_then(|ir| ir.bindings.iter().find(|binding| binding.name == *source))
+                else {
+                    return Some(NativeUnsupportedReason::DriverFacts);
+                };
+                if let Some(reason) =
+                    native_pipeline_unsupported_reason(prepared, &binding.pipeline)
+                {
+                    return Some(reason);
+                }
+            }
+            StageIr::PivotLonger { .. }
             | StageIr::Complete { .. }
             | StageIr::Unsupported { .. } => return Some(NativeUnsupportedReason::Stage),
         }
@@ -570,20 +606,51 @@ fn native_load_unsupported_reason(
     let Some(input) = prepared.driver_plan.input_for_stage_span(stage_span) else {
         return Some(NativeUnsupportedReason::DriverFacts);
     };
-    if !matches!(input.source, SourceDescriptor::Path { .. }) {
-        return Some(NativeUnsupportedReason::SourceBoundary);
-    }
     let format = explicit_format
         .and_then(DataFormat::from_name)
+        .or_else(|| {
+            if matches!(input.source, SourceDescriptor::Stdin) {
+                prepared
+                    .stdin_format
+                    .as_deref()
+                    .and_then(DataFormat::from_name)
+            } else {
+                None
+            }
+        })
         .or(input.format.inferred_from_path)
+        .or_else(|| {
+            if matches!(input.source, SourceDescriptor::Stdin) {
+                prepared
+                    .stdin_bytes
+                    .as_deref()
+                    .and_then(|bytes| pdl_data::sniff_format_from_bytes(bytes).ok())
+            } else {
+                None
+            }
+        })
         .unwrap_or(DataFormat::Csv);
-    if matches!(
-        format,
-        DataFormat::Csv | DataFormat::Parquet | DataFormat::ArrowStream
-    ) {
-        None
-    } else {
-        Some(NativeUnsupportedReason::InputFormat)
+    match input.source {
+        SourceDescriptor::Path { .. } => {
+            if matches!(
+                format,
+                DataFormat::Csv
+                    | DataFormat::Parquet
+                    | DataFormat::ArrowFile
+                    | DataFormat::ArrowStream
+            ) {
+                None
+            } else {
+                Some(NativeUnsupportedReason::InputFormat)
+            }
+        }
+        SourceDescriptor::Stdin => {
+            if matches!(format, DataFormat::ArrowFile | DataFormat::ArrowStream) {
+                None
+            } else {
+                Some(NativeUnsupportedReason::SourceBoundary)
+            }
+        }
     }
 }
 
@@ -622,13 +689,19 @@ fn native_expr_unsupported_reason(expr: &ExprIr) -> Option<NativeUnsupportedReas
                 };
             }
             match name.as_str() {
-                "is_null" | "not_null" | "lower" | "upper" | "trim" | "abs" => {
+                "is_null" | "not_null" | "lower" | "upper" | "trim" | "to_number" | "abs" => {
                     let [arg] = args.as_slice() else {
                         return Some(NativeUnsupportedReason::ScalarFunctionArity);
                     };
                     native_expr_unsupported_reason(arg)
                 }
                 "coalesce" | "concat" => args.iter().find_map(native_expr_unsupported_reason),
+                "if_else" => match args.as_slice() {
+                    [condition, when_true, when_false] => native_expr_unsupported_reason(condition)
+                        .or_else(|| native_expr_unsupported_reason(when_true))
+                        .or_else(|| native_expr_unsupported_reason(when_false)),
+                    _ => Some(NativeUnsupportedReason::ScalarFunctionArity),
+                },
                 "round" => match args.as_slice() {
                     [arg] => native_expr_unsupported_reason(arg),
                     [arg, ExprIr::Number { .. }] => native_expr_unsupported_reason(arg),
@@ -923,11 +996,8 @@ load "sales.csv"
                 },
             ]
         );
-        assert_eq!(
-            plan.observability.fallback_reason,
-            Some(NativeUnsupportedReason::Stage)
-        );
-        assert_eq!(plan.observability.selected_engine, PlannedEngine::Row);
+        assert_eq!(plan.observability.fallback_reason, None);
+        assert_eq!(plan.observability.selected_engine, PlannedEngine::Native);
     }
 
     #[test]
@@ -941,7 +1011,7 @@ load "sales.csv"
   load "customers.csv"
 
 load "sales.csv"
-  | join customers on customer_id"#,
+  | join customers on customer_id kind full"#,
             &io,
         );
 
@@ -969,6 +1039,7 @@ load "sales.csv"
     fn native_coverage_matrix_uses_known_statuses_and_tracks_stage_rows() {
         let matrix = include_str!("../../../docs/PDL_NATIVE_COVERAGE.csv");
         let mut stage_rows = BTreeSet::new();
+        let mut planned_native_rows = Vec::new();
         for (index, line) in matrix.lines().enumerate() {
             if index == 0 {
                 assert_eq!(line, "area,item,status,notes");
@@ -991,7 +1062,14 @@ load "sales.csv"
             if fields[0] == "stage" {
                 stage_rows.insert(fields[1]);
             }
+            if fields[2] == "planned native" {
+                planned_native_rows.push(line);
+            }
         }
+        assert!(
+            planned_native_rows.is_empty(),
+            "v0.37 coverage matrix must close planned-native rows: {planned_native_rows:?}"
+        );
         for stage in [
             "load",
             "filter",

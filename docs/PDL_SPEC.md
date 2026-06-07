@@ -1,24 +1,36 @@
 # PDL Detailed Specification
 
-Status: Draft 0.36.0
+Status: Draft 0.37.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current released repository implementation line is `0.36.0`, tracked in
-`docs/V0_36_PLAN.md`. Version 0.36.0 closes the native execution maturity slice:
-it adds a first-class native coverage matrix, structured plan/manifest
-observability for engine choice and fallback reasons, repeated benchmark
-sampling with median/variance/memory fields, tracked PDL-to-Algraf Arrow IPC
-smoke coverage, native `count_distinct` aggregate lowering, and v0.36 release
-version stamps.
+The current released repository implementation line is `0.37.0`, tracked in
+`docs/V0_37_PLAN.md`. Version 0.37.0 closes the native language-gap slice for
+the highest-value whole-pipeline cases after the v0.36 native execution
+maturity release.
 
-The native v0.36 implementation supports Polars-backed `mutate` for the
-supported simple expression subset, extends native expression lowering for
-`filter`, `mutate`, and aggregate arguments, and writes Parquet, Arrow IPC file,
-and Arrow IPC stream sinks directly from native plans. CSV and JSON Lines output
-continue to use the row-format writer path so text formatting remains stable.
+The native v0.37 implementation promotes path-backed Arrow IPC file inputs,
+Arrow IPC stdin and host-byte inputs, `to_number` and `if_else` scalar
+lowering, binding-backed `inner`, `left`, `semi`, and `anti` single-key
+equi-joins, and compatible-schema binding-backed `union` with optional
+`distinct`. Windows, `pivot_longer`, `complete`, JSON Lines input, non-Arrow
+stdin and byte-backed readers, binding starts, named outputs, and unsupported
+join or union shapes continue to use the portable row runtime in automatic
+mode.
+
+Version 0.36.0 closes the native execution maturity slice tracked in
+`docs/V0_36_PLAN.md`: it adds a first-class native coverage matrix, structured
+plan/manifest observability for engine choice and fallback reasons, repeated
+benchmark sampling with median/variance/memory fields, tracked PDL-to-Algraf
+Arrow IPC smoke coverage, native `count_distinct` aggregate lowering, and
+v0.36 release version stamps. The native v0.36 implementation supports
+Polars-backed `mutate` for the supported simple expression subset, extends
+native expression lowering for `filter`, `mutate`, and aggregate arguments,
+and writes Parquet, Arrow IPC file, and Arrow IPC stream sinks directly from
+native plans. CSV and JSON Lines output continue to use the row-format writer
+path so text formatting remains stable.
 
 Version 0.34.0 is a production native-pipeline release tracked in
 `docs/V0_34_PLAN.md`. Its first implemented slice makes path-backed Arrow IPC
@@ -2574,13 +2586,30 @@ Since version 0.36.0, native aggregate coverage includes `count_distinct(expr)`
 over the supported native expression subset. Null values are excluded from the
 distinct count to match row runtime semantics.
 
-Unsupported aggregate functions, byte-backed input, stdin, bindings, named
-outputs, multi-output execution, joins, unions, `pivot_longer`, `complete`,
-windows, `to_number`, `if_else`, data-dependent dynamic `col(...)`, uncertain
-coercions, and other unsupported expressions fall back to rows in automatic
-mode before native scans are opened when they are known to be unsupported.
-Forced native mode reports an `E1211` diagnostic with a stable unsupported
-native reason category instead of silently falling back.
+Since version 0.37.0, the native subset also supports `to_number(expr)` and
+`if_else(condition, when_true, when_false)` over the supported native expression
+subset, path-backed Arrow IPC file inputs, Arrow IPC file/stream stdin bytes,
+Arrow IPC file/stream host bytes, and multi-input native pipelines where the
+main input uses a supported `join` or `union` against a native-safe
+binding-backed input. Native `if_else` preserves null-condition behavior for
+typed native branch outputs; branch result types must remain compatible with
+the native column model. Native `join` coverage is limited to `inner`, `left`,
+`semi`, and `anti` single-key equi-joins. Null join keys do not match,
+duplicate right non-key output names use the row runtime's `_right` suffix rule
+where right columns are emitted, and output order must match row runtime order
+for the promoted slice. Native `union` coverage is limited to compatible schemas
+by name or by position, with optional `distinct` when the existing native
+`distinct` semantics apply. Arrow IPC file/stream byte inputs may be read into a
+native dataframe before lazy transforms continue; PDL does not expose Arrow
+reader internals.
+
+Unsupported aggregate functions, non-Arrow byte-backed input, non-Arrow stdin,
+binding starts, named outputs, multi-output execution, unsupported joins and
+unions, `pivot_longer`, `complete`, windows, data-dependent dynamic `col(...)`,
+uncertain coercions, and other unsupported expressions fall back to rows in
+automatic mode before native scans are opened when they are known to be
+unsupported. Forced native mode reports an `E1211` diagnostic with a stable
+unsupported native reason category instead of silently falling back.
 
 Browser/WASM builds MUST keep the native Polars feature set disabled. The WASM
 runtime MUST NOT enable `native-formats`, `polars-engine`, or any dependency
@@ -2600,7 +2629,7 @@ plan output also includes the same facts. Observability MUST NOT write to binary
 stdout during `run`; it is exposed through plan/manifest JSON, text plan output,
 stderr diagnostics, or benchmark sidecar reports.
 
-Version 0.36.0 defines the native coverage matrix in
+Version 0.37.0 defines the native coverage matrix in
 `docs/PDL_NATIVE_COVERAGE.csv` and documents it in
 `docs/PDL_NATIVE_COVERAGE.md`. Matrix statuses are limited to `native parity`,
 `native partial`, `row-only by design`, `planned native`, `unsupported`, and
@@ -2764,7 +2793,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.36.0` LSP implementation provides diagnostics,
+The current `0.37.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3218,7 +3247,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.36.0"
+version = "0.37.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3257,6 +3286,7 @@ polars = { version = "0.53", default-features = false, features = [
     "lazy",
     "parquet",
     "round_series",
+    "semi_anti_join",
     "strings",
     "temporal",
 ] }
@@ -4808,7 +4838,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.36.0.
+PDL source does not require an explicit version declaration in draft 0.37.0.
 
 The implementation SHOULD report supported language version.
 

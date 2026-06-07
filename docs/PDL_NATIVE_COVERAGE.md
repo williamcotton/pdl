@@ -1,9 +1,9 @@
 # PDL Native Coverage Matrix
 
-Status: v0.36 source of truth
+Status: v0.37 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
-This matrix records what the native execution strategy may claim in v0.36. The
+This matrix records what the native execution strategy may claim in v0.37. The
 portable row runtime remains the semantic reference. A matrix row may use only
 one of these statuses:
 
@@ -22,7 +22,7 @@ boundary changes status, update the CSV and the tests in the same change.
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| `load` | native partial | Path-backed CSV, Parquet, and Arrow IPC stream are native; stdin and byte-backed host files are row-only. |
+| `load` | native partial | Path-backed CSV, Parquet, Arrow IPC file, and Arrow IPC stream are native. Stdin and byte-backed host Arrow IPC file/stream inputs are native; other stdin/byte formats are row-only. |
 | `filter` | native parity | Supported scalar expressions lower to native predicates. |
 | `select` | native parity | Row-preserving projection and aliasing. |
 | `drop` | native parity | Row-preserving projection. |
@@ -33,8 +33,8 @@ boundary changes status, update the CSV and the tests in the same change.
 | `sort` | native parity | Blocking stage with deterministic sort options. |
 | `limit` | native parity | Row-preserving limit. |
 | `distinct` | native parity | Stable first-row distinct. |
-| `join` | planned native | Row runtime is reference; native join parity deferred for duplicate columns, null keys, and composite keys. |
-| `union` | planned native | Row runtime is reference; native union parity deferred for schema, type, and null-padding rules. |
+| `join` | native partial | Native covers path-backed main inputs joined to native-safe binding inputs for `inner`/`left`/`semi`/`anti` single-key equi-joins; right/full and composite-key language support stay row-only. |
+| `union` | native partial | Native covers compatible-schema binding inputs by name or position with optional `distinct`; incompatible schemas and browser byte boundaries stay row-only. |
 | `pivot_longer` | row-only by design | Row runtime preserves deterministic long output and mixed value behavior. |
 | `complete` | row-only by design | Row runtime preserves key expansion and fill expression semantics. |
 | `save` | native partial | Binary Parquet and Arrow sinks use native direct writers; CSV/JSON Lines use the row-format writer. |
@@ -53,8 +53,8 @@ boundary changes status, update the CSV and the tests in the same change.
 | null checks | native parity | `is_null` and `not_null` lower natively. |
 | string functions | native partial | `concat`, `lower`, `upper`, and `trim` lower natively; other string functions are row-only. |
 | numeric functions | native partial | `abs` and `round` lower natively; uncertain coercions are row-only. |
-| cast-style functions | row-only by design | `to_number` remains row-only until parse/null/format parity is promoted. |
-| conditional functions | row-only by design | `if_else` remains row-only until branch/null semantics are promoted. |
+| cast-style functions | native partial | `to_number` lowers natively with row-identical whitespace, parse-failure, and null behavior; other cast-style functions remain row-only. |
+| conditional functions | native partial | `if_else` lowers natively for supported native condition and branch expressions; typed native branch output must remain compatible. |
 | aggregate arguments | native partial | Supported scalar expressions lower for `count`, `sum`, `mean`, `min`, `max`, and `count_distinct`. |
 | window expressions | row-only by design | Window parity is deferred. |
 
@@ -64,12 +64,12 @@ boundary changes status, update the CSV and the tests in the same change.
 | --- | --- | --- |
 | path-backed CSV | native parity | Polars lazy CSV scan is eligible. |
 | path-backed Parquet | native parity | Polars lazy Parquet scan is eligible. |
-| path-backed Arrow IPC file | unsupported | Arrow IPC file scan is row-only until native file reader parity is added. |
+| path-backed Arrow IPC file | native partial | Arrow IPC file is read into the native dataframe path, then the lazy pipeline continues. |
 | path-backed Arrow IPC stream | native partial | Stream file is read into a native dataframe, then lazy pipeline continues. |
 | JSON Lines | row-only by design | Schema inference and text semantics stay on the row runtime. |
-| stdin | row-only by design | Keeps stdout purity and bounded buffering policy simple. |
-| byte-backed host files | row-only by design | Browser and host byte boundaries stay native-free. |
-| named bindings | row-only by design | Native starts from a single path-backed main load only. |
+| stdin | native partial | Arrow IPC file/stream stdin bytes are native; CSV, JSON Lines, Parquet, and unknown stdin bytes stay row-only. |
+| byte-backed host files | native partial | Arrow IPC file/stream host bytes are native when no real filesystem path is available; other host byte formats stay row-only. |
+| named bindings | native partial | Binding-backed inputs are native for supported join/union right sides; binding starts and named outputs remain row-only. |
 
 ## Sink Coverage
 

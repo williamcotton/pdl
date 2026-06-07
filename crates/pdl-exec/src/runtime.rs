@@ -1,9 +1,9 @@
 use pdl_core::{codes, Diagnostic, Span};
 use pdl_data::{
     compare_values, read_table_from_bytes, sniff_format_from_bytes, DataAggItem, DataBackend,
-    DataBinaryOp, DataExpr, DataFormat, DataLiteral, DataPlan, DataScalarFunction, DataSink,
-    DataSource, DataUnaryOp, NullsOrder as DataNullsOrder, Row, SortDirection as DataSortDirection,
-    SortSpec, Table, Value,
+    DataBinaryOp, DataExpr, DataFormat, DataJoinKind, DataLiteral, DataPlan, DataScalarFunction,
+    DataSink, DataSource, DataUnaryOp, NullsOrder as DataNullsOrder, Row,
+    SortDirection as DataSortDirection, SortSpec, Table, Value,
 };
 use pdl_driver::{
     DriverIo, FormatDecision, OsDriverIo, PlanInputSource, PlanOutputSink, PreparedProgram,
@@ -158,7 +158,7 @@ pub fn run_prepared_with_io_and_context_and_engine(
     }
 
     if !matches!(engine, ExecutionEngine::Row) {
-        match try_execute_native(prepared, ir, &plan, &context) {
+        match try_execute_native(prepared, ir, &plan, &context, io) {
             Ok(result) => return result,
             Err(diagnostic) if matches!(engine, ExecutionEngine::Native) => {
                 return RunResult {
@@ -337,29 +337,31 @@ fn try_execute_native(
     ir: &pdl_semantics::ProgramIr,
     plan: &ExecutionPlan,
     context: &BTreeMap<String, Value>,
+    io: &dyn DriverIo,
 ) -> Result<RunResult, Diagnostic> {
     check_native_program_eligibility(prepared, ir, plan, context)?;
     let main = ir
         .main
         .as_ref()
         .ok_or_else(|| unsupported_native_pipeline("no runnable main pipeline"))?;
-    let stdout = match execute_native_pipeline(prepared, main, plan, context)? {
-        NativePipelineResult::Plan(data_plan) => {
-            if let Some(stdout_format) = plan.stdout_format {
-                data_plan
-                    .write_to_sink(DataSink::Bytes {
-                        format: stdout_format,
-                    })?
-                    .ok_or_else(|| {
-                        unsupported_native_pipeline("native stdout bytes were not returned")
-                    })?
-                    .into()
-            } else {
-                None
+    let stdout =
+        match execute_native_pipeline(prepared, ir, main, plan, context, io, &mut Vec::new())? {
+            NativePipelineResult::Plan(data_plan) => {
+                if let Some(stdout_format) = plan.stdout_format {
+                    data_plan
+                        .write_to_sink(DataSink::Bytes {
+                            format: stdout_format,
+                        })?
+                        .ok_or_else(|| {
+                            unsupported_native_pipeline("native stdout bytes were not returned")
+                        })?
+                        .into()
+                } else {
+                    None
+                }
             }
-        }
-        NativePipelineResult::Completed { stdout } => stdout,
-    };
+            NativePipelineResult::Completed { stdout } => stdout,
+        };
     Ok(RunResult {
         stdout,
         named_outputs: Vec::new(),
@@ -447,9 +449,45 @@ fn check_native_pipeline_eligibility(
                 }
                 check_native_save_eligibility(prepared, execution_plan, *span, format.as_deref())?;
             }
-            StageIr::Join { .. }
-            | StageIr::Union { .. }
-            | StageIr::PivotLonger { .. }
+            StageIr::Join { source, kind, .. } => {
+                if !matches!(
+                    kind,
+                    JoinKindIr::Inner | JoinKindIr::Left | JoinKindIr::Semi | JoinKindIr::Anti
+                ) {
+                    return Err(unsupported_native_pipeline(
+                        "pipeline stage is not supported by native execution",
+                    ));
+                }
+                let binding = ir_binding(prepared, source).ok_or_else(|| {
+                    Diagnostic::error(
+                        codes::E1007,
+                        format!("unknown binding `{source}`"),
+                        Span::zero(),
+                    )
+                })?;
+                check_native_pipeline_eligibility(
+                    prepared,
+                    &binding.pipeline,
+                    execution_plan,
+                    context,
+                )?;
+            }
+            StageIr::Union { source, .. } => {
+                let binding = ir_binding(prepared, source).ok_or_else(|| {
+                    Diagnostic::error(
+                        codes::E1007,
+                        format!("unknown binding `{source}`"),
+                        Span::zero(),
+                    )
+                })?;
+                check_native_pipeline_eligibility(
+                    prepared,
+                    &binding.pipeline,
+                    execution_plan,
+                    context,
+                )?;
+            }
+            StageIr::PivotLonger { .. }
             | StageIr::Complete { .. }
             | StageIr::Unsupported { .. } => {
                 return Err(unsupported_native_pipeline(
@@ -473,15 +511,33 @@ fn check_native_load_eligibility(
             stage_span,
         ));
     };
-    if !matches!(input.source, SourceDescriptor::Path { .. }) {
+    let (format, native_supported) = match &input.source {
+        SourceDescriptor::Path { .. } => (
+            resolve_input_format(input, explicit_format, None, None, stage_span)?,
+            true,
+        ),
+        SourceDescriptor::Stdin => {
+            let format = resolve_input_format(
+                input,
+                explicit_format,
+                prepared.stdin_format.as_deref(),
+                prepared.stdin_bytes.as_deref(),
+                stage_span,
+            )?;
+            (
+                format,
+                matches!(format, DataFormat::ArrowFile | DataFormat::ArrowStream),
+            )
+        }
+    };
+    if !native_supported {
         return Err(unsupported_native_pipeline(
-            "native execution requires a path-backed input",
+            "native execution requires a path-backed input or Arrow IPC bytes",
         ));
     }
-    let format = resolve_input_format(input, explicit_format, None, None, stage_span)?;
     if !matches!(
         format,
-        DataFormat::Csv | DataFormat::Parquet | DataFormat::ArrowStream
+        DataFormat::Csv | DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::ArrowStream
     ) {
         return Err(unsupported_native_pipeline(
             "input format is not supported by native execution",
@@ -514,13 +570,16 @@ enum NativePipelineResult {
 
 fn execute_native_pipeline(
     prepared: &PreparedProgram,
+    ir: &pdl_semantics::ProgramIr,
     pipeline: &PipelineIr,
     execution_plan: &ExecutionPlan,
     context: &BTreeMap<String, Value>,
+    io: &dyn DriverIo,
+    active_bindings: &mut Vec<String>,
 ) -> Result<NativePipelineResult, Diagnostic> {
     let mut plan = match &pipeline.start {
         PipelineStartIr::Load { format, span, .. } => {
-            native_load_plan(prepared, *span, format.as_deref())?
+            native_load_plan(prepared, *span, format.as_deref(), io)?
         }
         PipelineStartIr::Binding { .. } => {
             return Err(unsupported_native_pipeline(
@@ -628,9 +687,65 @@ fn execute_native_pipeline(
                     format.as_deref(),
                 );
             }
-            StageIr::Join { .. }
-            | StageIr::Union { .. }
-            | StageIr::PivotLonger { .. }
+            StageIr::Join {
+                source,
+                source_span,
+                left_key,
+                right_key,
+                kind,
+                span,
+            } => {
+                grouping = None;
+                let right = execute_native_binding(
+                    prepared,
+                    ir,
+                    NativeBindingRef {
+                        name: source,
+                        span: *source_span,
+                    },
+                    execution_plan,
+                    context,
+                    io,
+                    active_bindings,
+                )?;
+                let kind = match kind {
+                    JoinKindIr::Inner => DataJoinKind::Inner,
+                    JoinKindIr::Left => DataJoinKind::Left,
+                    JoinKindIr::Semi => DataJoinKind::Semi,
+                    JoinKindIr::Anti => DataJoinKind::Anti,
+                    JoinKindIr::Right | JoinKindIr::Full => {
+                        return Err(unsupported_native_pipeline(
+                            "pipeline stage is not supported by native execution",
+                        ));
+                    }
+                };
+                let left_key = resolve_native_column_name(left_key, *span, context)?;
+                let right_key = resolve_native_column_name(right_key, *span, context)?;
+                plan.join(right, &left_key, &right_key, kind)?
+            }
+            StageIr::Union {
+                source,
+                source_span,
+                by_name,
+                distinct,
+                ..
+            } => {
+                grouping = None;
+                let right = execute_native_binding(
+                    prepared,
+                    ir,
+                    NativeBindingRef {
+                        name: source,
+                        span: *source_span,
+                    },
+                    execution_plan,
+                    context,
+                    io,
+                    active_bindings,
+                )?;
+                plan.union(right, *by_name, *distinct)?
+            }
+            StageIr::PivotLonger { .. }
             | StageIr::Complete { .. }
             | StageIr::Unsupported { .. } => {
                 return Err(unsupported_native_pipeline(
@@ -640,6 +755,73 @@ fn execute_native_pipeline(
         };
     }
     Ok(NativePipelineResult::Plan(plan))
+}
+
+fn execute_native_binding(
+    prepared: &PreparedProgram,
+    ir: &pdl_semantics::ProgramIr,
+    binding_ref: NativeBindingRef<'_>,
+    execution_plan: &ExecutionPlan,
+    context: &BTreeMap<String, Value>,
+    io: &dyn DriverIo,
+    active_bindings: &mut Vec<String>,
+) -> Result<DataPlan, Diagnostic> {
+    let name = binding_ref.name;
+    if let Some(index) = active_bindings.iter().position(|active| active == name) {
+        let mut path = active_bindings[index..].to_vec();
+        path.push(name.to_string());
+        return Err(Diagnostic::error(
+            codes::E1501,
+            format!("binding dependency cycle: {}", path.join(" -> ")),
+            binding_ref.span,
+        ));
+    }
+    let binding = ir
+        .bindings
+        .iter()
+        .find(|binding| binding.name == name)
+        .ok_or_else(|| {
+            Diagnostic::error(
+                codes::E1007,
+                format!("unknown binding `{name}`"),
+                binding_ref.span,
+            )
+        })?;
+    active_bindings.push(name.to_string());
+    let result = execute_native_pipeline(
+        prepared,
+        ir,
+        &binding.pipeline,
+        execution_plan,
+        context,
+        io,
+        active_bindings,
+    );
+    active_bindings.pop();
+    match result? {
+        NativePipelineResult::Plan(plan) => Ok(plan),
+        NativePipelineResult::Completed { .. } => Err(unsupported_native_pipeline(
+            "native binding outputs must remain table plans",
+        )),
+    }
+}
+
+struct NativeBindingRef<'a> {
+    name: &'a str,
+    span: Span,
+}
+
+fn ir_binding<'a>(
+    prepared: &'a PreparedProgram,
+    name: &str,
+) -> Option<&'a pdl_semantics::BindingIr> {
+    prepared
+        .analysis
+        .ir
+        .as_ref()?
+        .bindings
+        .iter()
+        .find(|binding| binding.name == name)
 }
 
 fn execute_native_save(
@@ -685,6 +867,7 @@ fn native_load_plan(
     prepared: &PreparedProgram,
     stage_span: Span,
     explicit_format: Option<&str>,
+    io: &dyn DriverIo,
 ) -> Result<DataPlan, Diagnostic> {
     let Some(input) = prepared.driver_plan.input_for_stage_span(stage_span) else {
         return Err(Diagnostic::error(
@@ -693,24 +876,63 @@ fn native_load_plan(
             stage_span,
         ));
     };
-    let SourceDescriptor::Path { resolved_path, .. } = &input.source else {
-        return Err(unsupported_native_pipeline(
-            "native execution requires a path-backed input",
-        ));
-    };
-    if !resolved_path.exists() {
-        return Err(unsupported_native_pipeline(
-            "native execution requires a real filesystem path",
-        ));
+    match &input.source {
+        SourceDescriptor::Path { resolved_path, .. } => {
+            let format = resolve_input_format(input, explicit_format, None, None, stage_span)?;
+            if resolved_path.exists() {
+                return DataPlan::scan_with_backend(
+                    DataSource::Path {
+                        path: resolved_path,
+                        format,
+                    },
+                    DataBackend::NativePolars,
+                );
+            }
+            if !matches!(format, DataFormat::ArrowFile | DataFormat::ArrowStream) {
+                return Err(unsupported_native_pipeline(
+                    "native execution requires a real filesystem path",
+                ));
+            }
+            let bytes = io.read_path_bytes(resolved_path)?;
+            DataPlan::scan_with_backend(
+                DataSource::Bytes {
+                    logical_path: resolved_path,
+                    format,
+                    bytes: &bytes,
+                },
+                DataBackend::NativePolars,
+            )
+        }
+        SourceDescriptor::Stdin => {
+            let owned_bytes;
+            let bytes = if let Some(bytes) = prepared.stdin_bytes.as_deref() {
+                bytes
+            } else {
+                owned_bytes = io.read_stdin_bytes()?;
+                &owned_bytes
+            };
+            let format = resolve_input_format(
+                input,
+                explicit_format,
+                prepared.stdin_format.as_deref(),
+                Some(bytes),
+                stage_span,
+            )?;
+            if !matches!(format, DataFormat::ArrowFile | DataFormat::ArrowStream) {
+                return Err(unsupported_native_pipeline(
+                    "input format is not supported by native execution",
+                ));
+            }
+            DataPlan::scan_with_backend(
+                DataSource::Bytes {
+                    logical_path: std::path::Path::new("stdin"),
+                    format,
+                    bytes,
+                },
+                DataBackend::NativePolars,
+            )
+        }
     }
-    let format = resolve_input_format(input, explicit_format, None, None, stage_span)?;
-    DataPlan::scan_with_backend(
-        DataSource::Path {
-            path: resolved_path,
-            format,
-        },
-        DataBackend::NativePolars,
-    )
 }
 
 fn resolve_native_column_names(
@@ -879,9 +1101,11 @@ fn lower_data_call(
         "not_null" => DataScalarFunction::NotNull,
         "coalesce" => DataScalarFunction::Coalesce,
         "concat" => DataScalarFunction::Concat,
+        "if_else" => DataScalarFunction::IfElse,
         "lower" => DataScalarFunction::Lower,
         "upper" => DataScalarFunction::Upper,
         "trim" => DataScalarFunction::Trim,
+        "to_number" => DataScalarFunction::ToNumber,
         "abs" => DataScalarFunction::Abs,
         "round" => {
             let digits = match args {
@@ -3280,8 +3504,8 @@ mod tests {
         let prepared = prepare_source_with_io(
             &program_path,
             r#"load "sales.csv"
-  | mutate doubled = if_else(amount > 20, amount * 2, amount)
-  | select region, doubled
+  | pivot_longer amount names_to metric values_to value
+  | select region, metric, value
   | sort region"#,
             &io,
         );
@@ -3301,7 +3525,7 @@ mod tests {
         assert_eq!(auto.backend, DataBackend::PortableRows);
         assert_eq!(
             String::from_utf8(auto.stdout.expect("csv stdout")).expect("utf8 csv"),
-            "region,doubled\nEast,10\nWest,60\n"
+            "region,metric,value\nEast,amount,10\nWest,amount,30\n"
         );
 
         let forced = run_prepared_with_io_and_context_and_engine(
@@ -3333,7 +3557,7 @@ mod tests {
         let prepared = prepare_source_with_io(
             &program_path,
             r#"load "sales.csv"
-  | mutate doubled = if_else(amount > 0, amount * 2, amount)"#,
+  | pivot_longer amount names_to metric values_to value"#,
             &io,
         );
         let plan = plan_prepared(
@@ -3352,7 +3576,108 @@ mod tests {
             .expect_err("unsupported native pipeline");
 
         assert_eq!(diagnostic.code, "E1211");
-        assert!(diagnostic.message.contains("scalar function"));
+        assert!(diagnostic.message.contains("pipeline stage"));
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_if_else_matches_rows_for_path_formats() {
+        let workspace = temp_workspace("native-if-else");
+        let table = Table::new(
+            vec!["region".to_string(), "amount".to_string()],
+            vec![
+                Row {
+                    values: vec![Value::String("West".to_string()), Value::Number(30.0)],
+                },
+                Row {
+                    values: vec![Value::String("East".to_string()), Value::Number(10.0)],
+                },
+                Row {
+                    values: vec![Value::String("North".to_string()), Value::Null],
+                },
+            ],
+        );
+        for (path, format) in [
+            ("sales.csv", DataFormat::Csv),
+            ("sales.parquet", DataFormat::Parquet),
+            ("sales.arrow", DataFormat::ArrowStream),
+        ] {
+            pdl_data::write_table_to_path(&workspace.join(path), format, &table)
+                .expect("write fixture");
+        }
+
+        for (input, format_clause) in [
+            ("sales.csv", ""),
+            ("sales.parquet", ""),
+            ("sales.arrow", r#" format "arrow-stream""#),
+        ] {
+            let io = OsDriverIo;
+            let prepared = prepare_source_with_io(
+                workspace.join(format!("{input}.pdl")),
+                format!(
+                    r#"load "{input}"{format_clause}
+  | mutate score = if_else(amount > 20, amount * 2, amount + 1), label = if_else(amount > 20, concat(region, ":high"), "standard")
+  | select region, score, label
+  | sort region"#
+                ),
+                &io,
+            );
+            let options = RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            };
+            let row = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Row,
+            );
+            let auto = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Auto,
+            );
+            let native = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options,
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Native,
+            );
+
+            assert!(row.diagnostics.is_empty(), "{input}: {:?}", row.diagnostics);
+            assert!(
+                auto.diagnostics.is_empty(),
+                "{input}: {:?}",
+                auto.diagnostics
+            );
+            assert!(
+                native.diagnostics.is_empty(),
+                "{input}: {:?}",
+                native.diagnostics
+            );
+            assert_eq!(auto.backend, DataBackend::NativePolars, "{input}");
+            assert_eq!(native.backend, DataBackend::NativePolars, "{input}");
+            let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+            assert_eq!(
+                String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+                row_csv,
+                "{input}"
+            );
+            assert_eq!(
+                String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+                row_csv,
+                "{input}"
+            );
+            assert_eq!(
+                row_csv,
+                "region,score,label\nEast,11,standard\nNorth,,\nWest,60,West:high\n"
+            );
+        }
         fs::remove_dir_all(workspace).expect("clean temp workspace");
     }
 
@@ -3494,6 +3819,492 @@ mod tests {
                 "replacement should preserve existing score position and append score_copy: {row_csv}"
             );
         }
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_to_number_matches_rows_for_path_formats() {
+        let workspace = temp_workspace("native-to-number");
+        let table = Table::new(
+            vec!["id".to_string(), "raw".to_string()],
+            vec![
+                Row {
+                    values: vec![
+                        Value::String("a".to_string()),
+                        Value::String(" 42.5 ".to_string()),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("b".to_string()),
+                        Value::String("bad".to_string()),
+                    ],
+                },
+                Row {
+                    values: vec![Value::String("c".to_string()), Value::Null],
+                },
+                Row {
+                    values: vec![
+                        Value::String("d".to_string()),
+                        Value::String("-3".to_string()),
+                    ],
+                },
+            ],
+        );
+        for (path, format) in [
+            ("numbers.csv", DataFormat::Csv),
+            ("numbers.parquet", DataFormat::Parquet),
+            ("numbers.arrow", DataFormat::ArrowStream),
+        ] {
+            pdl_data::write_table_to_path(&workspace.join(path), format, &table)
+                .expect("write fixture");
+        }
+
+        for (input, format_clause) in [
+            ("numbers.csv", ""),
+            ("numbers.parquet", ""),
+            ("numbers.arrow", r#" format "arrow-stream""#),
+        ] {
+            let io = OsDriverIo;
+            let prepared = prepare_source_with_io(
+                workspace.join(format!("{input}.pdl")),
+                format!(
+                    r#"load "{input}"{format_clause}
+  | mutate parsed = to_number(raw)
+  | select id, parsed
+  | sort id"#
+                ),
+                &io,
+            );
+            let options = RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            };
+            let row = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Row,
+            );
+            let auto = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Auto,
+            );
+            let native = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options,
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Native,
+            );
+
+            assert!(row.diagnostics.is_empty(), "{input}: {:?}", row.diagnostics);
+            assert!(
+                auto.diagnostics.is_empty(),
+                "{input}: {:?}",
+                auto.diagnostics
+            );
+            assert!(
+                native.diagnostics.is_empty(),
+                "{input}: {:?}",
+                native.diagnostics
+            );
+            assert_eq!(auto.backend, DataBackend::NativePolars, "{input}");
+            assert_eq!(native.backend, DataBackend::NativePolars, "{input}");
+            let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+            assert_eq!(
+                String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+                row_csv,
+                "{input}"
+            );
+            assert_eq!(
+                String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+                row_csv,
+                "{input}"
+            );
+            assert_eq!(row_csv, "id,parsed\na,42.5\nb,\nc,\nd,-3\n");
+        }
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_loads_arrow_file_by_path() {
+        let workspace = temp_workspace("native-arrow-file-input");
+        let table = Table::new(
+            vec!["region".to_string(), "amount".to_string()],
+            vec![
+                Row {
+                    values: vec![Value::String("West".to_string()), Value::Number(30.0)],
+                },
+                Row {
+                    values: vec![Value::String("East".to_string()), Value::Number(10.0)],
+                },
+            ],
+        );
+        pdl_data::write_table_to_path(
+            &workspace.join("sales.arrow"),
+            DataFormat::ArrowFile,
+            &table,
+        )
+        .expect("write arrow file");
+        let io = OsDriverIo;
+        let prepared = prepare_source_with_io(
+            workspace.join("main.pdl"),
+            r#"load "sales.arrow"
+  | mutate doubled = amount * 2
+  | select region, doubled
+  | sort region"#,
+            &io,
+        );
+
+        let result = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Auto,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.backend, DataBackend::NativePolars);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "region,doubled\nEast,20\nWest,60\n"
+        );
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_loads_arrow_file_from_host_bytes() {
+        let table = Table::new(
+            vec!["region".to_string(), "amount".to_string()],
+            vec![
+                Row {
+                    values: vec![Value::String("West".to_string()), Value::Number(30.0)],
+                },
+                Row {
+                    values: vec![Value::String("East".to_string()), Value::Number(10.0)],
+                },
+            ],
+        );
+        let bytes =
+            pdl_data::write_table_to_bytes(DataFormat::ArrowFile, &table).expect("arrow file");
+        let io = InMemoryDriverIo::default().with_file_bytes("memory/sales.arrow", bytes);
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "sales.arrow"
+  | mutate doubled = amount * 2
+  | select region, doubled
+  | sort region"#,
+            &io,
+        );
+
+        let result = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Auto,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.backend, DataBackend::NativePolars);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "region,doubled\nEast,20\nWest,60\n"
+        );
+    }
+
+    #[test]
+    fn native_engine_loads_arrow_stream_from_stdin_bytes() {
+        let table = Table::new(
+            vec!["region".to_string(), "amount".to_string()],
+            vec![
+                Row {
+                    values: vec![Value::String("West".to_string()), Value::Number(30.0)],
+                },
+                Row {
+                    values: vec![Value::String("East".to_string()), Value::Number(10.0)],
+                },
+            ],
+        );
+        let stdin =
+            pdl_data::write_table_to_bytes(DataFormat::ArrowStream, &table).expect("arrow stream");
+        let io = InMemoryDriverIo::default().with_stdin_bytes(stdin);
+        let prepared = prepare_source_for_run_with_io(
+            "memory/main.pdl",
+            r#"load stdin
+  | mutate doubled = amount * 2
+  | select region, doubled
+  | sort region"#,
+            None,
+            &io,
+        );
+
+        let result = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Auto,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.backend, DataBackend::NativePolars);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "region,doubled\nEast,20\nWest,60\n"
+        );
+    }
+
+    #[test]
+    fn native_engine_left_join_matches_rows_for_binding_input() {
+        let workspace = temp_workspace("native-left-join");
+        fs::write(
+            workspace.join("sales.csv"),
+            "customer_id,amount,segment\nc1,30,old\nc2,10,old\nc3,5,old\n,99,old\n",
+        )
+        .expect("write sales");
+        fs::write(
+            workspace.join("customers.csv"),
+            "customer_id,segment,region\nc1,enterprise,West\nc2,self-serve,East\n,unknown,NullRegion\n",
+        )
+        .expect("write customers");
+        let io = OsDriverIo;
+        let prepared = prepare_source_with_io(
+            workspace.join("main.pdl"),
+            r#"let customers =
+  load "customers.csv"
+
+load "sales.csv"
+  | join customers on customer_id kind left
+  | select customer_id, amount, segment, segment_right, region
+  | sort customer_id, amount"#,
+            &io,
+        );
+        let options = RunOptions {
+            stdout_format: Some("csv".to_string()),
+            dry_run: false,
+            allow_binary_stdout: true,
+        };
+        let row = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options.clone(),
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Row,
+        );
+        let auto = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options.clone(),
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Auto,
+        );
+        let native = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options,
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Native,
+        );
+
+        assert!(row.diagnostics.is_empty(), "{:?}", row.diagnostics);
+        assert!(auto.diagnostics.is_empty(), "{:?}", auto.diagnostics);
+        assert!(native.diagnostics.is_empty(), "{:?}", native.diagnostics);
+        assert_eq!(auto.backend, DataBackend::NativePolars);
+        assert_eq!(native.backend, DataBackend::NativePolars);
+        let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+        assert_eq!(
+            String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+            row_csv
+        );
+        assert_eq!(
+            String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+            row_csv
+        );
+        assert_eq!(
+            row_csv,
+            "customer_id,amount,segment,segment_right,region\nc1,30,old,enterprise,West\nc2,10,old,self-serve,East\nc3,5,old,,\n,99,old,,\n"
+        );
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_semi_and_anti_join_match_rows_for_binding_input() {
+        let workspace = temp_workspace("native-semi-anti-join");
+        fs::write(
+            workspace.join("sales.csv"),
+            "customer_id,amount\nc1,30\nc2,10\nc3,5\n,99\n",
+        )
+        .expect("write sales");
+        fs::write(
+            workspace.join("customers.csv"),
+            "customer_id,segment\nc1,enterprise\nc2,self-serve\n,unknown\n",
+        )
+        .expect("write customers");
+        for (kind, expected) in [
+            ("semi", "customer_id,amount\nc1,30\nc2,10\n"),
+            ("anti", "customer_id,amount\nc3,5\n,99\n"),
+        ] {
+            let io = OsDriverIo;
+            let prepared = prepare_source_with_io(
+                workspace.join(format!("{kind}.pdl")),
+                format!(
+                    r#"let customers =
+  load "customers.csv"
+
+load "sales.csv"
+  | join customers on customer_id kind {kind}
+  | sort customer_id, amount"#
+                ),
+                &io,
+            );
+            let options = RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            };
+            let row = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Row,
+            );
+            let auto = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Auto,
+            );
+            let native = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options,
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Native,
+            );
+
+            assert!(row.diagnostics.is_empty(), "{kind}: {:?}", row.diagnostics);
+            assert!(
+                auto.diagnostics.is_empty(),
+                "{kind}: {:?}",
+                auto.diagnostics
+            );
+            assert!(
+                native.diagnostics.is_empty(),
+                "{kind}: {:?}",
+                native.diagnostics
+            );
+            assert_eq!(auto.backend, DataBackend::NativePolars, "{kind}");
+            assert_eq!(native.backend, DataBackend::NativePolars, "{kind}");
+            assert_eq!(
+                String::from_utf8(row.stdout.expect("row csv")).expect("utf8"),
+                expected,
+                "{kind}"
+            );
+            assert_eq!(
+                String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+                expected,
+                "{kind}"
+            );
+            assert_eq!(
+                String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+                expected,
+                "{kind}"
+            );
+        }
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_union_by_name_distinct_matches_rows_for_binding_input() {
+        let workspace = temp_workspace("native-union");
+        fs::write(
+            workspace.join("day1.csv"),
+            "order_id,region,amount\n1,West,30\n2,East,10\n",
+        )
+        .expect("write day1");
+        fs::write(
+            workspace.join("day2.csv"),
+            "amount,order_id,region\n10,2,East\n40,3,North\n",
+        )
+        .expect("write day2");
+        let io = OsDriverIo;
+        let prepared = prepare_source_with_io(
+            workspace.join("main.pdl"),
+            r#"let day2 =
+  load "day2.csv"
+
+load "day1.csv"
+  | union day2 by_name true distinct true
+  | sort order_id"#,
+            &io,
+        );
+        let options = RunOptions {
+            stdout_format: Some("csv".to_string()),
+            dry_run: false,
+            allow_binary_stdout: true,
+        };
+        let row = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options.clone(),
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Row,
+        );
+        let auto = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options.clone(),
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Auto,
+        );
+        let native = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options,
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Native,
+        );
+
+        assert!(row.diagnostics.is_empty(), "{:?}", row.diagnostics);
+        assert!(auto.diagnostics.is_empty(), "{:?}", auto.diagnostics);
+        assert!(native.diagnostics.is_empty(), "{:?}", native.diagnostics);
+        assert_eq!(auto.backend, DataBackend::NativePolars);
+        assert_eq!(native.backend, DataBackend::NativePolars);
+        let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+        assert_eq!(
+            String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+            row_csv
+        );
+        assert_eq!(
+            String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+            row_csv
+        );
+        assert_eq!(
+            row_csv,
+            "order_id,region,amount\n1,West,30\n2,East,10\n3,North,40\n"
+        );
         fs::remove_dir_all(workspace).expect("clean temp workspace");
     }
 
@@ -3909,7 +4720,7 @@ output active_rankings =
         );
 
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
-        assert_eq!(result.backend, DataBackend::PortableRows);
+        assert_eq!(result.backend, DataBackend::NativePolars);
         assert_eq!(
             String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
             "region,amount\nWest,30\nEast,10\n"

@@ -165,9 +165,11 @@ target/debug/pdl run examples/reactive_trip_dashboard.pdl
 
 ## File formats and output
 
-Native execution supports CSV, JSON Lines, Parquet, Arrow IPC file, and Arrow
-IPC stream loading/saving. Stdout can emit CSV, JSON Lines, Parquet, Arrow IPC
-file, or Arrow IPC stream when requested.
+PDL supports CSV, JSON Lines, Parquet, Arrow IPC file, and Arrow IPC stream
+loading/saving. Native execution covers path-backed CSV, Parquet, Arrow IPC
+file, and Arrow IPC stream inputs, Arrow IPC stdin/host-byte inputs, plus binary
+Parquet/Arrow sinks. Stdout can emit CSV, JSON Lines, Parquet, Arrow IPC file,
+or Arrow IPC stream when requested.
 
 ```bash
 pdl run examples/stdout_jsonl.pdl --stdout-format jsonl

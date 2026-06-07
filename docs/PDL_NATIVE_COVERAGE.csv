@@ -1,5 +1,5 @@
 area,item,status,notes
-stage,load,native partial,path-backed CSV, Parquet, and Arrow IPC stream are native; stdin and byte-backed host files are row-only
+stage,load,native partial,path-backed CSV, Parquet, Arrow IPC file, and Arrow IPC stream are native; stdin and byte-backed host Arrow IPC file/stream inputs are native; other stdin/byte formats are row-only
 stage,filter,native parity,supported scalar expressions lower to native predicates
 stage,select,native parity,row-preserving projection and aliasing
 stage,drop,native parity,row-preserving projection
@@ -10,8 +10,8 @@ stage,agg,native partial,count/sum/mean/min/max/count_distinct over supported ex
 stage,sort,native parity,blocking stage with deterministic sort options
 stage,limit,native parity,row-preserving limit
 stage,distinct,native parity,stable first-row distinct
-stage,join,planned native,row runtime is reference; native join parity deferred for duplicate columns/null keys/composite keys
-stage,union,planned native,row runtime is reference; native union parity deferred for schema/type/null-padding rules
+stage,join,native partial,native covers path-backed main inputs joined to native-safe binding inputs for inner/left/semi/anti single-key equi-joins; right/full and composite-key language support stay row-only
+stage,union,native partial,native covers compatible-schema binding inputs by name or position with optional distinct; incompatible schemas and browser byte boundaries stay row-only
 stage,pivot_longer,row-only by design,row runtime preserves deterministic long output and mixed value behavior
 stage,complete,row-only by design,row runtime preserves key expansion/fill expression semantics
 stage,save,native partial,binary Parquet/Arrow sinks use native direct writers; CSV/JSON Lines use row-format writer
@@ -25,18 +25,18 @@ expression,booleans,native parity,and or not lower natively
 expression,null checks,native parity,is_null and not_null lower natively
 expression,string functions,native partial,concat lower upper trim lower natively; other string functions are row-only
 expression,numeric functions,native partial,abs and round lower natively; uncertain coercions are row-only
-expression,cast-style functions,row-only by design,to_number remains row-only until parse/null/format parity is promoted
-expression,conditional functions,row-only by design,if_else remains row-only until branch/null semantics are promoted
+expression,cast-style functions,native partial,to_number lowers natively with row-identical whitespace parse-failure and null behavior; other cast-style functions remain row-only
+expression,conditional functions,native partial,if_else lowers natively for supported native condition and branch expressions; typed native branch output must remain compatible
 expression,aggregate arguments,native partial,supported scalar expressions lower for count/sum/mean/min/max/count_distinct
 expression,window expressions,row-only by design,window parity is deferred
 source,path-backed CSV,native parity,Polars lazy CSV scan is eligible
 source,path-backed Parquet,native parity,Polars lazy Parquet scan is eligible
-source,path-backed Arrow IPC file,unsupported,Arrow IPC file scan is row-only until native file reader parity is added
+source,path-backed Arrow IPC file,native partial,Arrow IPC file is read into the native dataframe path then the lazy pipeline continues
 source,path-backed Arrow IPC stream,native partial,stream file is read into native dataframe then lazy pipeline continues
 source,JSON Lines,row-only by design,schema inference and text semantics stay on row runtime
-source,stdin,row-only by design,keeps stdout purity and bounded buffering policy simple
-source,byte-backed host files,row-only by design,browser and host byte boundaries stay native-free
-source,named bindings,row-only by design,native starts from a single path-backed main load only
+source,stdin,native partial,Arrow IPC file/stream stdin bytes are native; CSV JSON Lines Parquet and unknown stdin bytes stay row-only
+source,byte-backed host files,native partial,Arrow IPC file/stream host bytes are native when no real filesystem path is available; other host byte formats stay row-only
+source,named bindings,native partial,binding-backed inputs are native for supported join/union right sides; binding starts and named outputs remain row-only
 sink,path,native partial,binary formats direct; CSV/JSON Lines row-format fallback
 sink,stdout,native partial,binary formats byte-clean; CSV/JSON Lines row-format fallback
 sink,bytes,native partial,binary formats direct; CSV/JSON Lines row-format fallback

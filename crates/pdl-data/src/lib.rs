@@ -15,8 +15,8 @@ pub use csv::{
     write_csv_to_vec,
 };
 pub use engine::{
-    native_engine_name, DataAggItem, DataBackend, DataBinaryOp, DataExpr, DataLiteral, DataPlan,
-    DataScalarFunction, DataSink, DataSource, DataUnaryOp,
+    native_engine_name, DataAggItem, DataBackend, DataBinaryOp, DataExpr, DataJoinKind,
+    DataLiteral, DataPlan, DataScalarFunction, DataSink, DataSource, DataUnaryOp,
 };
 pub use format::{
     format_number, read_schema_from_bytes, read_table_from_bytes, sniff_format_from_bytes,

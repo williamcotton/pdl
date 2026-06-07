@@ -1,6 +1,8 @@
 use pdl_core::{codes, Diagnostic, Span};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "polars-engine")]
+use std::io::Cursor;
 use std::io::Write;
 #[cfg(feature = "polars-engine")]
 use std::ops::Neg;
@@ -134,9 +136,11 @@ pub enum DataScalarFunction {
     NotNull,
     Coalesce,
     Concat,
+    IfElse,
     Lower,
     Upper,
     Trim,
+    ToNumber,
     Abs,
     Round { digits: u32 },
 }
@@ -146,6 +150,14 @@ pub struct DataAggItem {
     pub function: String,
     pub args: Vec<DataExpr>,
     pub alias: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DataJoinKind {
+    Inner,
+    Left,
+    Semi,
+    Anti,
 }
 
 impl DataPlan {
@@ -374,6 +386,113 @@ impl DataPlan {
         }
     }
 
+    pub fn join(
+        self,
+        right: DataPlan,
+        _left_key: &str,
+        _right_key: &str,
+        _kind: DataJoinKind,
+    ) -> Result<Self, Diagnostic> {
+        match (self.inner, right.inner) {
+            #[cfg(feature = "polars-engine")]
+            (DataPlanInner::Native(left), DataPlanInner::Native(right)) => {
+                let how = match _kind {
+                    DataJoinKind::Inner => native::JoinType::Inner,
+                    DataJoinKind::Left => native::JoinType::Left,
+                    DataJoinKind::Semi => native::JoinType::Semi,
+                    DataJoinKind::Anti => native::JoinType::Anti,
+                };
+                Ok(Self {
+                    inner: DataPlanInner::Native(NativePlan {
+                        format: left.format,
+                        plan: left
+                            .plan
+                            .join_builder()
+                            .with(right.plan)
+                            .left_on([native::col(_left_key)])
+                            .right_on([native::col(_right_key)])
+                            .how(how)
+                            .suffix("_right")
+                            .join_nulls(false)
+                            .maintain_order(native::MaintainOrderJoin::Left)
+                            .finish(),
+                    }),
+                })
+            }
+            _ => Err(unsupported_native_operation("native join")),
+        }
+    }
+
+    pub fn union(
+        self,
+        right: DataPlan,
+        _by_name: bool,
+        _distinct: bool,
+    ) -> Result<Self, Diagnostic> {
+        match (self.inner, right.inner) {
+            #[cfg(feature = "polars-engine")]
+            (DataPlanInner::Native(left), DataPlanInner::Native(right)) => {
+                let right_plan = if _by_name {
+                    right.plan.select(
+                        left.plan
+                            .clone()
+                            .collect_schema()
+                            .map_err(native_collect_error(left.format))?
+                            .iter_names()
+                            .map(|name| native::col(name.as_str()))
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    let left_names = left
+                        .plan
+                        .clone()
+                        .collect_schema()
+                        .map_err(native_collect_error(left.format))?
+                        .iter_names()
+                        .map(|name| name.to_string())
+                        .collect::<Vec<_>>();
+                    let right_names = right
+                        .plan
+                        .clone()
+                        .collect_schema()
+                        .map_err(native_collect_error(right.format))?
+                        .iter_names()
+                        .map(|name| name.to_string())
+                        .collect::<Vec<_>>();
+                    right.plan.select(
+                        right_names
+                            .iter()
+                            .zip(left_names)
+                            .map(|(right, left)| native::col(right).alias(left))
+                            .collect::<Vec<_>>(),
+                    )
+                };
+                let union = native::concat(
+                    [left.plan, right_plan],
+                    native::UnionArgs {
+                        parallel: false,
+                        strict: true,
+                        maintain_order: true,
+                        ..Default::default()
+                    },
+                )
+                .map_err(native_collect_error(left.format))?;
+                let plan = if _distinct {
+                    union.unique_stable_generic(None, native::UniqueKeepStrategy::First)
+                } else {
+                    union
+                };
+                Ok(Self {
+                    inner: DataPlanInner::Native(NativePlan {
+                        format: left.format,
+                        plan,
+                    }),
+                })
+            }
+            _ => Err(unsupported_native_operation("native union")),
+        }
+    }
+
     pub fn collect(self) -> Result<Table, Diagnostic> {
         match self.inner {
             DataPlanInner::Rows(table) => Ok(table),
@@ -418,33 +537,68 @@ fn scan_rows(source: DataSource<'_>) -> Result<DataPlan, Diagnostic> {
 
 #[cfg(feature = "polars-engine")]
 fn scan_native(source: DataSource<'_>) -> Result<DataPlan, Diagnostic> {
-    let DataSource::Path { path, format } = source else {
-        return Err(unsupported_native_operation("byte-backed input"));
-    };
-    let plan = match format {
-        DataFormat::Csv => native::LazyCsvReader::new(native_path(path)?)
-            .with_has_header(true)
-            .finish()
-            .map_err(native_read_error(path, format))?,
-        DataFormat::Parquet => {
-            native::LazyFrame::scan_parquet(native_path(path)?, Default::default())
-                .map_err(native_read_error(path, format))?
+    let (format, plan) = match source {
+        DataSource::Path { path, format } => {
+            let plan = match format {
+                DataFormat::Csv => native::LazyCsvReader::new(native_path(path)?)
+                    .with_has_header(true)
+                    .finish()
+                    .map_err(native_read_error(path, format))?,
+                DataFormat::Parquet => {
+                    native::LazyFrame::scan_parquet(native_path(path)?, Default::default())
+                        .map_err(native_read_error(path, format))?
+                }
+                DataFormat::ArrowStream => {
+                    let file = std::fs::File::open(path).map_err(|error| {
+                        Diagnostic::error(
+                            codes::E1802,
+                            format!("could not read data file `{}`: {error}", path.display()),
+                            Span::zero(),
+                        )
+                    })?;
+                    native::IpcStreamReader::new(file)
+                        .finish()
+                        .map_err(native_read_error(path, format))?
+                        .lazy()
+                }
+                DataFormat::ArrowFile => {
+                    let file = std::fs::File::open(path).map_err(|error| {
+                        Diagnostic::error(
+                            codes::E1802,
+                            format!("could not read data file `{}`: {error}", path.display()),
+                            Span::zero(),
+                        )
+                    })?;
+                    native::IpcReader::new(file)
+                        .finish()
+                        .map_err(native_read_error(path, format))?
+                        .lazy()
+                }
+                DataFormat::JsonLines => {
+                    return Err(unsupported_native_format(format));
+                }
+            };
+            (format, plan)
         }
-        DataFormat::ArrowStream => {
-            let file = std::fs::File::open(path).map_err(|error| {
-                Diagnostic::error(
-                    codes::E1802,
-                    format!("could not read data file `{}`: {error}", path.display()),
-                    Span::zero(),
-                )
-            })?;
-            native::IpcStreamReader::new(file)
-                .finish()
-                .map_err(native_read_error(path, format))?
-                .lazy()
-        }
-        DataFormat::ArrowFile | DataFormat::JsonLines => {
-            return Err(unsupported_native_format(format));
+        DataSource::Bytes {
+            logical_path,
+            format,
+            bytes,
+        } => {
+            let plan = match format {
+                DataFormat::ArrowStream => native::IpcStreamReader::new(Cursor::new(bytes))
+                    .finish()
+                    .map_err(native_read_error(logical_path, format))?
+                    .lazy(),
+                DataFormat::ArrowFile => native::IpcReader::new(Cursor::new(bytes))
+                    .finish()
+                    .map_err(native_read_error(logical_path, format))?
+                    .lazy(),
+                DataFormat::Csv | DataFormat::Parquet | DataFormat::JsonLines => {
+                    return Err(unsupported_native_operation("byte-backed input"));
+                }
+            };
+            (format, plan)
         }
     };
     Ok(DataPlan {
@@ -863,11 +1017,27 @@ fn eval_scalar_function(
             }
             Ok(Value::String(text))
         }
+        DataScalarFunction::IfElse => {
+            let [condition, when_true, when_false] = args else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "if_else() expects three arguments",
+                    Span::zero(),
+                ));
+            };
+            match eval_row_expr(condition, table, row)? {
+                Value::Bool(true) => eval_row_expr(when_true, table, row),
+                Value::Bool(false) => eval_row_expr(when_false, table, row),
+                Value::Null => Ok(Value::Null),
+                _ => Err(type_error("if_else() condition requires a boolean")),
+            }
+        }
         DataScalarFunction::IsNull
         | DataScalarFunction::NotNull
         | DataScalarFunction::Lower
         | DataScalarFunction::Upper
         | DataScalarFunction::Trim
+        | DataScalarFunction::ToNumber
         | DataScalarFunction::Abs
         | DataScalarFunction::Round { .. } => {
             let [arg] = args else {
@@ -884,13 +1054,25 @@ fn eval_scalar_function(
                 DataScalarFunction::Lower => Ok(map_text(value, |text| text.to_lowercase())),
                 DataScalarFunction::Upper => Ok(map_text(value, |text| text.to_uppercase())),
                 DataScalarFunction::Trim => Ok(map_text(value, |text| text.trim().to_string())),
+                DataScalarFunction::ToNumber => Ok(match value {
+                    Value::Null => Value::Null,
+                    Value::Number(_) => value,
+                    _ => value
+                        .to_csv_cell()
+                        .trim()
+                        .parse::<f64>()
+                        .map(Value::Number)
+                        .unwrap_or(Value::Null),
+                }),
                 DataScalarFunction::Abs => match value {
                     Value::Null => Ok(Value::Null),
                     Value::Number(value) => Ok(Value::Number(value.abs())),
                     _ => Err(type_error("abs() requires a number")),
                 },
                 DataScalarFunction::Round { digits } => round_value(value, digits),
-                DataScalarFunction::Coalesce | DataScalarFunction::Concat => unreachable!(),
+                DataScalarFunction::Coalesce
+                | DataScalarFunction::Concat
+                | DataScalarFunction::IfElse => unreachable!(),
             }
         }
     }
@@ -977,11 +1159,27 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
                     .collect::<Result<Vec<_>, Diagnostic>>()?;
                 native::concat_str(expressions, "", true)
             }
+            DataScalarFunction::IfElse => {
+                let [condition, when_true, when_false] = args.as_slice() else {
+                    return Err(unsupported_native_operation("if_else arity"));
+                };
+                let condition = native_expr(condition)?;
+                let when_true = native_expr(when_true)?;
+                let when_false = native_expr(when_false)?;
+                native::when(condition.clone().eq(native::lit(true)))
+                    .then(when_true)
+                    .otherwise(
+                        native::when(condition.is_null())
+                            .then(native::lit(native::NULL))
+                            .otherwise(when_false),
+                    )
+            }
             DataScalarFunction::IsNull
             | DataScalarFunction::NotNull
             | DataScalarFunction::Lower
             | DataScalarFunction::Upper
             | DataScalarFunction::Trim
+            | DataScalarFunction::ToNumber
             | DataScalarFunction::Abs
             | DataScalarFunction::Round { .. } => {
                 let [arg] = args.as_slice() else {
@@ -1001,11 +1199,18 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
                         .cast(native::DataType::String)
                         .str()
                         .strip_chars(native::lit(native::NULL)),
+                    DataScalarFunction::ToNumber => arg
+                        .cast(native::DataType::String)
+                        .str()
+                        .strip_chars(native::lit(native::NULL))
+                        .cast(native::DataType::Float64),
                     DataScalarFunction::Abs => arg.abs(),
                     DataScalarFunction::Round { digits } => {
                         arg.round(*digits, native::RoundMode::HalfAwayFromZero)
                     }
-                    DataScalarFunction::Coalesce | DataScalarFunction::Concat => {
+                    DataScalarFunction::Coalesce
+                    | DataScalarFunction::Concat
+                    | DataScalarFunction::IfElse => {
                         unreachable!()
                     }
                 }
@@ -1185,7 +1390,6 @@ fn unsupported_native_format(format: DataFormat) -> Diagnostic {
     )
 }
 
-#[cfg(feature = "polars-engine")]
 fn unsupported_native_operation(operation: &str) -> Diagnostic {
     Diagnostic::error(
         codes::E1211,
