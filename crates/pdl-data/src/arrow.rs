@@ -222,6 +222,9 @@ fn value_from_array(
         DataType::LargeUtf8 => Ok(Value::String(
             array.as_string::<i64>().value(row_index).to_string(),
         )),
+        DataType::Utf8View => Ok(Value::String(
+            array.as_string_view().value(row_index).to_string(),
+        )),
         DataType::Null => Ok(Value::Null),
         data_type => Err(Diagnostic::error(
             if format_label == "Parquet" {
@@ -465,6 +468,36 @@ mod tests {
         assert_eq!(
             read_arrow_file_from_bytes(Path::new("memory.arrow"), &bytes).expect("read table"),
             table
+        );
+    }
+
+    #[test]
+    fn rows_from_batch_reads_utf8_view_strings() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "region",
+            DataType::Utf8View,
+            true,
+        )]));
+        let values = Arc::new(arrow_array::StringViewArray::from(vec![
+            Some("East"),
+            None,
+            Some("West"),
+        ])) as ArrayRef;
+        let batch = RecordBatch::try_new(schema, vec![values]).expect("record batch");
+
+        assert_eq!(
+            rows_from_batch(Path::new("memory.arrow"), "Arrow IPC stream", &batch).expect("rows"),
+            vec![
+                Row {
+                    values: vec![Value::String("East".to_string())],
+                },
+                Row {
+                    values: vec![Value::Null],
+                },
+                Row {
+                    values: vec![Value::String("West".to_string())],
+                },
+            ]
         );
     }
 }

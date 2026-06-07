@@ -132,10 +132,13 @@ pub enum DataBinaryOp {
 pub enum DataScalarFunction {
     IsNull,
     NotNull,
+    Coalesce,
+    Concat,
     Lower,
     Upper,
     Trim,
     Abs,
+    Round { digits: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -242,7 +245,18 @@ impl DataPlan {
         match self.inner {
             DataPlanInner::Rows(table) => Ok(Self::from_table(mutate_rows(table, items)?)),
             #[cfg(feature = "polars-engine")]
-            DataPlanInner::Native(_) => Err(unsupported_native_operation("mutate")),
+            DataPlanInner::Native(plan) => {
+                let expressions = items
+                    .iter()
+                    .map(|(column, expr)| Ok(native_expr(expr)?.alias(column)))
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
+                Ok(Self {
+                    inner: DataPlanInner::Native(NativePlan {
+                        format: plan.format,
+                        plan: plan.plan.with_columns(expressions),
+                    }),
+                })
+            }
         }
     }
 
@@ -478,7 +492,7 @@ fn write_native_to_sink(
             Ok(None)
         }
         DataSink::Path { path, format } => {
-            if format == DataFormat::ArrowStream {
+            if native_direct_writer_format(format) {
                 let file = std::fs::File::create(path).map_err(|error| {
                     Diagnostic::error(
                         codes::E1704,
@@ -507,7 +521,7 @@ fn write_native_to_writer(
     format: DataFormat,
     writer: &mut dyn Write,
 ) -> Result<(), Diagnostic> {
-    if format != DataFormat::ArrowStream {
+    if !native_direct_writer_format(format) {
         let table = native_collect_to_table(plan)?;
         let bytes = write_table_to_bytes(format, &table)?;
         writer.write_all(&bytes).map_err(output_write_error)?;
@@ -518,15 +532,27 @@ fn write_native_to_writer(
         .plan
         .collect()
         .map_err(native_collect_error(plan.format))?;
-    native::IpcStreamWriter::new(writer)
-        .finish(&mut frame)
-        .map_err(|error| {
-            Diagnostic::error(
-                codes::E1704,
-                format!("native Arrow IPC stream write failed: {error}"),
-                Span::zero(),
-            )
-        })
+    match format {
+        DataFormat::Parquet => native::ParquetWriter::new(writer)
+            .finish(&mut frame)
+            .map(|_| ())
+            .map_err(native_write_error("Parquet")),
+        DataFormat::ArrowFile => native::IpcWriter::new(writer)
+            .finish(&mut frame)
+            .map_err(native_write_error("Arrow IPC file")),
+        DataFormat::ArrowStream => native::IpcStreamWriter::new(writer)
+            .finish(&mut frame)
+            .map_err(native_write_error("Arrow IPC stream")),
+        DataFormat::Csv | DataFormat::JsonLines => unreachable!("handled by row-format fallback"),
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_direct_writer_format(format: DataFormat) -> bool {
+    matches!(
+        format,
+        DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::ArrowStream
+    )
 }
 
 fn output_write_error(error: std::io::Error) -> Diagnostic {
@@ -535,6 +561,17 @@ fn output_write_error(error: std::io::Error) -> Diagnostic {
         format!("output write failed: {error}"),
         Span::zero(),
     )
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_write_error(label: &'static str) -> impl FnOnce(native::PolarsError) -> Diagnostic {
+    move |error| {
+        Diagnostic::error(
+            codes::E1704,
+            format!("native {label} write failed: {error}"),
+            Span::zero(),
+        )
+    }
 }
 
 fn filter_rows(table: Table, expr: &DataExpr) -> Result<Table, Diagnostic> {
@@ -806,33 +843,76 @@ fn eval_scalar_function(
     table: &Table,
     row: &Row,
 ) -> Result<Value, Diagnostic> {
-    let [arg] = args else {
-        return Err(Diagnostic::error(
-            codes::E1402,
-            "scalar function expects one argument",
-            Span::zero(),
-        ));
-    };
-    let value = eval_row_expr(arg, table, row)?;
     match function {
-        DataScalarFunction::IsNull => Ok(Value::Bool(matches!(value, Value::Null))),
-        DataScalarFunction::NotNull => Ok(Value::Bool(!matches!(value, Value::Null))),
-        DataScalarFunction::Lower => Ok(map_text(value, |text| text.to_ascii_lowercase())),
-        DataScalarFunction::Upper => Ok(map_text(value, |text| text.to_ascii_uppercase())),
-        DataScalarFunction::Trim => Ok(map_text(value, |text| text.trim().to_string())),
-        DataScalarFunction::Abs => match value {
-            Value::Null => Ok(Value::Null),
-            Value::Number(value) => Ok(Value::Number(value.abs())),
-            _ => Err(type_error("abs() requires a number")),
-        },
+        DataScalarFunction::Coalesce => {
+            for arg in args {
+                let value = eval_row_expr(arg, table, row)?;
+                if !matches!(value, Value::Null) {
+                    return Ok(value);
+                }
+            }
+            Ok(Value::Null)
+        }
+        DataScalarFunction::Concat => {
+            let mut text = String::new();
+            for arg in args {
+                let value = eval_row_expr(arg, table, row)?;
+                if !matches!(value, Value::Null) {
+                    text.push_str(&value.to_csv_cell());
+                }
+            }
+            Ok(Value::String(text))
+        }
+        DataScalarFunction::IsNull
+        | DataScalarFunction::NotNull
+        | DataScalarFunction::Lower
+        | DataScalarFunction::Upper
+        | DataScalarFunction::Trim
+        | DataScalarFunction::Abs
+        | DataScalarFunction::Round { .. } => {
+            let [arg] = args else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "scalar function expects one argument",
+                    Span::zero(),
+                ));
+            };
+            let value = eval_row_expr(arg, table, row)?;
+            match function {
+                DataScalarFunction::IsNull => Ok(Value::Bool(matches!(value, Value::Null))),
+                DataScalarFunction::NotNull => Ok(Value::Bool(!matches!(value, Value::Null))),
+                DataScalarFunction::Lower => Ok(map_text(value, |text| text.to_lowercase())),
+                DataScalarFunction::Upper => Ok(map_text(value, |text| text.to_uppercase())),
+                DataScalarFunction::Trim => Ok(map_text(value, |text| text.trim().to_string())),
+                DataScalarFunction::Abs => match value {
+                    Value::Null => Ok(Value::Null),
+                    Value::Number(value) => Ok(Value::Number(value.abs())),
+                    _ => Err(type_error("abs() requires a number")),
+                },
+                DataScalarFunction::Round { digits } => round_value(value, digits),
+                DataScalarFunction::Coalesce | DataScalarFunction::Concat => unreachable!(),
+            }
+        }
     }
 }
 
-fn map_text(value: Value, map: impl FnOnce(&str) -> String) -> Value {
+fn map_text(value: Value, map: impl FnOnce(String) -> String) -> Value {
     match value {
         Value::Null => Value::Null,
-        Value::String(value) => Value::String(map(&value)),
-        value => Value::String(map(&value.to_csv_cell())),
+        Value::String(value) => Value::String(map(value)),
+        value => Value::String(map(value.to_csv_cell())),
+    }
+}
+
+fn round_value(value: Value, digits: u32) -> Result<Value, Diagnostic> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Number(value) => {
+            let scale = 10_f64.powi(digits as i32);
+            let rounded = (value * scale).round() / scale;
+            Ok(Value::Number(if rounded == 0.0 { 0.0 } else { rounded }))
+        }
+        _ => Err(type_error("round() requires a number")),
     }
 }
 
@@ -865,31 +945,72 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
                 DataBinaryOp::Lte => left.lt_eq(right),
                 DataBinaryOp::Gt => left.gt(right),
                 DataBinaryOp::Gte => left.gt_eq(right),
-                DataBinaryOp::Add => left + right,
-                DataBinaryOp::Sub => left - right,
-                DataBinaryOp::Mul => left * right,
-                DataBinaryOp::Div => left / right,
-                DataBinaryOp::Rem => left % right,
-            }
-        }
-        DataExpr::Call { function, args } => {
-            let [arg] = args.as_slice() else {
-                return Err(unsupported_native_operation(
-                    "multi-argument scalar function",
-                ));
-            };
-            let arg = native_expr(arg)?;
-            match function {
-                DataScalarFunction::IsNull => arg.is_null(),
-                DataScalarFunction::NotNull => arg.is_not_null(),
-                DataScalarFunction::Abs => arg.abs(),
-                DataScalarFunction::Lower
-                | DataScalarFunction::Upper
-                | DataScalarFunction::Trim => {
-                    return Err(unsupported_native_operation("text scalar function"));
+                DataBinaryOp::Add => {
+                    left.cast(native::DataType::Float64) + right.cast(native::DataType::Float64)
+                }
+                DataBinaryOp::Sub => {
+                    left.cast(native::DataType::Float64) - right.cast(native::DataType::Float64)
+                }
+                DataBinaryOp::Mul => {
+                    left.cast(native::DataType::Float64) * right.cast(native::DataType::Float64)
+                }
+                DataBinaryOp::Div => {
+                    left.cast(native::DataType::Float64) / right.cast(native::DataType::Float64)
+                }
+                DataBinaryOp::Rem => {
+                    left.cast(native::DataType::Float64) % right.cast(native::DataType::Float64)
                 }
             }
         }
+        DataExpr::Call { function, args } => match function {
+            DataScalarFunction::Coalesce => {
+                let expressions = args
+                    .iter()
+                    .map(native_expr)
+                    .collect::<Result<Vec<_>, _>>()?;
+                native::coalesce(&expressions)
+            }
+            DataScalarFunction::Concat => {
+                let expressions = args
+                    .iter()
+                    .map(|arg| Ok(native_expr(arg)?.cast(native::DataType::String)))
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
+                native::concat_str(expressions, "", true)
+            }
+            DataScalarFunction::IsNull
+            | DataScalarFunction::NotNull
+            | DataScalarFunction::Lower
+            | DataScalarFunction::Upper
+            | DataScalarFunction::Trim
+            | DataScalarFunction::Abs
+            | DataScalarFunction::Round { .. } => {
+                let [arg] = args.as_slice() else {
+                    return Err(unsupported_native_operation("scalar function arity"));
+                };
+                let arg = native_expr(arg)?;
+                match function {
+                    DataScalarFunction::IsNull => arg.is_null(),
+                    DataScalarFunction::NotNull => arg.is_not_null(),
+                    DataScalarFunction::Lower => {
+                        arg.cast(native::DataType::String).str().to_lowercase()
+                    }
+                    DataScalarFunction::Upper => {
+                        arg.cast(native::DataType::String).str().to_uppercase()
+                    }
+                    DataScalarFunction::Trim => arg
+                        .cast(native::DataType::String)
+                        .str()
+                        .strip_chars(native::lit(native::NULL)),
+                    DataScalarFunction::Abs => arg.abs(),
+                    DataScalarFunction::Round { digits } => {
+                        arg.round(*digits, native::RoundMode::HalfAwayFromZero)
+                    }
+                    DataScalarFunction::Coalesce | DataScalarFunction::Concat => {
+                        unreachable!()
+                    }
+                }
+            }
+        },
     })
 }
 

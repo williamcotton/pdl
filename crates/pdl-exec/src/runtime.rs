@@ -417,6 +417,9 @@ fn check_native_pipeline_eligibility(
                     resolve_native_column_name(&item.new, item.span, context)?;
                 }
             }
+            StageIr::Mutate { items, .. } => {
+                lower_data_mutate_items(items, context)?;
+            }
             StageIr::GroupBy { columns, span } => {
                 resolve_native_column_names(columns, *span, context)?;
             }
@@ -437,8 +440,7 @@ fn check_native_pipeline_eligibility(
                 }
                 check_native_save_eligibility(prepared, execution_plan, *span, format.as_deref())?;
             }
-            StageIr::Mutate { .. }
-            | StageIr::Join { .. }
+            StageIr::Join { .. }
             | StageIr::Union { .. }
             | StageIr::PivotLonger { .. }
             | StageIr::Complete { .. }
@@ -559,6 +561,11 @@ fn execute_native_pipeline(
                     .collect::<Result<Vec<_>, Diagnostic>>()?;
                 plan.rename_columns(&renames)?
             }
+            StageIr::Mutate { items, .. } => {
+                grouping = None;
+                let items = lower_data_mutate_items(items, context)?;
+                plan.mutate(&items)?
+            }
             StageIr::Sort { items, .. } => {
                 let specs = items
                     .iter()
@@ -614,8 +621,7 @@ fn execute_native_pipeline(
                     format.as_deref(),
                 );
             }
-            StageIr::Mutate { .. }
-            | StageIr::Join { .. }
+            StageIr::Join { .. }
             | StageIr::Union { .. }
             | StageIr::PivotLonger { .. }
             | StageIr::Complete { .. }
@@ -822,18 +828,21 @@ fn lower_data_agg_items(
         .collect()
 }
 
+fn lower_data_mutate_items(
+    items: &[MutateItemIr],
+    context: &BTreeMap<String, Value>,
+) -> Result<Vec<(String, DataExpr)>, Diagnostic> {
+    items
+        .iter()
+        .map(|item| Ok((item.column.clone(), lower_data_expr(&item.expr, context)?)))
+        .collect()
+}
+
 fn lower_data_agg_arg(
     expr: &ExprIr,
     context: &BTreeMap<String, Value>,
 ) -> Result<DataExpr, Diagnostic> {
-    let expr = lower_data_expr(expr, context)?;
-    if matches!(expr, DataExpr::Column(_)) {
-        Ok(expr)
-    } else {
-        Err(unsupported_native_pipeline(
-            "aggregate argument is not supported by native execution",
-        ))
-    }
+    lower_data_expr(expr, context)
 }
 
 fn lower_data_call(
@@ -861,7 +870,26 @@ fn lower_data_call(
     let function = match name {
         "is_null" => DataScalarFunction::IsNull,
         "not_null" => DataScalarFunction::NotNull,
+        "coalesce" => DataScalarFunction::Coalesce,
+        "concat" => DataScalarFunction::Concat,
+        "lower" => DataScalarFunction::Lower,
+        "upper" => DataScalarFunction::Upper,
+        "trim" => DataScalarFunction::Trim,
         "abs" => DataScalarFunction::Abs,
+        "round" => {
+            let digits = match args {
+                [_] => 0,
+                [_, digits] => round_digits(digits, span)? as u32,
+                _ => {
+                    return Err(Diagnostic::error(
+                        codes::E1402,
+                        "round() expects one or two arguments",
+                        span,
+                    ));
+                }
+            };
+            DataScalarFunction::Round { digits }
+        }
         _ => {
             return Err(unsupported_native_pipeline(
                 "scalar function is not supported by native execution",
@@ -872,6 +900,10 @@ fn lower_data_call(
         function,
         args: args
             .iter()
+            .take(match function {
+                DataScalarFunction::Round { .. } => 1,
+                _ => args.len(),
+            })
             .map(|arg| lower_data_expr(arg, context))
             .collect::<Result<Vec<_>, _>>()?,
     })
@@ -2191,7 +2223,7 @@ fn eval_call(
             span,
             window_row_index,
             runtime_context,
-            |value| Ok(map_text(value, |text| text.to_ascii_lowercase())),
+            |value| Ok(map_text(value, |text| text.to_lowercase())),
         ),
         "upper" => eval_single_arg(
             args,
@@ -2200,7 +2232,7 @@ fn eval_call(
             span,
             window_row_index,
             runtime_context,
-            |value| Ok(map_text(value, |text| text.to_ascii_uppercase())),
+            |value| Ok(map_text(value, |text| text.to_uppercase())),
         ),
         "trim" => eval_single_arg(
             args,
@@ -3198,7 +3230,7 @@ mod tests {
         let prepared = prepare_source_with_io(
             &program_path,
             r#"load "sales.csv"
-  | mutate doubled = amount * 2
+  | mutate doubled = if_else(amount > 20, amount * 2, amount)
   | select region, doubled
   | sort region"#,
             &io,
@@ -3219,7 +3251,7 @@ mod tests {
         assert_eq!(auto.backend, DataBackend::PortableRows);
         assert_eq!(
             String::from_utf8(auto.stdout.expect("csv stdout")).expect("utf8 csv"),
-            "region,doubled\nEast,20\nWest,60\n"
+            "region,doubled\nEast,10\nWest,60\n"
         );
 
         let forced = run_prepared_with_io_and_context_and_engine(
@@ -3251,7 +3283,7 @@ mod tests {
         let prepared = prepare_source_with_io(
             &program_path,
             r#"load "sales.csv"
-  | mutate doubled = amount * 2"#,
+  | mutate doubled = if_else(amount > 0, amount * 2, amount)"#,
             &io,
         );
         let plan = plan_prepared(
@@ -3269,7 +3301,148 @@ mod tests {
             .expect_err("unsupported native pipeline");
 
         assert_eq!(diagnostic.code, "E1211");
-        assert!(diagnostic.message.contains("pipeline stage"));
+        assert!(diagnostic.message.contains("scalar function"));
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_mutate_matches_rows_for_supported_expression_subset() {
+        let workspace = temp_workspace("native-mutate");
+        let table = Table::new(
+            vec![
+                "region".to_string(),
+                "score".to_string(),
+                "latency_ms".to_string(),
+                "active".to_string(),
+                "note".to_string(),
+                "delta".to_string(),
+            ],
+            vec![
+                Row {
+                    values: vec![
+                        Value::String(" West ".to_string()),
+                        Value::Number(30.0),
+                        Value::Number(100.0),
+                        Value::Bool(true),
+                        Value::Null,
+                        Value::Number(-3.5),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("east".to_string()),
+                        Value::Number(50.0),
+                        Value::Number(125.0),
+                        Value::Bool(false),
+                        Value::String(" late ".to_string()),
+                        Value::Number(2.0),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("North".to_string()),
+                        Value::Number(10.0),
+                        Value::Number(80.0),
+                        Value::Null,
+                        Value::String("ok".to_string()),
+                        Value::Number(-1.0),
+                    ],
+                },
+            ],
+        );
+        for (path, format) in [
+            ("sales.csv", DataFormat::Csv),
+            ("sales.parquet", DataFormat::Parquet),
+            ("sales.arrow", DataFormat::ArrowStream),
+        ] {
+            pdl_data::write_table_to_path(&workspace.join(path), format, &table)
+                .expect("write fixture");
+        }
+
+        for (input, format_clause) in [
+            ("sales.csv", ""),
+            ("sales.parquet", ""),
+            ("sales.arrow", r#" format "arrow-stream""#),
+        ] {
+            let program_path = workspace.join(format!("{input}.pdl"));
+            let io = OsDriverIo;
+            let prepared = prepare_source_with_io(
+                &program_path,
+                format!(
+                    r#"load "{input}"{format_clause}
+  | mutate
+      score = score + 1,
+      score_copy = score,
+      score_per_latency = round(score / latency_ms, 3),
+      high_score = score >= 40,
+      active_or_high = active or score >= 40,
+      clean_region = lower(trim(region)),
+      note_text = coalesce(note, "missing"),
+      label = concat(upper(trim(region)), ":", coalesce(note, "missing")),
+      missing_note = is_null(note),
+      has_note = not_null(note),
+      abs_delta = abs(delta)
+  | select region, score, score_copy, score_per_latency, high_score, active_or_high, clean_region, note_text, label, missing_note, has_note, abs_delta
+  | sort clean_region"#
+                ),
+                &io,
+            );
+            let options = RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            };
+            let row = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Row,
+            );
+            let auto = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Auto,
+            );
+            let native = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options,
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Native,
+            );
+
+            assert!(row.diagnostics.is_empty(), "{input}: {:?}", row.diagnostics);
+            assert!(
+                auto.diagnostics.is_empty(),
+                "{input}: {:?}",
+                auto.diagnostics
+            );
+            assert!(
+                native.diagnostics.is_empty(),
+                "{input}: {:?}",
+                native.diagnostics
+            );
+            assert_eq!(auto.backend, DataBackend::NativePolars, "{input}");
+            assert_eq!(native.backend, DataBackend::NativePolars, "{input}");
+            let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+            assert_eq!(
+                String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+                row_csv,
+                "{input}"
+            );
+            assert_eq!(
+                String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+                row_csv,
+                "{input}"
+            );
+            assert!(
+                row_csv.contains("score,score_copy"),
+                "replacement should preserve existing score position and append score_copy: {row_csv}"
+            );
+        }
         fs::remove_dir_all(workspace).expect("clean temp workspace");
     }
 
@@ -3343,9 +3516,13 @@ mod tests {
   | agg
       row_count = count(),
       total_score = sum(score),
+      total_weighted_score = sum(score * 2),
       avg_score = mean(score),
+      avg_score_plus_ten = mean(score + 10),
       min_latency_ms = min(latency_ms),
-      max_latency_ms = max(latency_ms)
+      min_latency_minus_score = min(latency_ms - score),
+      max_latency_ms = max(latency_ms),
+      max_latency_plus_score = max(latency_ms + score)
   | sort region"#
                 ),
                 &io,
@@ -3506,6 +3683,70 @@ mod tests {
             .columns,
             vec!["region", "amount"]
         );
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_writes_parquet_and_arrow_file_sinks_after_mutate() {
+        let workspace = temp_workspace("native-file-sinks");
+        fs::write(
+            workspace.join("sales.csv"),
+            "region,amount\nWest,30\nEast,10\n",
+        )
+        .expect("write csv");
+
+        for (output_name, format_name, data_format) in [
+            ("out.parquet", "parquet", DataFormat::Parquet),
+            ("out.arrow", "arrow-file", DataFormat::ArrowFile),
+        ] {
+            let output_path = workspace.join(output_name);
+            let program_path = workspace.join(format!("{output_name}.pdl"));
+            let io = OsDriverIo;
+            let prepared = prepare_source_with_io(
+                &program_path,
+                format!(
+                    r#"load "sales.csv"
+  | mutate doubled = amount * 2
+  | select region, doubled
+  | sort region
+  | save "{}" format "{format_name}""#,
+                    output_path.display()
+                ),
+                &io,
+            );
+
+            let result = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                RunOptions {
+                    stdout_format: None,
+                    dry_run: false,
+                    allow_binary_stdout: true,
+                },
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Native,
+            );
+
+            assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+            assert_eq!(result.backend, DataBackend::NativePolars);
+            let bytes = fs::read(&output_path).expect("read native sink");
+            assert_eq!(
+                pdl_data::read_table_from_bytes(&output_path, data_format, &bytes)
+                    .expect("read native sink table"),
+                Table::new(
+                    vec!["region".to_string(), "doubled".to_string()],
+                    vec![
+                        Row {
+                            values: vec![Value::String("East".to_string()), Value::Number(20.0)],
+                        },
+                        Row {
+                            values: vec![Value::String("West".to_string()), Value::Number(60.0)],
+                        },
+                    ],
+                ),
+                "{format_name}"
+            );
+        }
         fs::remove_dir_all(workspace).expect("clean temp workspace");
     }
 

@@ -44,7 +44,7 @@ insta = "1"
 logos = "0.14"
 lsp-types = "0.94.1"
 parquet = "53"
-polars = { version = "0.53", default-features = false, features = ["abs", "csv", "fmt", "ipc_streaming", "lazy", "parquet"] }
+polars = { version = "0.53", default-features = false, features = ["abs", "concat_str", "csv", "fmt", "ipc_streaming", "lazy", "parquet", "round_series", "strings", "temporal"] }
 pretty_assertions = "1"
 rowan = "0.16"
 serde = { version = "1", features = ["derive"] }

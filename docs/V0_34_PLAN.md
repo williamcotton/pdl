@@ -5,6 +5,7 @@ Target version: 0.34.0
 Owner: PDL maintainers
 Related spec: [`PDL_SPEC.md`](PDL_SPEC.md)
 Predecessor plan: [`V0_33_PLAN.md`](V0_33_PLAN.md)
+Successor plan: [`V0_35_PLAN.md`](V0_35_PLAN.md)
 Neighboring Algraf plan: [`V0_69_PLAN.md`](../../algraf/docs/V0_69_PLAN.md)
 
 ## Purpose
@@ -67,6 +68,12 @@ million_row_distinct_segments               csv -> csv            456      66   
 The v0.34 plan treats the Arrow-stream input regression as the first measured
 problem to fix, then expands native coverage so production preparation
 pipelines can stay in Polars until the final Arrow handoff.
+
+The initial v0.34 implementation slice shipped the Arrow-stream input fix and
+left the broader native coverage items below planned or partially complete. The
+carry-forward work is collected in [`V0_35_PLAN.md`](V0_35_PLAN.md) so follow-up
+implementation can be tracked without treating the remaining v0.34 bullets as
+already shipped.
 
 ## Initial v0.34 Slice Results
 

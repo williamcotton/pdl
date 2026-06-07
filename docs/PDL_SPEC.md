@@ -6,7 +6,16 @@ Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading
 
 ## Current Reference Implementation Status
 
-The current repository implementation is `0.34.0`.
+The current released repository implementation line is `0.34.0`. The working
+tree may contain unreleased v0.35 development slices tracked in
+`docs/V0_35_PLAN.md`; version stamps remain on `0.34.0` until that release is
+closed.
+
+The initial v0.35 development slice adds native Polars-backed `mutate` for the
+supported simple expression subset, extends native expression lowering for
+`filter`, `mutate`, and aggregate arguments, and writes Parquet, Arrow IPC file,
+and Arrow IPC stream sinks directly from native plans. CSV and JSON Lines output
+continue to use the row-format writer path so text formatting remains stable.
 
 Version 0.34.0 is a production native-pipeline release tracked in
 `docs/V0_34_PLAN.md`. Its first implemented slice makes path-backed Arrow IPC
@@ -2545,13 +2554,25 @@ with supported stages. Since version 0.33.0, supported native stages include
 grouped `agg` for `count`, `sum`, `mean`, `min`, and `max` over simple column
 references on path-backed CSV and Parquet inputs. Since version 0.34.0,
 path-backed Arrow IPC stream inputs are also eligible for native execution when
-the rest of the pipeline has native parity coverage. More complex aggregate
-arguments and aggregate functions remain row-runtime work until their native
-parity rules are specified. Byte-backed input, stdin, bindings, named outputs,
-multi-output execution, joins, unions, mutation, `pivot_longer`, `complete`,
-windows, and unsupported expressions fall back to rows in automatic mode before
-native scans are opened when they are known to be unsupported. Forced native
-mode reports a diagnostic instead of silently falling back.
+the rest of the pipeline has native parity coverage.
+
+The initial v0.35 development native subset also supports row-preserving
+`mutate` assignments and aggregate arguments when each expression can be lowered
+to the shared native expression subset. That subset includes column references,
+numeric, string, boolean, and null literals, arithmetic, comparison operators,
+boolean `and`, `or`, and `not`, and the scalar functions `is_null`,
+`not_null`, `coalesce`, `concat`, `lower`, `upper`, `trim`, `abs`, and `round`.
+Supported native `mutate` assignments are applied as one parallel projection:
+later assignments in the same `mutate` stage do not see earlier assignments,
+replacements keep existing column positions, and new columns append in
+assignment order.
+
+Unsupported aggregate functions, byte-backed input, stdin, bindings, named
+outputs, multi-output execution, joins, unions, `pivot_longer`, `complete`,
+windows, `to_number`, `if_else`, dynamic or uncertain coercions, and other
+unsupported expressions fall back to rows in automatic mode before native scans
+are opened when they are known to be unsupported. Forced native mode reports a
+diagnostic instead of silently falling back.
 
 Browser/WASM builds MUST keep the native Polars feature set disabled. The WASM
 runtime MUST NOT enable `native-formats`, `polars-engine`, or any dependency
@@ -2630,6 +2651,11 @@ The native backend SHOULD write Arrow IPC stream stdout directly through a
 writer-oriented data sink when the active native plan can do so without
 materializing a public row table. Diagnostics and logs MUST continue to use
 stderr so stdout remains stream bytes only.
+
+The initial v0.35 development native writer path also writes Parquet and Arrow
+IPC file sinks directly from native plans. CSV and JSON Lines output remain on
+the public row-format writer path because their exact text formatting is
+PDL-visible behavior.
 
 The consumer's responsibility is to consume stdin if it supports that mode.
 
@@ -3183,11 +3209,15 @@ indexmap = "2"
 thiserror = "2"
 polars = { version = "0.53", default-features = false, features = [
     "abs",
+    "concat_str",
     "csv",
     "fmt",
     "ipc_streaming",
     "lazy",
     "parquet",
+    "round_series",
+    "strings",
+    "temporal",
 ] }
 tower-lsp = "0.20"
 lsp-types = "0.94.1"

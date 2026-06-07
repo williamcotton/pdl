@@ -1,0 +1,9 @@
+load "../../data/generated/million-row.parquet"
+  | mutate
+      score_per_latency = round(score / latency_ms, 6),
+      adjusted_score = score + x * 0.5,
+      high_score = score >= 70
+  | filter high_score
+  | select row, segment, adjusted_score, score_per_latency, high_score
+  | sort adjusted_score desc
+  | limit 10000
