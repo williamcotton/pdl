@@ -9,8 +9,11 @@ consumer lockfiles after npm has the new tarballs.
 ## Published Package Mode
 
 Use published packages for demo, Studio, and downstream package-surface checks.
-For v0.39, this command applies after `pdl-wasm@0.39.0` and
-`pdl-editor@0.39.0` are published:
+For the v0.40 Rust/CLI release, npm was checked on June 7, 2026:
+`pdl-wasm` publishes `0.30.0` and `0.39.0`; `pdl-editor` publishes `0.30.0`,
+`0.30.1`, and `0.39.0`. Because no `0.40.0` browser packages are published,
+ordinary demo and downstream checks should continue to use the latest verified
+published browser package versions:
 
 1. Install the published browser packages:
 
@@ -28,14 +31,10 @@ import { loadPdlRuntime } from "pdl-wasm";
 const runtime = await loadPdlRuntime({ wasmUrl: "/wasm/pdl.wasm" });
 ```
 
-The PDL demo consumes the v0.39 browser package versions for the v0.39 release.
-
-Before the v0.39 browser package bump, npm was checked:
-`pdl-wasm` published only `0.30.0`; `pdl-editor` published `0.30.0` and
-`0.30.1`. The v0.39 release prepares new `pdl-wasm@0.39.0` and
-`pdl-editor@0.39.0` packages so browser consumers receive the updated parser,
-runtime, editor-service behavior, and peer dependency range. Consumer lockfile
-integrity hashes for those packages must be regenerated after publication.
+The PDL demo consumes the v0.39 browser package versions during the v0.40
+native Rust/CLI release. Do not change `pdl-wasm`, `pdl-editor`, demo consumer
+pins, or browser install commands to `0.40.0` unless a browser package release
+explicitly prepares and publishes those tarballs.
 
 ## Package Validation
 
@@ -43,7 +42,7 @@ Use packed mode for package-surface validation before publishing:
 
 1. From `packages/wasm`, run `npm pack --dry-run`.
 2. From `editors/monaco`, run `npm pack --dry-run`.
-3. Publish `pdl-wasm@0.39.0` and `pdl-editor@0.39.0`.
+3. Publish the explicitly prepared `pdl-wasm` and `pdl-editor` versions.
 4. Regenerate consumer lockfiles against the published packages.
 5. Run the host app's normal type, build, and browser checks against the
    published package versions.

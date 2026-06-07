@@ -1,9 +1,9 @@
 # PDL Native Coverage Matrix
 
-Status: v0.39 source of truth
+Status: v0.40 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
-This matrix records what the native execution strategy may claim in v0.39. The
+This matrix records what the native execution strategy may claim in v0.40. The
 portable row runtime remains the semantic reference. A matrix row may use only
 one of these statuses:
 
@@ -51,18 +51,18 @@ boundary changes status, update the CSV and the tests in the same change.
 | comparisons | native parity | `==`, `!=`, `<`, `<=`, `>`, and `>=` lower natively. |
 | booleans | native parity | `and`, `or`, and `not` lower natively. |
 | null checks | native parity | `is_null` and `not_null` lower natively. |
-| string functions | native partial | `concat`, `lower`, `upper`, and `trim` lower natively; other string functions are row-only. |
+| string functions | native partial | `concat`, `lower`, `upper`, `trim`, `contains`, `starts_with`, and literal-pattern `replace` lower natively; dynamic replace patterns remain row-only. |
 | numeric functions | native partial | `abs` and `round` lower natively; uncertain coercions are row-only. |
-| cast-style functions | native partial | `to_number` lowers natively with row-identical whitespace, parse-failure, and null behavior; other cast-style functions remain row-only. |
+| cast-style functions | native partial | `to_number`, `to_string`, and `to_boolean` lower natively with row-identical null, parse, and formatting behavior for the promoted subset. |
 | conditional functions | native partial | `if_else` lowers natively for supported native condition and branch expressions; typed native branch output must remain compatible. |
 | aggregate arguments | native partial | Supported scalar expressions lower for `count`, `sum`, `mean`, `min`, `max`, and `count_distinct`. |
-| window ranking functions | native partial | `row_number`, `rank`, and `dense_rank` lower natively for row-preserving mutate windows; `rank` and `dense_rank` require exactly one order key and `row_number` supports zero or one order key. |
-| window whole-partition aggregates | native partial | `count`, `sum`, `mean`, `min`, and `max` lower natively for whole-partition row-preserving mutate windows over supported native expressions with zero or one order key. |
-| window running aggregates | native partial | `count`, `sum`, `mean`, `min`, and `max` lower natively for `rows between unbounded_preceding and current_row` over supported native expressions with zero or one order key. |
-| window offset functions | native partial | `lag` and `lead` lower natively with one order key, a non-negative integer literal offset, and an omitted or `null` default; non-null defaults remain row-only. |
-| window value functions | native partial | `first_value` and `last_value` lower natively for whole-partition and unbounded-preceding-to-current-row frames over supported native expressions with zero or one order key. |
-| window distribution functions | native partial | `percent_rank` and `cume_dist` lower natively with exactly one order key. |
-| window multi-key ordering | row-only by design | Multi-key window order stays on the row runtime until per-key direction, null placement, and tie behavior are proven identical in native execution. |
+| window ranking functions | native partial | `row_number`, `rank`, and `dense_rank` lower natively for row-preserving mutate windows; ranking requires `order_by` and supports one key or one compatible multi-key order group. |
+| window whole-partition aggregates | native partial | `count`, `sum`, `mean`, `min`, and `max` lower natively for whole-partition row-preserving mutate windows over supported native expressions with zero, one, or one compatible multi-key order group. |
+| window running aggregates | native partial | `count`, `sum`, `mean`, `min`, and `max` lower natively for `rows between unbounded_preceding and current_row` over supported native expressions with zero, one, or one compatible multi-key order group. |
+| window offset functions | native partial | `lag` and `lead` lower natively with one or one compatible multi-key order group, a non-negative integer literal offset, and omitted, null, or native-compatible non-null defaults. |
+| window value functions | native partial | `first_value` and `last_value` lower natively for whole-partition and unbounded-preceding-to-current-row frames over supported native expressions with zero, one, or one compatible multi-key order group. |
+| window distribution functions | native partial | `percent_rank` and `cume_dist` lower natively with one key or one compatible multi-key order group. |
+| window multi-key ordering | native partial | Multi-key window order lowers natively when a mutate stage has one compatible composite order group; mixed multi-key groups remain row-only. |
 
 ## Source Coverage
 

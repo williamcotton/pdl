@@ -145,7 +145,12 @@ pub enum DataScalarFunction {
     Lower,
     Upper,
     Trim,
+    Contains,
+    StartsWith,
+    Replace,
+    ToString,
     ToNumber,
+    ToBoolean,
     Abs,
     Round { digits: u32 },
 }
@@ -156,6 +161,7 @@ pub struct DataWindowSpec {
     pub order_by: Vec<SortSpec>,
     pub frame: DataWindowFrame,
     pub row_index: Option<String>,
+    pub presorted: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -302,10 +308,22 @@ impl DataPlan {
                     .any(|(_, expr)| data_expr_contains_window(expr))
                     .then(|| native_hidden_column_name(&plan.plan, plan.format))
                     .transpose()?;
+                let window_presort = native_window_presort_specs(items)?;
                 let native_plan = if let Some(name) = &row_index_name {
                     plan.plan.with_row_index(name.clone(), None)
                 } else {
                     plan.plan
+                };
+                let native_plan = if let Some(specs) = &window_presort {
+                    native_plan.sort(
+                        specs
+                            .iter()
+                            .map(|spec| spec.column.clone())
+                            .collect::<Vec<_>>(),
+                        native_sort_multiple_options(specs),
+                    )
+                } else {
+                    native_plan
                 };
                 let expressions = items
                     .iter()
@@ -314,11 +332,29 @@ impl DataPlan {
                             .as_deref()
                             .map(|name| data_expr_with_window_row_index(expr, name))
                             .unwrap_or_else(|| expr.clone());
+                        let expr = if window_presort.is_some() {
+                            data_expr_with_presorted_multi_key_windows(&expr)
+                        } else {
+                            expr
+                        };
                         Ok(native_expr(&expr)?.alias(column))
                     })
                     .collect::<Result<Vec<_>, Diagnostic>>()?;
                 let native_plan = native_plan.with_columns(expressions);
                 let native_plan = if let Some(name) = &row_index_name {
+                    let native_plan = if window_presort.is_some() {
+                        native_plan.sort(
+                            [name.as_str()],
+                            native::SortMultipleOptions {
+                                descending: vec![false],
+                                nulls_last: vec![false],
+                                maintain_order: true,
+                                ..Default::default()
+                            },
+                        )
+                    } else {
+                        native_plan
+                    };
                     native_plan.drop(native::cols([name.as_str()]))
                 } else {
                     native_plan
@@ -345,24 +381,10 @@ impl DataPlan {
                     .iter()
                     .map(|spec| spec.column.clone())
                     .collect::<Vec<_>>();
-                let descending = specs
-                    .iter()
-                    .map(|spec| spec.direction == SortDirection::Desc)
-                    .collect::<Vec<_>>();
-                let nulls_last = specs
-                    .iter()
-                    .map(|spec| native_sort_nulls_last(spec.direction, spec.nulls))
-                    .collect::<Vec<_>>();
-                let options = native::SortMultipleOptions {
-                    descending,
-                    nulls_last,
-                    maintain_order: true,
-                    ..Default::default()
-                };
                 Ok(Self {
                     inner: DataPlanInner::Native(NativePlan {
                         format: plan.format,
-                        plan: plan.plan.sort(columns, options),
+                        plan: plan.plan.sort(columns, native_sort_multiple_options(specs)),
                     }),
                 })
             }
@@ -876,6 +898,79 @@ fn data_expr_contains_window(expr: &DataExpr) -> bool {
 }
 
 #[cfg(feature = "polars-engine")]
+#[derive(Clone, Debug, PartialEq)]
+struct NativeWindowSortGroup {
+    partition_by: Vec<String>,
+    order_by: Vec<SortSpec>,
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_window_presort_specs(
+    items: &[(String, DataExpr)],
+) -> Result<Option<Vec<SortSpec>>, Diagnostic> {
+    let mut group = None;
+    for (_, expr) in items {
+        data_expr_collect_multi_key_window_sort(expr, &mut group)?;
+    }
+    let Some(group) = group else {
+        return Ok(None);
+    };
+    let mut specs = group
+        .partition_by
+        .iter()
+        .map(|column| SortSpec {
+            column: column.clone(),
+            direction: SortDirection::Asc,
+            nulls: NullsOrder::Last,
+        })
+        .collect::<Vec<_>>();
+    specs.extend(group.order_by);
+    Ok(Some(specs))
+}
+
+#[cfg(feature = "polars-engine")]
+fn data_expr_collect_multi_key_window_sort(
+    expr: &DataExpr,
+    group: &mut Option<NativeWindowSortGroup>,
+) -> Result<(), Diagnostic> {
+    match expr {
+        DataExpr::Unary { expr, .. } => data_expr_collect_multi_key_window_sort(expr, group),
+        DataExpr::Binary { left, right, .. } => {
+            data_expr_collect_multi_key_window_sort(left, group)?;
+            data_expr_collect_multi_key_window_sort(right, group)
+        }
+        DataExpr::Call { args, .. } => {
+            for arg in args {
+                data_expr_collect_multi_key_window_sort(arg, group)?;
+            }
+            Ok(())
+        }
+        DataExpr::Window { args, spec, .. } => {
+            if spec.order_by.len() > 1 {
+                let next = NativeWindowSortGroup {
+                    partition_by: spec.partition_by.clone(),
+                    order_by: spec.order_by.clone(),
+                };
+                match group {
+                    Some(current) if current != &next => {
+                        return Err(unsupported_native_operation(
+                            "multiple multi-key window order groups",
+                        ));
+                    }
+                    Some(_) => {}
+                    None => *group = Some(next),
+                }
+            }
+            for arg in args {
+                data_expr_collect_multi_key_window_sort(arg, group)?;
+            }
+            Ok(())
+        }
+        DataExpr::Column(_) | DataExpr::Literal(_) => Ok(()),
+    }
+}
+
+#[cfg(feature = "polars-engine")]
 fn data_expr_with_window_row_index(expr: &DataExpr, row_index: &str) -> DataExpr {
     match expr {
         DataExpr::Unary { op, expr } => DataExpr::Unary {
@@ -906,6 +1001,47 @@ fn data_expr_with_window_row_index(expr: &DataExpr, row_index: &str) -> DataExpr
                 args: args
                     .iter()
                     .map(|arg| data_expr_with_window_row_index(arg, row_index))
+                    .collect(),
+                spec,
+            }
+        }
+        DataExpr::Column(_) | DataExpr::Literal(_) => expr.clone(),
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn data_expr_with_presorted_multi_key_windows(expr: &DataExpr) -> DataExpr {
+    match expr {
+        DataExpr::Unary { op, expr } => DataExpr::Unary {
+            op: *op,
+            expr: Box::new(data_expr_with_presorted_multi_key_windows(expr)),
+        },
+        DataExpr::Binary { left, op, right } => DataExpr::Binary {
+            left: Box::new(data_expr_with_presorted_multi_key_windows(left)),
+            op: *op,
+            right: Box::new(data_expr_with_presorted_multi_key_windows(right)),
+        },
+        DataExpr::Call { function, args } => DataExpr::Call {
+            function: *function,
+            args: args
+                .iter()
+                .map(data_expr_with_presorted_multi_key_windows)
+                .collect(),
+        },
+        DataExpr::Window {
+            function,
+            args,
+            spec,
+        } => {
+            let mut spec = spec.clone();
+            if spec.order_by.len() > 1 {
+                spec.presorted = true;
+            }
+            DataExpr::Window {
+                function: *function,
+                args: args
+                    .iter()
+                    .map(data_expr_with_presorted_multi_key_windows)
                     .collect(),
                 spec,
             }
@@ -1437,12 +1573,62 @@ fn eval_scalar_function(
                 _ => Err(type_error("if_else() condition requires a boolean")),
             }
         }
+        DataScalarFunction::Contains | DataScalarFunction::StartsWith => {
+            let [value, pattern] = args else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "text predicate expects two arguments",
+                    Span::zero(),
+                ));
+            };
+            let value = eval_row_expr(value, table, row)?;
+            let pattern = eval_row_expr(pattern, table, row)?;
+            Ok(
+                match (
+                    value_to_optional_text(value),
+                    value_to_optional_text(pattern),
+                ) {
+                    (Some(value), Some(pattern)) => Value::Bool(match function {
+                        DataScalarFunction::Contains => value.contains(&pattern),
+                        DataScalarFunction::StartsWith => value.starts_with(&pattern),
+                        _ => unreachable!(),
+                    }),
+                    _ => Value::Null,
+                },
+            )
+        }
+        DataScalarFunction::Replace => {
+            let [value, pattern, replacement] = args else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "replace() expects three arguments",
+                    Span::zero(),
+                ));
+            };
+            let value = eval_row_expr(value, table, row)?;
+            let pattern = eval_row_expr(pattern, table, row)?;
+            let replacement = eval_row_expr(replacement, table, row)?;
+            Ok(
+                match (
+                    value_to_optional_text(value),
+                    value_to_optional_text(pattern),
+                    value_to_optional_text(replacement),
+                ) {
+                    (Some(value), Some(pattern), Some(replacement)) => {
+                        Value::String(value.replace(&pattern, &replacement))
+                    }
+                    _ => Value::Null,
+                },
+            )
+        }
         DataScalarFunction::IsNull
         | DataScalarFunction::NotNull
         | DataScalarFunction::Lower
         | DataScalarFunction::Upper
         | DataScalarFunction::Trim
+        | DataScalarFunction::ToString
         | DataScalarFunction::ToNumber
+        | DataScalarFunction::ToBoolean
         | DataScalarFunction::Abs
         | DataScalarFunction::Round { .. } => {
             let [arg] = args else {
@@ -1459,6 +1645,10 @@ fn eval_scalar_function(
                 DataScalarFunction::Lower => Ok(map_text(value, |text| text.to_lowercase())),
                 DataScalarFunction::Upper => Ok(map_text(value, |text| text.to_uppercase())),
                 DataScalarFunction::Trim => Ok(map_text(value, |text| text.trim().to_string())),
+                DataScalarFunction::ToString => Ok(match value {
+                    Value::Null => Value::Null,
+                    _ => Value::String(value.to_csv_cell()),
+                }),
                 DataScalarFunction::ToNumber => Ok(match value {
                     Value::Null => Value::Null,
                     Value::Number(_) => value,
@@ -1469,6 +1659,15 @@ fn eval_scalar_function(
                         .map(Value::Number)
                         .unwrap_or(Value::Null),
                 }),
+                DataScalarFunction::ToBoolean => Ok(match value {
+                    Value::Null => Value::Null,
+                    Value::Bool(_) => value,
+                    _ => match value.to_csv_cell().trim() {
+                        "true" => Value::Bool(true),
+                        "false" => Value::Bool(false),
+                        _ => Value::Null,
+                    },
+                }),
                 DataScalarFunction::Abs => match value {
                     Value::Null => Ok(Value::Null),
                     Value::Number(value) => Ok(Value::Number(value.abs())),
@@ -1477,9 +1676,20 @@ fn eval_scalar_function(
                 DataScalarFunction::Round { digits } => round_value(value, digits),
                 DataScalarFunction::Coalesce
                 | DataScalarFunction::Concat
+                | DataScalarFunction::Contains
+                | DataScalarFunction::StartsWith
+                | DataScalarFunction::Replace
                 | DataScalarFunction::IfElse => unreachable!(),
             }
         }
+    }
+}
+
+fn value_to_optional_text(value: Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(value) => Some(value),
+        value => Some(value.to_csv_cell()),
     }
 }
 
@@ -1579,12 +1789,41 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
                             .otherwise(when_false),
                     )
             }
+            DataScalarFunction::Contains | DataScalarFunction::StartsWith => {
+                let [value, pattern] = args.as_slice() else {
+                    return Err(unsupported_native_operation("text predicate arity"));
+                };
+                let value = native_expr(value)?.cast(native::DataType::String);
+                let pattern = native_expr(pattern)?.cast(native::DataType::String);
+                match function {
+                    DataScalarFunction::Contains => value.str().contains_literal(pattern),
+                    DataScalarFunction::StartsWith => value.str().starts_with(pattern),
+                    _ => unreachable!(),
+                }
+            }
+            DataScalarFunction::Replace => {
+                let [value, pattern, replacement] = args.as_slice() else {
+                    return Err(unsupported_native_operation("replace arity"));
+                };
+                let pattern = native_static_text_literal(pattern, "replace pattern")?;
+                let replacement = native_static_text_literal(replacement, "replace replacement")?;
+                native_expr(value)?
+                    .cast(native::DataType::String)
+                    .str()
+                    .replace_all(
+                        native::lit(pattern.as_str()),
+                        native::lit(replacement.as_str()),
+                        true,
+                    )
+            }
             DataScalarFunction::IsNull
             | DataScalarFunction::NotNull
             | DataScalarFunction::Lower
             | DataScalarFunction::Upper
             | DataScalarFunction::Trim
+            | DataScalarFunction::ToString
             | DataScalarFunction::ToNumber
+            | DataScalarFunction::ToBoolean
             | DataScalarFunction::Abs
             | DataScalarFunction::Round { .. } => {
                 let [arg] = args.as_slice() else {
@@ -1604,17 +1843,34 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
                         .cast(native::DataType::String)
                         .str()
                         .strip_chars(native::lit(native::NULL)),
+                    DataScalarFunction::ToString => arg.cast(native::DataType::String),
                     DataScalarFunction::ToNumber => arg
                         .cast(native::DataType::String)
                         .str()
                         .strip_chars(native::lit(native::NULL))
                         .cast(native::DataType::Float64),
+                    DataScalarFunction::ToBoolean => {
+                        let text = arg
+                            .cast(native::DataType::String)
+                            .str()
+                            .strip_chars(native::lit(native::NULL));
+                        native::when(text.clone().eq(native::lit("true")))
+                            .then(native::lit(true))
+                            .otherwise(
+                                native::when(text.eq(native::lit("false")))
+                                    .then(native::lit(false))
+                                    .otherwise(native::lit(native::NULL)),
+                            )
+                    }
                     DataScalarFunction::Abs => arg.abs(),
                     DataScalarFunction::Round { digits } => {
                         arg.round(*digits, native::RoundMode::HalfAwayFromZero)
                     }
                     DataScalarFunction::Coalesce
                     | DataScalarFunction::Concat
+                    | DataScalarFunction::Contains
+                    | DataScalarFunction::StartsWith
+                    | DataScalarFunction::Replace
                     | DataScalarFunction::IfElse => {
                         unreachable!()
                     }
@@ -1627,6 +1883,17 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
             spec,
         } => native_window_expr(*function, args, spec)?,
     })
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_static_text_literal(expr: &DataExpr, reason: &'static str) -> Result<String, Diagnostic> {
+    match expr {
+        DataExpr::Literal(DataLiteral::String(value)) => Ok(value.clone()),
+        DataExpr::Literal(DataLiteral::Number(value)) => Ok(Value::Number(*value).to_csv_cell()),
+        DataExpr::Literal(DataLiteral::Bool(value)) => Ok(value.to_string()),
+        DataExpr::Literal(DataLiteral::Null) => Err(unsupported_native_operation(reason)),
+        _ => Err(unsupported_native_operation(reason)),
+    }
 }
 
 #[cfg(feature = "polars-engine")]
@@ -1834,12 +2101,23 @@ fn native_running_fill_nulls(expr: native::Expr) -> native::Expr {
 }
 
 #[cfg(feature = "polars-engine")]
+fn native_running_backward_fill_nulls(expr: native::Expr) -> native::Expr {
+    expr.fill_null_with_strategy(native::FillNullStrategy::Backward(
+        native::FillNullLimit::None,
+    ))
+}
+
+#[cfg(feature = "polars-engine")]
 fn native_window_row_position(spec: &DataWindowSpec) -> Result<native::Expr, Diagnostic> {
+    native_window_over(native_window_row_position_expr(spec)?, spec, true)
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_window_row_position_expr(spec: &DataWindowSpec) -> Result<native::Expr, Diagnostic> {
     let Some(row_index) = &spec.row_index else {
         return Err(unsupported_native_operation("window row index"));
     };
-    let row_number = native::col(row_index).cum_count(false);
-    native_window_over(row_number, spec, true)
+    Ok(native::col(row_index).cum_count(false))
 }
 
 #[cfg(feature = "polars-engine")]
@@ -1850,6 +2128,9 @@ fn native_rank_window_expr(
 ) -> Result<native::Expr, Diagnostic> {
     if !args.is_empty() {
         return Err(unsupported_native_operation("rank window arity"));
+    }
+    if spec.presorted && spec.order_by.len() > 1 {
+        return native_presorted_rank_window_expr(spec, method);
     }
     let [order] = spec.order_by.as_slice() else {
         return Err(unsupported_native_operation("rank window order"));
@@ -1905,6 +2186,60 @@ fn native_rank_window_expr(
 }
 
 #[cfg(feature = "polars-engine")]
+fn native_presorted_rank_window_expr(
+    spec: &DataWindowSpec,
+    method: native::RankMethod,
+) -> Result<native::Expr, Diagnostic> {
+    let position = native_window_row_position_expr(spec)?;
+    match method {
+        native::RankMethod::Dense => {
+            let peer_start = native_presorted_peer_boundary_expr(spec, false)?;
+            let dense_rank = peer_start.cast(native::DataType::UInt32).cum_sum(false);
+            native_window_over(dense_rank, spec, true)
+        }
+        native::RankMethod::Min => {
+            let peer_start = native_presorted_peer_boundary_expr(spec, false)?;
+            let starts = native::when(peer_start)
+                .then(position)
+                .otherwise(native::lit(native::NULL));
+            native_window_over(native_running_fill_nulls(starts), spec, true)
+        }
+        native::RankMethod::Max => {
+            let peer_end = native_presorted_peer_boundary_expr(spec, true)?;
+            let ends = native::when(peer_end)
+                .then(position)
+                .otherwise(native::lit(native::NULL));
+            native_window_over(native_running_backward_fill_nulls(ends), spec, true)
+        }
+        _ => Err(unsupported_native_operation("rank method")),
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_presorted_peer_boundary_expr(
+    spec: &DataWindowSpec,
+    next: bool,
+) -> Result<native::Expr, Diagnostic> {
+    if spec.order_by.len() <= 1 {
+        return Err(unsupported_native_operation("multi-key peer boundary"));
+    }
+    let mut differs = native::lit(false);
+    let shift = if next { -1i64 } else { 1i64 };
+    for order in &spec.order_by {
+        let current = native::col(&order.column);
+        let adjacent = current.clone().shift(native::lit(shift));
+        differs = differs.or(current.neq_missing(adjacent));
+    }
+    let position = native_window_row_position_expr(spec)?;
+    let edge = if next {
+        position.eq(native::len())
+    } else {
+        position.eq(native::lit(1u32))
+    };
+    Ok(edge.or(differs))
+}
+
+#[cfg(feature = "polars-engine")]
 fn native_window_over(
     expr: native::Expr,
     spec: &DataWindowSpec,
@@ -1950,6 +2285,9 @@ fn native_partition_exprs(spec: &DataWindowSpec) -> Vec<native::Expr> {
 fn native_window_order(
     spec: &DataWindowSpec,
 ) -> Result<Option<(Vec<native::Expr>, native::SortOptions)>, Diagnostic> {
+    if spec.presorted && spec.order_by.len() > 1 {
+        return Ok(None);
+    }
     match spec.order_by.as_slice() {
         [] => Ok(None),
         [item] => {
@@ -1961,6 +2299,22 @@ fn native_window_order(
             Ok(Some((vec![native::col(&item.column)], options)))
         }
         _ => Err(unsupported_native_operation("multi-key window order")),
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_sort_multiple_options(specs: &[SortSpec]) -> native::SortMultipleOptions {
+    native::SortMultipleOptions {
+        descending: specs
+            .iter()
+            .map(|spec| spec.direction == SortDirection::Desc)
+            .collect(),
+        nulls_last: specs
+            .iter()
+            .map(|spec| native_sort_nulls_last(spec.direction, spec.nulls))
+            .collect(),
+        maintain_order: true,
+        ..Default::default()
     }
 }
 

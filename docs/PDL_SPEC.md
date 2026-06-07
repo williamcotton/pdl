@@ -1,26 +1,32 @@
 # PDL Detailed Specification
 
-Status: Draft 0.39.0
+Status: Draft 0.40.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.39.0`, tracked in
-`docs/V0_39_PLAN.md`. Version 0.39.0 promotes the advanced native window and
-composite-key equi-join slices while keeping browser execution and PDL-visible
-row semantics separate from Polars internals.
+The current repository implementation line is `0.40.0`, tracked in
+`docs/V0_40_PLAN.md`. Version 0.40.0 promotes selected remaining native gaps
+where row/native semantics are explicit while keeping browser execution and
+PDL-visible row semantics separate from Polars internals.
+
+The native v0.40 implementation promotes compatible multi-key window ordering
+for row-preserving mutate windows, typed native `lag`/`lead` defaults that lower
+through supported native expressions, additional scalar functions
+`contains`, `starts_with`, literal-pattern `replace`, `to_string`, and
+`to_boolean`, and compile-time `col(...)` indirection through string literals
+or string context defaults. Non-equi joins, incompatible-schema union
+extensions, `pivot_longer`, `complete`, JSON Lines input, CSV/JSON Lines text
+writers, browser/WASM execution, binding starts, and named outputs continue to
+use the portable row runtime in automatic mode.
 
 The native v0.39 implementation promotes row-preserving windows for
 `percent_rank`, `cume_dist`, `lag`, `lead`, `first_value`, `last_value`, and
 `rows between unbounded_preceding and current_row` aggregate frames where native
 ordering, null handling, types, and frames match rows. It also promotes
 single-key and composite-key equi-joins for `inner`, `left`, `right`, `full`,
-`semi`, and `anti` at the existing native-safe binding boundary. Multi-key
-window ordering, non-null `lag`/`lead` defaults, non-equi joins,
-incompatible-schema union extensions, `pivot_longer`, `complete`, JSON Lines
-input, CSV/JSON Lines text writers, browser/WASM execution, binding starts, and
-named outputs continue to use the portable row runtime in automatic mode.
+`semi`, and `anti` at the existing native-safe binding boundary.
 
 The native v0.38 implementation promotes row-preserving window expressions for
 `row_number`, `rank`, `dense_rank`, and whole-partition `count`, `sum`, `mean`,
@@ -2109,7 +2115,7 @@ v0.25 quoted-column syntax or `as` aliases.
 
 ### 12.3 Scalar Functions
 
-The version 0.26.0 target language supports these scalar functions in row
+The version 0.40.0 target language supports these scalar functions in row
 expressions:
 - `is_null(value)`: returns true when the value is null.
 - `not_null(value)`: returns true when the value is not null.
@@ -2121,8 +2127,21 @@ expressions:
 - `upper(value)`: renders a non-null value as text and uppercases it.
 - `trim(value)`: renders a non-null value as text and trims leading and
   trailing whitespace.
+- `contains(value, pattern)`: renders non-null arguments as text and returns
+  true when `value` contains `pattern`. If either argument is null, the result
+  is null.
+- `starts_with(value, prefix)`: renders non-null arguments as text and returns
+  true when `value` starts with `prefix`. If either argument is null, the result
+  is null.
+- `replace(value, pattern, replacement)`: renders non-null arguments as text and
+  replaces every non-overlapping literal `pattern` occurrence in `value` with
+  `replacement`. This is not a regex function. If any argument is null, the
+  result is null.
+- `to_string(value)`: renders a non-null value as text. Null returns null.
 - `to_number(value)`: passes through numbers and parses text as a number.
   Empty, null, or unparseable values return null.
+- `to_boolean(value)`: passes through booleans and parses trimmed text `true`
+  or `false`. Null and unparseable values return null.
 - `abs(value)`: returns the numeric absolute value.
 - `round(value)`: rounds a numeric value to the nearest integer.
 - `round(value, digits)`: rounds a numeric value to `digits` decimal places.
@@ -2135,8 +2154,6 @@ expressions:
 
 Recommended future scalar functions:
 
-- `contains(value, pattern)`
-- `starts_with(value, prefix)`
 - `ends_with(value, suffix)`
 - `date(value)`
 - `datetime(value)`
@@ -2664,18 +2681,44 @@ Native row-preserving window coverage also includes `percent_rank`,
 `rows between unbounded_preceding and current_row` aggregate frames when each
 argument lowers through the supported native expression subset. Native
 `lag`/`lead` require exactly one order key, a non-negative integer literal
-offset, and an omitted or `null` default; non-null defaults remain on the row
-runtime because PDL row values can be mixed while native columns require a
-stable dtype. Native ranking, distribution, and offset windows currently require
-at most one order key so per-key direction, null placement, and tie behavior
-remain exactly aligned with the row runtime.
+offset, and an omitted or `null` default. Native ranking, distribution, and
+offset windows currently require at most one order key so per-key direction,
+null placement, and tie behavior remain exactly aligned with the row runtime.
+
+Since version 0.40.0, the native subset also supports compatible multi-key
+window ordering for row-preserving mutate windows. The native executor adds a
+hidden row index, physically pre-sorts by partition keys and the composite
+window order, evaluates windows over that ordered partition, restores original
+row order, then drops the hidden index. The promoted multi-key subset requires a
+single compatible composite order group per mutate stage; mixed multi-key order
+groups remain row-only in automatic mode or report `E1211` in forced native
+mode. Multi-key peer rows for `rank`, `dense_rank`, `percent_rank`, and
+`cume_dist` compare every `order_by` key with null-aware equality.
+
+Since version 0.40.0, native `lag` and `lead` support non-null default
+expressions when the value expression, offset, default, and window spec all
+lower through the native subset and the resulting typed native branch output is
+compatible. Incompatible native branch dtypes may still fall back to rows in
+automatic mode or fail forced native with `E1211`.
+
+Since version 0.40.0, the native scalar subset also supports `contains(value,
+pattern)`, `starts_with(value, prefix)`, literal-pattern
+`replace(value, pattern, replacement)`, `to_string(value)`, and
+`to_boolean(value)` over supported native expressions. Native `replace` is
+limited to literal or context-literal pattern and replacement arguments because
+the backend does not support dynamic per-row replace patterns with the required
+row semantics.
+
+Since version 0.40.0, `col(...)` with a string literal or string context default
+is eligible for native planning as a static column reference. Data-dependent
+`col(...)` remains row-only.
 
 Unsupported aggregate functions, non-Arrow byte-backed input, non-Arrow stdin,
 binding starts, named outputs, multi-output execution, non-equi joins,
 incompatible-schema union extensions, `pivot_longer`, `complete`, JSON Lines
-input, CSV/JSON Lines text writers, unsupported bounded-frame windows, multi-key
-window ordering, non-null offset-window defaults, data-dependent dynamic
-`col(...)`, uncertain coercions, and other unsupported expressions fall back to
+input, CSV/JSON Lines text writers, unsupported bounded-frame windows,
+incompatible multi-key window order groups, data-dependent dynamic `col(...)`,
+uncertain coercions, and other unsupported expressions fall back to
 rows in automatic mode before native scans are opened when they are known to be
 unsupported. Forced native mode reports an `E1211` diagnostic with a stable
 unsupported native reason category instead of silently falling back.
@@ -2698,7 +2741,7 @@ plan output also includes the same facts. Observability MUST NOT write to binary
 stdout during `run`; it is exposed through plan/manifest JSON, text plan output,
 stderr diagnostics, or benchmark sidecar reports.
 
-Version 0.39.0 defines the native coverage matrix in
+Version 0.40.0 defines the native coverage matrix in
 `docs/PDL_NATIVE_COVERAGE.csv` and documents it in
 `docs/PDL_NATIVE_COVERAGE.md`. Matrix statuses are limited to `native parity`,
 `native partial`, `row-only by design`, `planned native`, `unsupported`, and
@@ -2862,7 +2905,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.39.0` LSP implementation provides diagnostics,
+The current `0.40.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3252,6 +3295,11 @@ changes. `pdl-wasm@0.39.0` carries the updated parser and in-memory runtime, and
 `pdl-editor@0.39.0` peers on `pdl-wasm@0.39.x` so Monaco hosts can consume the
 matching editor-service ABI without a stale peer dependency range.
 
+Version 0.40.0 is a native Rust/CLI release. It does not require browser npm
+package manifests or consumer install pins to move past the latest verified
+published `pdl-wasm@0.39.0` and `pdl-editor@0.39.0` packages unless those
+packages are explicitly prepared and published.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3322,7 +3370,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.39.0"
+version = "0.40.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -4916,7 +4964,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.39.0.
+PDL source does not require an explicit version declaration in draft 0.40.0.
 
 The implementation SHOULD report supported language version.
 

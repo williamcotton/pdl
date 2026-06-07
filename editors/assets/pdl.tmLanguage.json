@@ -179,7 +179,7 @@
         },
         {
           "name": "support.function.scalar.pdl",
-          "match": "\\b(?:is_null|not_null|coalesce|concat|lower|upper|trim|to_number|abs|round|if_else|col)\\b(?=\\s*\\()"
+          "match": "\\b(?:is_null|not_null|coalesce|concat|lower|upper|trim|contains|starts_with|replace|to_string|to_number|to_boolean|abs|round|if_else|col)\\b(?=\\s*\\()"
         },
         {
           "name": "support.function.window.pdl",

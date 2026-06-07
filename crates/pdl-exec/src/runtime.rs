@@ -1071,10 +1071,72 @@ fn lower_data_mutate_items(
     items: &[MutateItemIr],
     context: &BTreeMap<String, Value>,
 ) -> Result<Vec<(String, DataExpr)>, Diagnostic> {
+    check_native_mutate_multi_key_window_order_groups(items)?;
     items
         .iter()
         .map(|item| Ok((item.column.clone(), lower_data_expr(&item.expr, context)?)))
         .collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct NativeWindowSortGroupIr {
+    partition_by: Vec<String>,
+    order_by: Vec<(String, SortDirectionIr, Option<NullsOrderIr>)>,
+}
+
+fn check_native_mutate_multi_key_window_order_groups(
+    items: &[MutateItemIr],
+) -> Result<(), Diagnostic> {
+    let mut group = None;
+    for item in items {
+        if expr_multi_key_window_order_incompatible(&item.expr, &mut group) {
+            return Err(unsupported_native_pipeline(
+                "multiple multi-key window order groups",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn expr_multi_key_window_order_incompatible(
+    expr: &ExprIr,
+    group: &mut Option<NativeWindowSortGroupIr>,
+) -> bool {
+    match expr {
+        ExprIr::Window { args, spec, .. } => {
+            if spec.order_by.len() > 1 {
+                let next = NativeWindowSortGroupIr {
+                    partition_by: spec.partition_by.clone(),
+                    order_by: spec
+                        .order_by
+                        .iter()
+                        .map(|item| (item.column.clone(), item.direction, item.nulls))
+                        .collect(),
+                };
+                match group {
+                    Some(current) if current != &next => return true,
+                    Some(_) => {}
+                    None => *group = Some(next),
+                }
+            }
+            args.iter()
+                .any(|arg| expr_multi_key_window_order_incompatible(arg, group))
+        }
+        ExprIr::Call { args, .. } => args
+            .iter()
+            .any(|arg| expr_multi_key_window_order_incompatible(arg, group)),
+        ExprIr::Unary { expr, .. } => expr_multi_key_window_order_incompatible(expr, group),
+        ExprIr::Binary { left, right, .. } => {
+            expr_multi_key_window_order_incompatible(left, group)
+                || expr_multi_key_window_order_incompatible(right, group)
+        }
+        ExprIr::Quoted { .. }
+        | ExprIr::Number { .. }
+        | ExprIr::Bool { .. }
+        | ExprIr::Null { .. }
+        | ExprIr::Ident { .. }
+        | ExprIr::Context { .. } => false,
+    }
 }
 
 fn lower_data_agg_arg(
@@ -1115,7 +1177,26 @@ fn lower_data_call(
         "lower" => DataScalarFunction::Lower,
         "upper" => DataScalarFunction::Upper,
         "trim" => DataScalarFunction::Trim,
+        "contains" => DataScalarFunction::Contains,
+        "starts_with" => DataScalarFunction::StartsWith,
+        "replace" => {
+            let [_, pattern, replacement] = args else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "replace() expects three arguments",
+                    span,
+                ));
+            };
+            if !native_static_text_arg(pattern) || !native_static_text_arg(replacement) {
+                return Err(unsupported_native_pipeline(
+                    "native replace() requires literal pattern and replacement",
+                ));
+            }
+            DataScalarFunction::Replace
+        }
+        "to_string" => DataScalarFunction::ToString,
         "to_number" => DataScalarFunction::ToNumber,
+        "to_boolean" => DataScalarFunction::ToBoolean,
         "abs" => DataScalarFunction::Abs,
         "round" => {
             let digits = match args {
@@ -1150,6 +1231,16 @@ fn lower_data_call(
     })
 }
 
+fn native_static_text_arg(arg: &ExprIr) -> bool {
+    matches!(
+        arg,
+        ExprIr::Quoted { .. }
+            | ExprIr::Number { .. }
+            | ExprIr::Bool { .. }
+            | ExprIr::Context { .. }
+    )
+}
+
 fn lower_data_window(
     function: &str,
     args: &[ExprIr],
@@ -1172,9 +1263,9 @@ fn lower_data_window(
                     "window function arity is not supported by native execution",
                 ));
             }
-            if spec.order_by.len() != 1 {
+            if spec.order_by.is_empty() {
                 return Err(unsupported_native_pipeline(
-                    "native rank windows require one order key",
+                    "native rank windows require at least one order key",
                 ));
             }
             if function == "rank" {
@@ -1189,9 +1280,9 @@ fn lower_data_window(
                     "window function arity is not supported by native execution",
                 ));
             }
-            if spec.order_by.len() != 1 {
+            if spec.order_by.is_empty() {
                 return Err(unsupported_native_pipeline(
-                    "native distribution windows require one order key",
+                    "native distribution windows require at least one order key",
                 ));
             }
             if function == "percent_rank" {
@@ -1206,9 +1297,9 @@ fn lower_data_window(
                     "window function arity is not supported by native execution",
                 ));
             }
-            if spec.order_by.len() != 1 {
+            if spec.order_by.is_empty() {
                 return Err(unsupported_native_pipeline(
-                    "native offset windows require one order key",
+                    "native offset windows require at least one order key",
                 ));
             }
             match args.get(1) {
@@ -1219,14 +1310,6 @@ fn lower_data_window(
                         "native offset windows require a non-negative integer literal offset",
                     ));
                 }
-            }
-            if args
-                .get(2)
-                .is_some_and(|arg| !matches!(arg, ExprIr::Null { .. }))
-            {
-                return Err(unsupported_native_pipeline(
-                    "native offset windows support omitted or null defaults",
-                ));
             }
             if function == "lag" {
                 DataWindowFunction::Lag
@@ -1308,11 +1391,6 @@ fn lower_data_window_spec(
     span: Span,
     context: &BTreeMap<String, Value>,
 ) -> Result<DataWindowSpec, Diagnostic> {
-    if spec.order_by.len() > 1 {
-        return Err(unsupported_native_pipeline(
-            "multi-key window order is not supported by native execution",
-        ));
-    }
     Ok(DataWindowSpec {
         partition_by: resolve_native_column_names(&spec.partition_by, span, context)?,
         order_by: spec
@@ -1342,6 +1420,7 @@ fn lower_data_window_spec(
             .collect::<Result<Vec<_>, Diagnostic>>()?,
         frame: lower_data_window_frame(spec)?,
         row_index: None,
+        presorted: false,
     })
 }
 
@@ -2772,6 +2851,62 @@ fn eval_call(
             runtime_context,
             |value| Ok(map_text(value, |text| text.trim().to_string())),
         ),
+        "contains" | "starts_with" => {
+            let [_, _] = args else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    format!("{name}() expects two arguments"),
+                    span,
+                ));
+            };
+            let values =
+                eval_args_as_optional_text(args, table, row, window_row_index, runtime_context)?;
+            let [value, pattern] = values.as_slice() else {
+                unreachable!("checked text predicate arity")
+            };
+            Ok(match (value, pattern) {
+                (Some(value), Some(pattern)) => Value::Bool(match name {
+                    "contains" => value.contains(pattern),
+                    "starts_with" => value.starts_with(pattern),
+                    _ => unreachable!(),
+                }),
+                _ => Value::Null,
+            })
+        }
+        "replace" => {
+            let [_, _, _] = args else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "replace() expects three arguments",
+                    span,
+                ));
+            };
+            let values =
+                eval_args_as_optional_text(args, table, row, window_row_index, runtime_context)?;
+            let [value, pattern, replacement] = values.as_slice() else {
+                unreachable!("checked replace arity")
+            };
+            Ok(match (value, pattern, replacement) {
+                (Some(value), Some(pattern), Some(replacement)) => {
+                    Value::String(value.replace(pattern, replacement))
+                }
+                _ => Value::Null,
+            })
+        }
+        "to_string" => eval_single_arg(
+            args,
+            table,
+            row,
+            span,
+            window_row_index,
+            runtime_context,
+            |value| {
+                Ok(match value {
+                    Value::Null => Value::Null,
+                    _ => Value::String(value.to_csv_cell()),
+                })
+            },
+        ),
         "to_number" => eval_single_arg(
             args,
             table,
@@ -2789,6 +2924,25 @@ fn eval_call(
                         .parse::<f64>()
                         .map(Value::Number)
                         .unwrap_or(Value::Null),
+                })
+            },
+        ),
+        "to_boolean" => eval_single_arg(
+            args,
+            table,
+            row,
+            span,
+            window_row_index,
+            runtime_context,
+            |value| {
+                Ok(match value {
+                    Value::Null => Value::Null,
+                    Value::Bool(_) => value,
+                    _ => match value.to_csv_cell().trim() {
+                        "true" => Value::Bool(true),
+                        "false" => Value::Bool(false),
+                        _ => Value::Null,
+                    },
                 })
             },
         ),
@@ -3395,6 +3549,36 @@ fn eval_single_arg(
             "function expects one argument",
             span,
         )),
+    }
+}
+
+fn eval_args_as_optional_text(
+    args: &[ExprIr],
+    table: &Table,
+    row: &Row,
+    window_row_index: Option<usize>,
+    runtime_context: &BTreeMap<String, Value>,
+) -> Result<Vec<Option<String>>, Diagnostic> {
+    args.iter()
+        .map(|arg| {
+            let value = eval_row_expr(
+                arg,
+                table,
+                row,
+                ExprRole::Default,
+                window_row_index,
+                runtime_context,
+            )?;
+            Ok(value_to_optional_text(value))
+        })
+        .collect()
+}
+
+fn value_to_optional_text(value: Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(value) => Some(value),
+        value => Some(value.to_csv_cell()),
     }
 }
 
@@ -4188,6 +4372,156 @@ mod tests {
     }
 
     #[test]
+    fn native_engine_extended_scalars_match_rows_for_path_formats() {
+        let workspace = temp_workspace("native-extended-scalars");
+        let table = Table::new(
+            vec![
+                "id".to_string(),
+                "text".to_string(),
+                "pattern".to_string(),
+                "prefix".to_string(),
+                "replacement".to_string(),
+                "boolish".to_string(),
+                "flag".to_string(),
+                "raw".to_string(),
+                "maybe_null".to_string(),
+            ],
+            vec![
+                Row {
+                    values: vec![
+                        Value::String("a".to_string()),
+                        Value::String("alpha-beta".to_string()),
+                        Value::String("beta".to_string()),
+                        Value::String("alpha".to_string()),
+                        Value::String("B".to_string()),
+                        Value::String(" true ".to_string()),
+                        Value::Bool(true),
+                        Value::Number(42.5),
+                        Value::Null,
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("b".to_string()),
+                        Value::String("omega".to_string()),
+                        Value::String("alp".to_string()),
+                        Value::String("om".to_string()),
+                        Value::String("X".to_string()),
+                        Value::String("false".to_string()),
+                        Value::Bool(false),
+                        Value::Number(-3.25),
+                        Value::String("xray".to_string()),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("c".to_string()),
+                        Value::Null,
+                        Value::String("a".to_string()),
+                        Value::String("a".to_string()),
+                        Value::String("z".to_string()),
+                        Value::String("maybe".to_string()),
+                        Value::Null,
+                        Value::Null,
+                        Value::String("none".to_string()),
+                    ],
+                },
+            ],
+        );
+        for (path, format) in [
+            ("scalars.csv", DataFormat::Csv),
+            ("scalars.parquet", DataFormat::Parquet),
+            ("scalars.arrow", DataFormat::ArrowStream),
+        ] {
+            pdl_data::write_table_to_path(&workspace.join(path), format, &table)
+                .expect("write fixture");
+        }
+
+        for (input, format_clause) in [
+            ("scalars.csv", ""),
+            ("scalars.parquet", ""),
+            ("scalars.arrow", r#" format "arrow-stream""#),
+        ] {
+            let io = OsDriverIo;
+            let prepared = prepare_source_with_io(
+                workspace.join(format!("{input}.pdl")),
+                format!(
+                    r#"load "{input}"{format_clause}
+  | mutate
+      text_out = to_string(text),
+      raw_text = to_string(raw),
+      flag_text = to_string(flag),
+      parsed_bool = to_boolean(boolish),
+      flag_bool = to_boolean(flag),
+      has_pattern = contains(text, pattern),
+      starts_prefix = starts_with(text, prefix),
+      swapped = replace(text, "-", " "),
+      null_contains = contains(maybe_null, "x")
+  | select id, text_out, raw_text, flag_text, parsed_bool, flag_bool, has_pattern, starts_prefix, swapped, null_contains
+  | sort id"#
+                ),
+                &io,
+            );
+            let options = RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            };
+            let row = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Row,
+            );
+            let auto = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Auto,
+            );
+            let native = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options,
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Native,
+            );
+
+            assert!(row.diagnostics.is_empty(), "{input}: {:?}", row.diagnostics);
+            assert!(
+                auto.diagnostics.is_empty(),
+                "{input}: {:?}",
+                auto.diagnostics
+            );
+            assert!(
+                native.diagnostics.is_empty(),
+                "{input}: {:?}",
+                native.diagnostics
+            );
+            assert_eq!(auto.backend, DataBackend::NativePolars, "{input}");
+            assert_eq!(native.backend, DataBackend::NativePolars, "{input}");
+            let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+            assert_eq!(
+                String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+                row_csv,
+                "{input}"
+            );
+            assert_eq!(
+                String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+                row_csv,
+                "{input}"
+            );
+            assert_eq!(
+                row_csv,
+                "id,text_out,raw_text,flag_text,parsed_bool,flag_bool,has_pattern,starts_prefix,swapped,null_contains\na,alpha-beta,42.5,true,true,true,true,true,alpha beta,\nb,omega,-3.25,false,false,false,false,true,omega,true\nc,,,,,,,,,false\n"
+            );
+        }
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
     fn native_engine_loads_arrow_file_by_path() {
         let workspace = temp_workspace("native-arrow-file-input");
         let table = Table::new(
@@ -4950,6 +5284,107 @@ load "sales.csv"
                 String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
                 row_csv,
                 "{input}"
+            );
+        }
+
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn native_engine_multi_key_windows_match_rows_for_path_formats() {
+        let workspace = temp_workspace("native-multi-key-windows");
+        let table = pdl_data::read_table_from_bytes(
+            Path::new("orders.csv"),
+            DataFormat::Csv,
+            b"order_id,region,amount,tie,note\nA,West,30,b,alpha\nB,West,30,a,beta\nC,West,10,a,gamma\nD,East,20,b,delta\nE,East,20,a,epsilon\nF,East,5,a,zeta\nG,West,30,a,eta\n",
+        )
+        .expect("orders table");
+        for (path, format) in [
+            ("orders.csv", DataFormat::Csv),
+            ("orders.parquet", DataFormat::Parquet),
+            ("orders.arrow", DataFormat::ArrowStream),
+        ] {
+            pdl_data::write_table_to_path(&workspace.join(path), format, &table)
+                .expect("write multi-key window fixture");
+        }
+
+        for (input, format_clause) in [
+            ("orders.csv", ""),
+            ("orders.parquet", ""),
+            ("orders.arrow", r#" format "arrow-stream""#),
+        ] {
+            let io = OsDriverIo;
+            let prepared = prepare_source_with_io(
+                workspace.join(format!("{input}.pdl")),
+                format!(
+                    r#"load "{input}"{format_clause}
+  | mutate
+      seq = row_number() over (partition_by region order_by amount desc, tie asc),
+      sparse_rank = rank() over (partition_by region order_by amount desc, tie asc),
+      dense = dense_rank() over (partition_by region order_by amount desc, tie asc),
+      pct = percent_rank() over (partition_by region order_by amount desc, tie asc),
+      cume = cume_dist() over (partition_by region order_by amount desc, tie asc),
+      prior_amount = lag(amount, 1, 0) over (partition_by region order_by amount desc, tie asc),
+      next_note = lead(note, 1, "end") over (partition_by region order_by amount desc, tie asc),
+      running_amount = sum(amount) over (partition_by region order_by amount desc, tie asc rows between unbounded_preceding and current_row)
+  | select order_id, seq, sparse_rank, dense, pct, cume, prior_amount, next_note, running_amount"#
+                ),
+                &io,
+            );
+            let options = RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            };
+            let row = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Row,
+            );
+            let auto = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Auto,
+            );
+            let native = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options,
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Native,
+            );
+
+            assert!(row.diagnostics.is_empty(), "{input}: {:?}", row.diagnostics);
+            assert!(
+                auto.diagnostics.is_empty(),
+                "{input}: {:?}",
+                auto.diagnostics
+            );
+            assert!(
+                native.diagnostics.is_empty(),
+                "{input}: {:?}",
+                native.diagnostics
+            );
+            assert_eq!(auto.backend, DataBackend::NativePolars, "{input}");
+            assert_eq!(native.backend, DataBackend::NativePolars, "{input}");
+            let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+            assert_eq!(
+                String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+                row_csv,
+                "{input}"
+            );
+            assert_eq!(
+                String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+                row_csv,
+                "{input}"
+            );
+            assert_eq!(
+                row_csv,
+                "order_id,seq,sparse_rank,dense,pct,cume,prior_amount,next_note,running_amount\nA,3,3,2,0.6666666666666666,0.75,30,gamma,90\nB,1,1,1,0,0.5,0,eta,30\nC,4,4,3,1,1,30,end,100\nD,2,2,2,0.5,0.6666666666666666,20,zeta,40\nE,1,1,1,0,0.3333333333333333,0,delta,20\nF,3,3,3,1,1,20,end,45\nG,2,1,1,0,0.5,30,alpha,60\n"
             );
         }
 

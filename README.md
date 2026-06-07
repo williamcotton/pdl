@@ -14,7 +14,6 @@ tables are loaded, cleaned, reshaped, joined, aggregated, ranked, and saved in a
 and emits deterministic files or stdout streams for downstream tools such as
 Algraf.
 
-The normative reference is [`docs/PDL_SPEC.md`](docs/PDL_SPEC.md).
 Runnable examples live in [`examples/`](examples/).
 
 Live site: [`https://williamcotton.github.io/pdl/`](https://williamcotton.github.io/pdl/)
@@ -128,6 +127,15 @@ pdl run examples/stdout_arrow_stream.pdl --stdout-format arrow-stream > /tmp/sal
 pdl run examples/arrow_stream_passthrough.pdl --stdin-format arrow-stream < /tmp/sales.arrow > /tmp/sales.sorted.arrow
 ```
 
+The typed-stream handoff composes with [Algraf](https://github.com/williamcotton/algraf)
+without writing an intermediate file. The renderer accepts `--data -` and the
+matching `--data-format arrow-stream`:
+
+```bash
+pdl run examples/stdout_arrow_stream.pdl --stdout-format arrow-stream \
+  | algraf render chart.ag --data - --data-format arrow-stream --output chart.svg
+```
+
 ## Install and run
 
 Install the packaged binary with Homebrew:
@@ -178,6 +186,26 @@ pdl run examples/stdout_parquet.pdl --stdout-format parquet > /tmp/sales.parquet
 ```
 
 Human diagnostics and logs go to stderr so stdout stays a clean data stream.
+
+## Native execution engine
+
+`pdl run` defaults to `--engine auto`: it classifies the pipeline ahead of data
+load and picks a Polars 0.53–backed native engine when every stage is covered.
+Stages outside native coverage trigger an automatic fallback to the portable
+row runtime so the same source keeps producing the same output. Force a
+specific engine with `--engine native` or `--engine row` when you want to pin
+behavior.
+
+```bash
+pdl plan examples/top_regions.pdl --stdout-format csv
+```
+
+`pdl plan` reports the selected engine and any fallback reasons stage by stage,
+so the cost of running natively (or not) is visible before you execute. Native
+coverage includes path-backed CSV/Parquet/Arrow IPC loads, single and
+composite-key equi-joins, grouped aggregates, window functions (`row_number`,
+`rank`, `lag`/`lead`, aggregate windows), and binary Parquet/Arrow output
+without a text round-trip.
 
 ## Editor and browser support
 

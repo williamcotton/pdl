@@ -174,6 +174,60 @@ export function HomePage({ navigate, routeHref }: RoutedPageProps): React.ReactE
         </article>
       </section>
 
+      <section className="cli-section" aria-label="Native CLI">
+        <header className="cli-section-head">
+          <p className="eyebrow">
+            <Terminal size={15} aria-hidden="true" />
+            On the command line
+          </p>
+          <h2>Same language, native Rust execution.</h2>
+          <p>
+            The browser runtime above is the same parser, analyzer, and executor exposed by the
+            <code> pdl </code>
+            binary &mdash; plus a Polars 0.53&ndash;backed native engine, Arrow IPC streaming, and Unix
+            pipeline composition.
+          </p>
+        </header>
+
+        <div className="cli-subgroup">
+          <p className="cli-subgroup-label">Subcommands</p>
+          <div className="cli-chip-row">
+            <span className="cli-chip"><code>pdl run</code><small>execute a pipeline</small></span>
+            <span className="cli-chip"><code>pdl check</code><small>parse + analyze</small></span>
+            <span className="cli-chip"><code>pdl fmt</code><small>canonical format</small></span>
+            <span className="cli-chip"><code>pdl schema</code><small>resolved schema</small></span>
+            <span className="cli-chip"><code>pdl plan</code><small>engine + stage choices</small></span>
+            <span className="cli-chip"><code>pdl manifest</code><small>inputs/outputs</small></span>
+            <span className="cli-chip"><code>pdl lsp</code><small>language server</small></span>
+          </div>
+        </div>
+
+        <div className="cli-callout">
+          <h3>Polars-backed native engine</h3>
+          <p>
+            <code>--engine native</code> runs Polars 0.53 with automatic fallback to the row runtime when a
+            stage isn&apos;t covered. <code>pdl plan</code> shows which engine each stage will use, and why.
+          </p>
+        </div>
+
+        <div className="cli-subgroup">
+          <p className="cli-subgroup-label">Stream Arrow IPC end-to-end</p>
+          <pre className="cli-snippet"><code>{`cat sales.parquet \\
+  | pdl run prep.pdl --stdin-format parquet --stdout-format arrow-stream \\
+  > prepared.arrow`}</code></pre>
+        </div>
+
+        <div className="cli-subgroup">
+          <p className="cli-subgroup-label">
+            Compose with{" "}
+            <a className="cli-inline-link" href="https://williamcotton.github.io/algraf/">Algraf</a>
+          </p>
+          <pre className="cli-snippet"><code>{`pdl run prep.pdl --stdout-format arrow-stream \\
+  | algraf render chart.ag --data - --data-format arrow-stream \\
+  --output chart.svg`}</code></pre>
+        </div>
+      </section>
+
       <section className="home-band">
         <div>
           <h2>Move from source to prepared data without changing tools</h2>

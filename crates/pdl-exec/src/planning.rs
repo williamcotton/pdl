@@ -5,7 +5,7 @@ use pdl_semantics::{
     AggItemIr, ExprIr, FrameBoundIr, PipelineIr, PipelineStartIr, ProgramIr, StageIr,
     WindowFrameIr, WindowSpecIr,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlanningOptions {
@@ -542,6 +542,9 @@ fn native_pipeline_unsupported_reason(
             | StageIr::Limit { .. }
             | StageIr::Distinct { .. } => {}
             StageIr::Mutate { items, .. } => {
+                if native_multi_key_window_order_reason(items).is_some() {
+                    return Some(NativeUnsupportedReason::WindowExpression);
+                }
                 for item in items {
                     native_expr_unsupported_reason(&item.expr)?;
                 }
@@ -689,12 +692,22 @@ fn native_expr_unsupported_reason(expr: &ExprIr) -> Option<NativeUnsupportedReas
                 };
             }
             match name.as_str() {
-                "is_null" | "not_null" | "lower" | "upper" | "trim" | "to_number" | "abs" => {
-                    let [arg] = args.as_slice() else {
-                        return Some(NativeUnsupportedReason::ScalarFunctionArity);
-                    };
-                    native_expr_unsupported_reason(arg)
-                }
+                "is_null" | "not_null" | "lower" | "upper" | "trim" | "to_string" | "to_number"
+                | "to_boolean" | "abs" => match args.as_slice() {
+                    [arg] => native_expr_unsupported_reason(arg),
+                    _ => Some(NativeUnsupportedReason::ScalarFunctionArity),
+                },
+                "contains" | "starts_with" => match args.as_slice() {
+                    [value, pattern] => native_expr_unsupported_reason(value)
+                        .or_else(|| native_expr_unsupported_reason(pattern)),
+                    _ => Some(NativeUnsupportedReason::ScalarFunctionArity),
+                },
+                "replace" => match args.as_slice() {
+                    [value, pattern, replacement] => native_expr_unsupported_reason(value)
+                        .or_else(|| native_static_text_arg_reason(pattern))
+                        .or_else(|| native_static_text_arg_reason(replacement)),
+                    _ => Some(NativeUnsupportedReason::ScalarFunctionArity),
+                },
                 "coalesce" | "concat" => args.iter().find_map(native_expr_unsupported_reason),
                 "if_else" => match args.as_slice() {
                     [condition, when_true, when_false] => native_expr_unsupported_reason(condition)
@@ -719,18 +732,15 @@ fn native_window_unsupported_reason(
     args: &[ExprIr],
     spec: &WindowSpecIr,
 ) -> Option<NativeUnsupportedReason> {
-    if spec.order_by.len() > 1 {
-        return Some(NativeUnsupportedReason::WindowExpression);
-    }
     match function {
         "row_number" if args.is_empty() => native_supported_window_frame_reason(spec),
-        "rank" | "dense_rank" if args.is_empty() && spec.order_by.len() == 1 => {
+        "rank" | "dense_rank" if args.is_empty() && !spec.order_by.is_empty() => {
             native_supported_window_frame_reason(spec)
         }
-        "percent_rank" | "cume_dist" if args.is_empty() && spec.order_by.len() == 1 => {
+        "percent_rank" | "cume_dist" if args.is_empty() && !spec.order_by.is_empty() => {
             native_supported_window_frame_reason(spec)
         }
-        "lag" | "lead" if !args.is_empty() && args.len() <= 3 && spec.order_by.len() == 1 => {
+        "lag" | "lead" if !args.is_empty() && args.len() <= 3 && !spec.order_by.is_empty() => {
             native_supported_window_frame_reason(spec)
                 .or_else(|| native_expr_unsupported_reason(&args[0]))
                 .or_else(|| native_offset_arg_reason(args.get(1)))
@@ -748,6 +758,69 @@ fn native_window_unsupported_reason(
                 .or_else(|| native_expr_unsupported_reason(&args[0]))
         }
         _ => Some(NativeUnsupportedReason::WindowExpression),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct NativeWindowSortGroupIr {
+    partition_by: Vec<String>,
+    order_by: Vec<(
+        String,
+        pdl_semantics::SortDirectionIr,
+        Option<pdl_semantics::NullsOrderIr>,
+    )>,
+}
+
+fn native_multi_key_window_order_reason(
+    items: &[pdl_semantics::MutateItemIr],
+) -> Option<NativeUnsupportedReason> {
+    let mut group = None;
+    for item in items {
+        if native_expr_multi_key_window_order_incompatible(&item.expr, &mut group) {
+            return Some(NativeUnsupportedReason::WindowExpression);
+        }
+    }
+    None
+}
+
+fn native_expr_multi_key_window_order_incompatible(
+    expr: &ExprIr,
+    group: &mut Option<NativeWindowSortGroupIr>,
+) -> bool {
+    match expr {
+        ExprIr::Window { args, spec, .. } => {
+            if spec.order_by.len() > 1 {
+                let next = NativeWindowSortGroupIr {
+                    partition_by: spec.partition_by.clone(),
+                    order_by: spec
+                        .order_by
+                        .iter()
+                        .map(|item| (item.column.clone(), item.direction, item.nulls))
+                        .collect(),
+                };
+                match group {
+                    Some(current) if current != &next => return true,
+                    Some(_) => {}
+                    None => *group = Some(next),
+                }
+            }
+            args.iter()
+                .any(|arg| native_expr_multi_key_window_order_incompatible(arg, group))
+        }
+        ExprIr::Call { args, .. } => args
+            .iter()
+            .any(|arg| native_expr_multi_key_window_order_incompatible(arg, group)),
+        ExprIr::Unary { expr, .. } => native_expr_multi_key_window_order_incompatible(expr, group),
+        ExprIr::Binary { left, right, .. } => {
+            native_expr_multi_key_window_order_incompatible(left, group)
+                || native_expr_multi_key_window_order_incompatible(right, group)
+        }
+        ExprIr::Quoted { .. }
+        | ExprIr::Number { .. }
+        | ExprIr::Bool { .. }
+        | ExprIr::Null { .. }
+        | ExprIr::Ident { .. }
+        | ExprIr::Context { .. } => false,
     }
 }
 
@@ -776,10 +849,21 @@ fn native_offset_arg_reason(offset: Option<&ExprIr>) -> Option<NativeUnsupported
     }
 }
 
+fn native_static_text_arg_reason(arg: &ExprIr) -> Option<NativeUnsupportedReason> {
+    match arg {
+        ExprIr::Quoted { .. }
+        | ExprIr::Number { .. }
+        | ExprIr::Bool { .. }
+        | ExprIr::Context { .. } => None,
+        ExprIr::Null { .. } => Some(NativeUnsupportedReason::ScalarFunction),
+        _ => Some(NativeUnsupportedReason::ScalarFunction),
+    }
+}
+
 fn native_offset_default_reason(default: Option<&ExprIr>) -> Option<NativeUnsupportedReason> {
     match default {
-        None | Some(ExprIr::Null { .. }) => None,
-        Some(_) => Some(NativeUnsupportedReason::WindowExpression),
+        None => None,
+        Some(default) => native_expr_unsupported_reason(default),
     }
 }
 
@@ -840,6 +924,12 @@ fn required_source_columns(
         .traces
         .iter()
         .find_map(|trace| trace.input_schema.clone())?;
+    let context_columns = prepared
+        .analysis
+        .ir
+        .as_ref()
+        .map(context_string_defaults)
+        .unwrap_or_default();
     let mut required: Option<BTreeSet<String>> = None;
     let mut pending_group_keys: Vec<String> = Vec::new();
 
@@ -861,7 +951,7 @@ fn required_source_columns(
                 next.extend(pending_group_keys.iter().cloned());
                 for item in items {
                     for arg in &item.args {
-                        collect_expr_columns(arg, &mut next);
+                        collect_expr_columns(arg, &context_columns, &mut next);
                     }
                 }
                 required = Some(next);
@@ -885,7 +975,7 @@ fn required_source_columns(
                         .collect::<BTreeSet<_>>();
                     for item in items {
                         if current.contains(&item.column) {
-                            collect_expr_columns(&item.expr, &mut next);
+                            collect_expr_columns(&item.expr, &context_columns, &mut next);
                         }
                     }
                     required = Some(next);
@@ -928,7 +1018,7 @@ fn required_source_columns(
             StageIr::Filter { expr, .. } => {
                 let mut next = required
                     .unwrap_or_else(|| source_columns.iter().cloned().collect::<BTreeSet<_>>());
-                collect_expr_columns(expr, &mut next);
+                collect_expr_columns(expr, &context_columns, &mut next);
                 required = Some(next);
             }
             StageIr::Join { .. }
@@ -945,36 +1035,56 @@ fn required_source_columns(
     Some(required.into_iter().collect())
 }
 
-fn collect_expr_columns(expr: &ExprIr, columns: &mut BTreeSet<String>) {
+fn context_string_defaults(ir: &ProgramIr) -> BTreeMap<String, String> {
+    ir.contexts
+        .iter()
+        .filter_map(|context| match &context.default {
+            ExprIr::Quoted { value, .. } => Some((context.name.clone(), value.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_expr_columns(
+    expr: &ExprIr,
+    context_columns: &BTreeMap<String, String>,
+    columns: &mut BTreeSet<String>,
+) {
     match expr {
         ExprIr::Ident { value, .. } => {
             columns.insert(value.clone());
         }
-        ExprIr::Call { name, args, .. } if name == "col" => {
-            if let [ExprIr::Quoted { value, .. }] = args.as_slice() {
+        ExprIr::Call { name, args, .. } if name == "col" => match args.as_slice() {
+            [ExprIr::Quoted { value, .. }] => {
                 columns.insert(value.clone());
-            } else {
-                for arg in args {
-                    collect_expr_columns(arg, columns);
+            }
+            [ExprIr::Context { name, .. }] => {
+                if let Some(value) = context_columns.get(name) {
+                    columns.insert(value.clone());
                 }
             }
-        }
+            _ => {
+                for arg in args {
+                    collect_expr_columns(arg, context_columns, columns);
+                }
+            }
+        },
         ExprIr::Call { args, .. } => {
             for arg in args {
-                collect_expr_columns(arg, columns);
+                collect_expr_columns(arg, context_columns, columns);
             }
         }
         ExprIr::Window { args, spec, .. } => {
             for arg in args {
-                collect_expr_columns(arg, columns);
+                collect_expr_columns(arg, context_columns, columns);
             }
             columns.extend(spec.partition_by.iter().cloned());
             columns.extend(spec.order_by.iter().map(|item| item.column.clone()));
         }
-        ExprIr::Unary { expr, .. } => collect_expr_columns(expr, columns),
+        ExprIr::Unary { expr, .. } => collect_expr_columns(expr, context_columns, columns),
         ExprIr::Binary { left, right, .. } => {
-            collect_expr_columns(left, columns);
-            collect_expr_columns(right, columns);
+            collect_expr_columns(left, context_columns, columns);
+            collect_expr_columns(right, context_columns, columns);
         }
         ExprIr::Quoted { .. }
         | ExprIr::Number { .. }
@@ -1040,6 +1150,81 @@ mod tests {
             SinkStrategy::RowFormatWriter
         );
         assert!(plan.observability.row_materialization);
+    }
+
+    #[test]
+    fn planning_selects_native_for_v0_40_expressions_and_context_col_defaults() {
+        let io = InMemoryDriverIo::default()
+            .with_schema("memory/sales.csv", ["amount", "region", "status"]);
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"param metric = "amount"
+
+load "sales.csv"
+  | mutate
+      selected = col($metric),
+      label = concat(replace(region, "W", "West"), ":", to_string(col($metric))),
+      parsed = to_boolean("true"),
+      seq = row_number() over (partition_by region order_by amount desc, status asc),
+      prior_amount = lag(amount, 1, 0) over (partition_by region order_by amount desc, status asc)
+  | filter contains(label, "West") or starts_with(region, "E")
+  | select selected, parsed, seq, prior_amount"#,
+            &io,
+        );
+
+        let plan = plan_prepared(
+            &prepared,
+            PlanningOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+                engine: PlannedEngine::Auto,
+            },
+        )
+        .expect("execution plan");
+
+        assert_eq!(plan.observability.selected_engine, PlannedEngine::Native);
+        assert_eq!(plan.observability.eligible_engine, PlannedEngine::Native);
+        assert_eq!(plan.observability.fallback_reason, None);
+        assert_eq!(
+            plan.observability.required_source_columns,
+            Some(vec![
+                "amount".to_string(),
+                "region".to_string(),
+                "status".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn planning_rejects_mixed_multi_key_window_order_groups() {
+        let io = InMemoryDriverIo::default()
+            .with_schema("memory/sales.csv", ["amount", "region", "status"]);
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "sales.csv"
+  | mutate
+      amount_seq = row_number() over (partition_by region order_by amount desc, status asc),
+      status_seq = row_number() over (partition_by region order_by status asc, amount desc)"#,
+            &io,
+        );
+
+        let plan = plan_prepared(
+            &prepared,
+            PlanningOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+                engine: PlannedEngine::Auto,
+            },
+        )
+        .expect("execution plan");
+
+        assert_eq!(plan.observability.selected_engine, PlannedEngine::Row);
+        assert_eq!(
+            plan.observability.fallback_reason,
+            Some(NativeUnsupportedReason::WindowExpression)
+        );
     }
 
     #[test]
@@ -1161,7 +1346,7 @@ load "sales.csv"
         }
         assert!(
             planned_native_rows.is_empty(),
-            "v0.39 coverage matrix must close planned-native rows: {planned_native_rows:?}"
+            "v0.40 coverage matrix must close planned-native rows: {planned_native_rows:?}"
         );
         for stage in [
             "load",
