@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_ipc::writer::StreamWriter;
@@ -12,13 +13,14 @@ use arrow_schema::{DataType as ArrowDataType, Field, Schema};
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use parquet::arrow::ArrowWriter;
+use serde_json::Value as JsonValue;
 
 const TLC_URL: &str =
     "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet";
 const TLC_ZONES_URL: &str = "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv";
 const SFO_URL: &str = "https://static.sfomuseum.org/parquet/sfomuseum-data-flights-2026-03.parquet";
 
-const REPORT_HEADER: [&str; 22] = [
+const REPORT_HEADER: [&str; 50] = [
     "repo",
     "tool",
     "run_label",
@@ -41,6 +43,34 @@ const REPORT_HEADER: [&str; 22] = [
     "run_timestamp_utc",
     "git_ref",
     "notes",
+    "sample_count",
+    "warmup_count",
+    "min_ms",
+    "median_ms",
+    "p90_ms",
+    "max_ms",
+    "stddev_ms",
+    "failed_samples",
+    "unsupported_samples",
+    "peak_rss_bytes",
+    "row_materialization",
+    "selected_engine",
+    "eligible_engine",
+    "fallback_reason",
+    "sink_strategy",
+    "source_boundary",
+    "required_source_columns",
+    "phase_scan_ms",
+    "phase_transform_ms",
+    "phase_collect_ms",
+    "phase_write_ms",
+    "os",
+    "cpu_model",
+    "logical_cores",
+    "rustc",
+    "build_profile",
+    "git_dirty",
+    "feature_flags",
 ];
 
 fn main() {
@@ -98,11 +128,34 @@ enum Commands {
         /// Do not generate missing benchmark data before running.
         #[arg(long)]
         no_generate: bool,
+        /// Measured samples per workload after warmups.
+        #[arg(long, default_value_t = 1)]
+        samples: usize,
+        /// Unreported warmup executions per workload.
+        #[arg(long, default_value_t = 0)]
+        warmups: usize,
+        /// Shuffle workload order for this run.
+        #[arg(long)]
+        randomize: bool,
+        /// Milliseconds to sleep between measured samples.
+        #[arg(long, default_value_t = 0)]
+        cooldown_ms: u64,
     },
     /// Compare a run report with a baseline report.
     Compare {
         #[arg(long)]
         baseline: String,
+        #[arg(long)]
+        run_label: String,
+        /// Allowed relative regression before compare exits non-zero.
+        #[arg(long, default_value_t = 0.05)]
+        max_relative_regression: f64,
+        /// Allowed absolute regression in milliseconds before compare exits non-zero.
+        #[arg(long, default_value_t = 50)]
+        max_absolute_regression_ms: u128,
+    },
+    /// Generate a compact Markdown table from a run report.
+    Markdown {
         #[arg(long)]
         run_label: String,
     },
@@ -112,6 +165,11 @@ enum Commands {
         run_label: String,
         #[arg(long)]
         baseline: String,
+    },
+    /// Remove ignored benchmark run directories.
+    Clean {
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -213,20 +271,54 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             profile,
             engine,
             no_generate,
+            samples,
+            warmups,
+            randomize,
+            cooldown_ms,
         } => {
-            run_suite(&root, suite, tier, run_label, profile, engine, no_generate)?;
+            run_suite(
+                &root,
+                RunSuiteOptions {
+                    suite,
+                    tier,
+                    run_label,
+                    profile,
+                    engine,
+                    no_generate,
+                    samples,
+                    warmups,
+                    randomize,
+                    cooldown_ms,
+                },
+            )?;
         }
         Commands::Compare {
             baseline,
             run_label,
+            max_relative_regression,
+            max_absolute_regression_ms,
         } => {
-            compare_run(&root, &baseline, &run_label)?;
+            compare_run(
+                &root,
+                &baseline,
+                &run_label,
+                CompareThresholds {
+                    max_relative_regression,
+                    max_absolute_regression_ms,
+                },
+            )?;
+        }
+        Commands::Markdown { run_label } => {
+            markdown_run(&root, &run_label)?;
         }
         Commands::Snapshot {
             run_label,
             baseline,
         } => {
             snapshot_run(&root, &run_label, &baseline)?;
+        }
+        Commands::Clean { dry_run } => {
+            clean_runs(&root, dry_run)?;
         }
     }
     Ok(())
@@ -240,23 +332,46 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn run_suite(
-    root: &Path,
+struct RunSuiteOptions {
     suite: Suite,
     tier: Tier,
     run_label: Option<String>,
     profile: BuildProfile,
     engine: BenchmarkEngine,
     no_generate: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+    samples: usize,
+    warmups: usize,
+    randomize: bool,
+    cooldown_ms: u64,
+}
+
+fn run_suite(root: &Path, options: RunSuiteOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let RunSuiteOptions {
+        suite,
+        tier,
+        run_label,
+        profile,
+        engine,
+        no_generate,
+        samples,
+        warmups,
+        randomize,
+        cooldown_ms,
+    } = options;
     if !matches!(suite, Suite::Large) {
         unreachable!("clap only exposes known suite values");
+    }
+    if samples == 0 {
+        return Err("--samples must be greater than zero".into());
     }
 
     let required = [
         root.join("bench/data/generated/million-row.csv"),
         root.join("bench/data/generated/million-row.parquet"),
         root.join("bench/data/generated/million-row.arrow"),
+        root.join("bench/data/generated/segment-dimension.csv"),
+        root.join("bench/data/generated/million-row-part-a.csv"),
+        root.join("bench/data/generated/million-row-part-b.csv"),
     ];
     if required.iter().any(|path| !path.exists()) {
         if no_generate {
@@ -279,6 +394,7 @@ fn run_suite(
     let git_ref = git_ref(root);
     let input_rows =
         csv_data_rows(&root.join("bench/data/generated/million-row.csv")).unwrap_or(tier.rows());
+    let metadata = SystemMetadata::capture(root, profile);
     let context = RunContext {
         root,
         run_dir: &run_dir,
@@ -289,9 +405,16 @@ fn run_suite(
         git_ref: &git_ref,
         run_label: &run_label,
         engine,
+        samples,
+        warmups,
+        cooldown_ms,
+        metadata,
     };
 
-    let workloads = large_workloads();
+    let mut workloads = large_workloads().iter().collect::<Vec<_>>();
+    if randomize {
+        shuffle_workloads(&mut workloads, run_timestamp.as_bytes());
+    }
     let mut failures = 0usize;
     for workload in workloads {
         let outcome = run_workload(&context, workload);
@@ -321,6 +444,7 @@ fn compare_run(
     root: &Path,
     baseline: &str,
     run_label: &str,
+    thresholds: CompareThresholds,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let baseline_path = resolve_report_path(root, "bench/baselines", baseline);
     let run_path = resolve_report_path(root, "bench/runs", run_label);
@@ -345,6 +469,7 @@ fn compare_run(
         "{:<43} {:<18} {:<7} {:<11} {:>10} {:>10} {:>11}",
         "workload", "format", "engine", "status", "baseline", "current", "improvement"
     );
+    let mut regressions = 0usize;
     for row in run_rows {
         let Some(baseline) = baseline_by_key.get(&row.key_without_engine()) else {
             println!(
@@ -354,7 +479,7 @@ fn compare_run(
                 row.engine,
                 row.status,
                 "-",
-                row.elapsed_ms.to_string(),
+                row.compare_ms().to_string(),
                 "no baseline"
             );
             continue;
@@ -366,30 +491,51 @@ fn compare_run(
                 row.format_label(),
                 row.engine,
                 row.status,
-                baseline.elapsed_ms,
-                row.elapsed_ms,
+                baseline.compare_ms(),
+                row.compare_ms(),
                 "-"
             );
             continue;
         }
-        let improvement = if baseline.elapsed_ms > 0 {
-            (baseline.elapsed_ms as f64 - row.elapsed_ms as f64) * 100.0
-                / baseline.elapsed_ms as f64
+        let baseline_ms = baseline.compare_ms();
+        let current_ms = row.compare_ms();
+        let improvement = if baseline_ms > 0 {
+            (baseline_ms as f64 - current_ms as f64) * 100.0 / baseline_ms as f64
         } else {
             0.0
         };
+        let regression_ms = current_ms.saturating_sub(baseline_ms);
+        let regression_ratio = if baseline_ms > 0 {
+            regression_ms as f64 / baseline_ms as f64
+        } else {
+            0.0
+        };
+        let regressed = regression_ms > thresholds.max_absolute_regression_ms
+            && regression_ratio > thresholds.max_relative_regression;
+        if regressed {
+            regressions += 1;
+        }
         println!(
-            "{:<43} {:<18} {:<7} {:<11} {:>10} {:>10} {:+10.1}%",
+            "{:<43} {:<18} {:<7} {:<11} {:>10} {:>10} {:+10.1}%{}",
             row.workload,
             row.format_label(),
             row.engine,
             row.status,
-            baseline.elapsed_ms,
-            row.elapsed_ms,
-            improvement
+            baseline_ms,
+            current_ms,
+            improvement,
+            if regressed { " regression" } else { "" }
         );
     }
+    if regressions > 0 {
+        return Err(format!("{regressions} regression(s) exceeded configured thresholds").into());
+    }
     Ok(())
+}
+
+struct CompareThresholds {
+    max_relative_regression: f64,
+    max_absolute_regression_ms: u128,
 }
 
 fn resolve_report_path(root: &Path, parent: &str, label_or_path: &str) -> PathBuf {
@@ -410,6 +556,10 @@ struct ReportRow {
     engine: String,
     status: String,
     elapsed_ms: u128,
+    median_ms: Option<u128>,
+    output_bytes: Option<u64>,
+    peak_rss_bytes: Option<u64>,
+    stddev_ms: Option<f64>,
 }
 
 impl ReportRow {
@@ -423,6 +573,10 @@ impl ReportRow {
 
     fn format_label(&self) -> String {
         format!("{}->{}", self.input_format, self.output_format)
+    }
+
+    fn compare_ms(&self) -> u128 {
+        self.median_ms.unwrap_or(self.elapsed_ms)
     }
 }
 
@@ -441,6 +595,10 @@ fn read_report(path: &Path) -> Result<Vec<ReportRow>, Box<dyn std::error::Error>
     let engine_index = headers.iter().position(|header| header == "engine");
     let status_index = index("status")?;
     let elapsed_ms_index = index("elapsed_ms")?;
+    let median_ms_index = headers.iter().position(|header| header == "median_ms");
+    let output_bytes_index = headers.iter().position(|header| header == "output_bytes");
+    let peak_rss_bytes_index = headers.iter().position(|header| header == "peak_rss_bytes");
+    let stddev_ms_index = headers.iter().position(|header| header == "stddev_ms");
     let mut rows = Vec::new();
     for record in reader.records() {
         let record = record?;
@@ -465,9 +623,85 @@ fn read_report(path: &Path) -> Result<Vec<ReportRow>, Box<dyn std::error::Error>
                 .unwrap_or_default()
                 .parse()
                 .unwrap_or(0),
+            median_ms: parse_optional_u128(&record, median_ms_index),
+            output_bytes: parse_optional_u64(&record, output_bytes_index),
+            peak_rss_bytes: parse_optional_u64(&record, peak_rss_bytes_index),
+            stddev_ms: parse_optional_f64(&record, stddev_ms_index),
         });
     }
     Ok(rows)
+}
+
+fn parse_optional_u128(record: &csv::StringRecord, index: Option<usize>) -> Option<u128> {
+    index
+        .and_then(|index| record.get(index))
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse().ok())
+}
+
+fn parse_optional_u64(record: &csv::StringRecord, index: Option<usize>) -> Option<u64> {
+    index
+        .and_then(|index| record.get(index))
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse().ok())
+}
+
+fn parse_optional_f64(record: &csv::StringRecord, index: Option<usize>) -> Option<f64> {
+    index
+        .and_then(|index| record.get(index))
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse().ok())
+}
+
+fn markdown_run(root: &Path, run_label: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let run_path = resolve_report_path(root, "bench/runs", run_label);
+    if !run_path.exists() {
+        return Err(format!("missing run report: {}", relative(root, &run_path)).into());
+    }
+    let rows = read_report(&run_path)?;
+    println!("| workload | format | engine | status | median ms | stddev ms | output bytes | peak RSS bytes |");
+    println!("| --- | --- | --- | --- | ---: | ---: | ---: | ---: |");
+    for row in rows {
+        println!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} |",
+            row.workload,
+            row.format_label(),
+            row.engine,
+            row.status,
+            row.compare_ms(),
+            row.stddev_ms
+                .map(|value| format!("{value:.3}"))
+                .unwrap_or_default(),
+            row.output_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            row.peak_rss_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn clean_runs(root: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let runs_dir = root.join("bench/runs");
+    if !runs_dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&runs_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if dry_run {
+            println!("would remove {}", relative(root, &path));
+        } else {
+            fs::remove_dir_all(&path)?;
+            println!("removed {}", relative(root, &path));
+        }
+    }
+    Ok(())
 }
 
 fn snapshot_run(
@@ -644,6 +878,30 @@ fn large_workloads() -> &'static [Workload] {
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
         },
+        Workload {
+            name: "million_row_join_dimension",
+            program: "bench/workloads/large/million_row_join_dimension.pdl",
+            dataset: "million-row",
+            input_format: "csv",
+            output_format: "csv",
+            required_path: "bench/data/generated/segment-dimension.csv",
+        },
+        Workload {
+            name: "million_row_union_partitions",
+            program: "bench/workloads/large/million_row_union_partitions.pdl",
+            dataset: "million-row",
+            input_format: "csv",
+            output_format: "csv",
+            required_path: "bench/data/generated/million-row-part-a.csv",
+        },
+        Workload {
+            name: "pdl_to_algraf_arrow_handoff",
+            program: "bench/workloads/large/pdl_to_algraf_arrow_handoff.pdl",
+            dataset: "million-row",
+            input_format: "csv",
+            output_format: "arrow-stream",
+            required_path: "bench/data/generated/million-row.csv",
+        },
     ]
 }
 
@@ -657,6 +915,40 @@ struct RunContext<'a> {
     git_ref: &'a str,
     run_label: &'a str,
     engine: BenchmarkEngine,
+    samples: usize,
+    warmups: usize,
+    cooldown_ms: u64,
+    metadata: SystemMetadata,
+}
+
+#[derive(Clone)]
+struct SystemMetadata {
+    os: String,
+    cpu_model: String,
+    logical_cores: String,
+    rustc: String,
+    build_profile: String,
+    git_dirty: String,
+    feature_flags: String,
+}
+
+impl SystemMetadata {
+    fn capture(root: &Path, profile: BuildProfile) -> Self {
+        Self {
+            os: command_output(root, "uname", &["-a"]).trim().to_string(),
+            cpu_model: cpu_model(root),
+            logical_cores: std::thread::available_parallelism()
+                .map(|cores| cores.get().to_string())
+                .unwrap_or_else(|_| "unknown".to_string()),
+            rustc: command_output(root, "rustc", &["-V"]).trim().to_string(),
+            build_profile: profile.dir().to_string(),
+            git_dirty: (!command_output(root, "git", &["status", "--short"])
+                .trim()
+                .is_empty())
+            .to_string(),
+            feature_flags: "default".to_string(),
+        }
+    }
 }
 
 struct WorkloadRun {
@@ -664,55 +956,179 @@ struct WorkloadRun {
     failed: bool,
 }
 
+#[derive(Default)]
+struct PlanFacts {
+    selected_engine: String,
+    eligible_engine: String,
+    fallback_reason: String,
+    sink_strategy: String,
+    source_boundary: String,
+    row_materialization: String,
+    required_source_columns: String,
+}
+
+struct SampleOutcome {
+    elapsed_ms: u128,
+    output_bytes: u64,
+    output_rows: String,
+    peak_rss_bytes: Option<u64>,
+    unsupported: bool,
+    failed: bool,
+    output_path: PathBuf,
+    log_path: PathBuf,
+}
+
 fn run_workload(
     context: &RunContext<'_>,
     workload: &Workload,
 ) -> Result<WorkloadRun, Box<dyn std::error::Error>> {
     let root = context.root;
-    let run_dir = context.run_dir;
     let required_path = root.join(workload.required_path);
     if !required_path.exists() {
         return Err(format!("missing {}", relative(root, &required_path)).into());
     }
-    let ext = extension_for_format(workload.output_format);
-    let output_name = format!(
-        "{}-{}-{}.{}",
-        workload.name,
-        context.engine.as_str(),
-        workload.output_format,
-        ext
-    );
-    let log_name = format!(
-        "{}-{}-{}.log",
-        workload.name,
-        context.engine.as_str(),
-        workload.output_format
-    );
-    let output_path = run_dir.join(output_name);
-    let log_path = run_dir.join(log_name);
-    let bin = root.join("target").join(context.profile.dir()).join("pdl");
+    let plan_facts = plan_facts(context, workload).unwrap_or_default();
+    for warmup in 0..context.warmups {
+        let _ = run_workload_once(context, workload, warmup, true)?;
+    }
+
+    let mut samples = Vec::new();
+    for sample in 0..context.samples {
+        if sample > 0 && context.cooldown_ms > 0 {
+            thread::sleep(Duration::from_millis(context.cooldown_ms));
+        }
+        samples.push(run_workload_once(context, workload, sample, false)?);
+    }
+
+    let failed_samples = samples.iter().filter(|sample| sample.failed).count();
+    let unsupported_samples = samples.iter().filter(|sample| sample.unsupported).count();
+    let failed = failed_samples > 0;
+    let status_text = if failed {
+        "failed"
+    } else if unsupported_samples == samples.len() {
+        "unsupported"
+    } else {
+        "ok"
+    };
+    let measured = samples
+        .iter()
+        .filter(|sample| !sample.failed && !sample.unsupported)
+        .map(|sample| sample.elapsed_ms)
+        .collect::<Vec<_>>();
+    let stats = sample_stats(&measured);
+    let representative = samples
+        .iter()
+        .find(|sample| !sample.failed && !sample.unsupported)
+        .or_else(|| samples.first())
+        .expect("at least one sample");
+    let peak_rss = samples
+        .iter()
+        .filter_map(|sample| sample.peak_rss_bytes)
+        .max();
+    let output_bytes = representative.output_bytes;
+    let output_rows = representative.output_rows.clone();
+    let notes = if unsupported_samples > 0 {
+        "native unsupported"
+    } else {
+        context.engine.as_str()
+    };
     let command_text = format!(
         "{} run {} --stdout-format {} --engine {}",
-        relative(root, &bin),
+        relative(root, &pdl_bin(context)),
         workload.program,
         workload.output_format,
         context.engine.as_str()
     );
 
+    let mut record = base_record(
+        context,
+        workload,
+        BaseRecordFields {
+            status: status_text,
+            command: command_text,
+            output_path: relative(root, &representative.output_path),
+            log_path: relative(root, &representative.log_path),
+            output_rows,
+            output_bytes,
+            elapsed_ms: stats.median_ms,
+            notes,
+        },
+    );
+    append_v0_36_fields(
+        &mut record,
+        context,
+        &stats,
+        failed_samples,
+        unsupported_samples,
+        peak_rss,
+        &plan_facts,
+    );
+    Ok(WorkloadRun { record, failed })
+}
+
+fn failure_record(context: &RunContext<'_>, workload: &Workload, notes: &str) -> Vec<String> {
+    let log_path = context.run_dir.join(format!(
+        "{}-{}-{}.log",
+        workload.name,
+        context.engine.as_str(),
+        workload.output_format
+    ));
+    let stats = SampleStats::default();
+    let plan_facts = PlanFacts::default();
+    let mut record = base_record(
+        context,
+        workload,
+        BaseRecordFields {
+            status: "failed",
+            command: String::new(),
+            output_path: String::new(),
+            log_path: relative(context.root, &log_path),
+            output_rows: String::new(),
+            output_bytes: 0,
+            elapsed_ms: 0,
+            notes,
+        },
+    );
+    append_v0_36_fields(&mut record, context, &stats, 1, 0, None, &plan_facts);
+    record
+}
+
+fn run_workload_once(
+    context: &RunContext<'_>,
+    workload: &Workload,
+    index: usize,
+    warmup: bool,
+) -> Result<SampleOutcome, Box<dyn std::error::Error>> {
+    let root = context.root;
+    let ext = extension_for_format(workload.output_format);
+    let suffix = if context.samples + context.warmups > 1 {
+        if warmup {
+            format!("-warmup{:02}", index + 1)
+        } else {
+            format!("-sample{:02}", index + 1)
+        }
+    } else {
+        String::new()
+    };
+    let output_path = context.run_dir.join(format!(
+        "{}-{}-{}{}.{}",
+        workload.name,
+        context.engine.as_str(),
+        workload.output_format,
+        suffix,
+        ext
+    ));
+    let log_path = context.run_dir.join(format!(
+        "{}-{}-{}{}.log",
+        workload.name,
+        context.engine.as_str(),
+        workload.output_format,
+        suffix
+    ));
     let stdout = File::create(&output_path)?;
     let stderr = File::create(&log_path)?;
     let start = Instant::now();
-    let status = Command::new(&bin)
-        .current_dir(root)
-        .arg("run")
-        .arg(workload.program)
-        .arg("--stdout-format")
-        .arg(workload.output_format)
-        .arg("--engine")
-        .arg(context.engine.as_str())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .status()?;
+    let status = run_pdl_command(context, workload, stdout, stderr)?;
     let elapsed_ms = start.elapsed().as_millis();
     let output_bytes = byte_count(&output_path);
     let output_rows = if workload.output_format == "csv" && status.success() {
@@ -723,58 +1139,201 @@ fn run_workload(
         String::new()
     };
     let log_text = fs::read_to_string(&log_path).unwrap_or_default();
-    let unsupported_native =
+    let unsupported =
         matches!(context.engine, BenchmarkEngine::Native) && log_text.contains("E1211");
-    let status_text = if status.success() {
-        "ok"
-    } else if unsupported_native {
-        "unsupported"
-    } else {
-        "failed"
-    };
-    let notes = if unsupported_native {
-        "native unsupported"
-    } else {
-        context.engine.as_str()
-    };
-    let failed = !status.success() && !unsupported_native;
-
-    Ok(WorkloadRun {
-        record: vec![
-            "pdl".to_string(),
-            "pdl-bench".to_string(),
-            context.run_label.to_string(),
-            "large".to_string(),
-            workload.name.to_string(),
-            workload.dataset.to_string(),
-            context.tier.as_str().to_string(),
-            workload.input_format.to_string(),
-            workload.output_format.to_string(),
-            context.engine.as_str().to_string(),
-            status_text.to_string(),
-            command_text,
-            relative(root, &output_path),
-            relative(root, &log_path),
-            context.input_rows.to_string(),
-            output_rows,
-            String::new(),
-            output_bytes.to_string(),
-            elapsed_ms.to_string(),
-            context.run_timestamp.to_string(),
-            context.git_ref.to_string(),
-            notes.to_string(),
-        ],
+    let failed = !status.success() && !unsupported;
+    Ok(SampleOutcome {
+        elapsed_ms,
+        output_bytes,
+        output_rows,
+        peak_rss_bytes: parse_peak_rss_bytes(&log_text),
+        unsupported,
         failed,
+        output_path: output_path
+            .strip_prefix(root)
+            .unwrap_or(&output_path)
+            .to_path_buf(),
+        log_path: log_path
+            .strip_prefix(root)
+            .unwrap_or(&log_path)
+            .to_path_buf(),
     })
 }
 
-fn failure_record(context: &RunContext<'_>, workload: &Workload, notes: &str) -> Vec<String> {
-    let log_path = context.run_dir.join(format!(
-        "{}-{}-{}.log",
-        workload.name,
-        context.engine.as_str(),
-        workload.output_format
-    ));
+fn run_pdl_command(
+    context: &RunContext<'_>,
+    workload: &Workload,
+    stdout: File,
+    stderr: File,
+) -> Result<ExitStatus, Box<dyn std::error::Error>> {
+    let bin = pdl_bin(context);
+    let mut command = if let Some(time_args) = time_args() {
+        let mut command = Command::new("/usr/bin/time");
+        command.args(time_args).arg(&bin);
+        command
+    } else {
+        Command::new(&bin)
+    };
+    let status = command
+        .current_dir(context.root)
+        .arg("run")
+        .arg(workload.program)
+        .arg("--stdout-format")
+        .arg(workload.output_format)
+        .arg("--engine")
+        .arg(context.engine.as_str())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .status()?;
+    Ok(status)
+}
+
+fn time_args() -> Option<&'static [&'static str]> {
+    let time = Path::new("/usr/bin/time");
+    if !time.exists() {
+        return None;
+    }
+    if cfg!(target_os = "macos") || cfg!(target_os = "freebsd") {
+        Some(&["-l"])
+    } else if cfg!(target_os = "linux") {
+        Some(&["-v"])
+    } else {
+        None
+    }
+}
+
+fn parse_peak_rss_bytes(log_text: &str) -> Option<u64> {
+    for line in log_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("maximum resident set size") {
+            let value = trimmed
+                .split_whitespace()
+                .find_map(|part| part.parse::<u64>().ok())?;
+            return Some(
+                if cfg!(target_os = "macos") || cfg!(target_os = "freebsd") {
+                    value
+                } else {
+                    value.saturating_mul(1024)
+                },
+            );
+        }
+        if let Some(value) = trimmed.strip_prefix("Maximum resident set size (kbytes):") {
+            return value
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .map(|kb| kb.saturating_mul(1024));
+        }
+    }
+    None
+}
+
+fn pdl_bin(context: &RunContext<'_>) -> PathBuf {
+    context
+        .root
+        .join("target")
+        .join(context.profile.dir())
+        .join("pdl")
+}
+
+fn plan_facts(
+    context: &RunContext<'_>,
+    workload: &Workload,
+) -> Result<PlanFacts, Box<dyn std::error::Error>> {
+    let output = Command::new(pdl_bin(context))
+        .current_dir(context.root)
+        .arg("plan")
+        .arg(workload.program)
+        .arg("--stdout-format")
+        .arg(workload.output_format)
+        .arg("--engine")
+        .arg(context.engine.as_str())
+        .arg("--json")
+        .output()?;
+    if !output.status.success() {
+        return Ok(PlanFacts::default());
+    }
+    let value: JsonValue = serde_json::from_slice(&output.stdout)?;
+    let observability = &value["execution"]["observability"];
+    Ok(PlanFacts {
+        selected_engine: json_string(observability, "selected_engine"),
+        eligible_engine: json_string(observability, "eligible_engine"),
+        fallback_reason: json_string(observability, "fallback_reason"),
+        sink_strategy: json_string(observability, "sink_strategy"),
+        source_boundary: json_string(observability, "source_boundary"),
+        row_materialization: observability["row_materialization"]
+            .as_bool()
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        required_source_columns: observability["required_source_columns"]
+            .as_array()
+            .map(|columns| {
+                columns
+                    .iter()
+                    .filter_map(|column| column.as_str())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .unwrap_or_default(),
+    })
+}
+
+fn json_string(value: &JsonValue, key: &str) -> String {
+    value[key].as_str().unwrap_or_default().to_string()
+}
+
+#[derive(Default)]
+struct SampleStats {
+    min_ms: u128,
+    median_ms: u128,
+    p90_ms: u128,
+    max_ms: u128,
+    stddev_ms: f64,
+    count: usize,
+}
+
+fn sample_stats(values: &[u128]) -> SampleStats {
+    if values.is_empty() {
+        return SampleStats::default();
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let count = sorted.len();
+    let mean = sorted.iter().map(|value| *value as f64).sum::<f64>() / count as f64;
+    let variance = sorted
+        .iter()
+        .map(|value| {
+            let delta = *value as f64 - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / count as f64;
+    SampleStats {
+        min_ms: sorted[0],
+        median_ms: sorted[count / 2],
+        p90_ms: sorted[((count - 1) * 90).div_ceil(100)],
+        max_ms: sorted[count - 1],
+        stddev_ms: variance.sqrt(),
+        count,
+    }
+}
+
+struct BaseRecordFields<'a> {
+    status: &'a str,
+    command: String,
+    output_path: String,
+    log_path: String,
+    output_rows: String,
+    output_bytes: u64,
+    elapsed_ms: u128,
+    notes: &'a str,
+}
+
+fn base_record(
+    context: &RunContext<'_>,
+    workload: &Workload,
+    fields: BaseRecordFields<'_>,
+) -> Vec<String> {
     vec![
         "pdl".to_string(),
         "pdl-bench".to_string(),
@@ -786,19 +1345,62 @@ fn failure_record(context: &RunContext<'_>, workload: &Workload, notes: &str) ->
         workload.input_format.to_string(),
         workload.output_format.to_string(),
         context.engine.as_str().to_string(),
-        "failed".to_string(),
+        fields.status.to_string(),
+        fields.command,
+        fields.output_path,
+        fields.log_path,
+        context.input_rows.to_string(),
+        fields.output_rows,
         String::new(),
-        String::new(),
-        relative(context.root, &log_path),
-        String::new(),
-        String::new(),
-        String::new(),
-        "0".to_string(),
-        "0".to_string(),
+        fields.output_bytes.to_string(),
+        fields.elapsed_ms.to_string(),
         context.run_timestamp.to_string(),
         context.git_ref.to_string(),
-        notes.to_string(),
+        fields.notes.to_string(),
     ]
+}
+
+fn append_v0_36_fields(
+    record: &mut Vec<String>,
+    context: &RunContext<'_>,
+    stats: &SampleStats,
+    failed_samples: usize,
+    unsupported_samples: usize,
+    peak_rss_bytes: Option<u64>,
+    plan_facts: &PlanFacts,
+) {
+    record.extend([
+        stats.count.to_string(),
+        context.warmups.to_string(),
+        stats.min_ms.to_string(),
+        stats.median_ms.to_string(),
+        stats.p90_ms.to_string(),
+        stats.max_ms.to_string(),
+        format!("{:.3}", stats.stddev_ms),
+        failed_samples.to_string(),
+        unsupported_samples.to_string(),
+        peak_rss_bytes
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        plan_facts.row_materialization.clone(),
+        plan_facts.selected_engine.clone(),
+        plan_facts.eligible_engine.clone(),
+        plan_facts.fallback_reason.clone(),
+        plan_facts.sink_strategy.clone(),
+        plan_facts.source_boundary.clone(),
+        plan_facts.required_source_columns.clone(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        context.metadata.os.clone(),
+        context.metadata.cpu_model.clone(),
+        context.metadata.logical_cores.clone(),
+        context.metadata.rustc.clone(),
+        context.metadata.build_profile.clone(),
+        context.metadata.git_dirty.clone(),
+        context.metadata.feature_flags.clone(),
+    ]);
 }
 
 fn generate_all(root: &Path, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
@@ -808,6 +1410,8 @@ fn generate_all(root: &Path, rows: usize) -> Result<(), Box<dyn std::error::Erro
 
 fn prepare_sources(root: &Path, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
     generate_million_row_csv(root, rows)?;
+    generate_partitioned_million_row_csv(root, rows)?;
+    generate_segment_dimension(root)?;
     let batch = million_row_batch(rows)?;
     write_parquet(
         root,
@@ -827,13 +1431,63 @@ fn generate_million_row_csv(root: &Path, rows: usize) -> Result<(), Box<dyn std:
         return Err("--rows must be greater than zero".into());
     }
     let out = root.join("bench/data/generated/million-row.csv");
+    write_million_row_csv(root, &out, 0, rows)
+}
+
+fn generate_partitioned_million_row_csv(
+    root: &Path,
+    rows: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if rows == 0 {
+        return Err("--rows must be greater than zero".into());
+    }
+    let first = rows / 2;
+    let second = rows - first;
+    write_million_row_csv(
+        root,
+        &root.join("bench/data/generated/million-row-part-a.csv"),
+        0,
+        first,
+    )?;
+    write_million_row_csv(
+        root,
+        &root.join("bench/data/generated/million-row-part-b.csv"),
+        first,
+        second,
+    )
+}
+
+fn generate_segment_dimension(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let out = root.join("bench/data/generated/segment-dimension.csv");
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = out.with_extension("csv.tmp");
+    let mut writer = BufWriter::new(File::create(&tmp)?);
+    writeln!(writer, "segment,tier")?;
+    writeln!(writer, "A,core")?;
+    writeln!(writer, "B,core")?;
+    writeln!(writer, "C,growth")?;
+    writeln!(writer, "D,growth")?;
+    writer.flush()?;
+    fs::rename(&tmp, out.as_path())?;
+    println!("generated {}", relative(root, &out));
+    Ok(())
+}
+
+fn write_million_row_csv(
+    root: &Path,
+    out: &Path,
+    start_row: usize,
+    rows: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent)?;
     }
     let tmp = out.with_extension("csv.tmp");
     let mut writer = BufWriter::new(File::create(&tmp)?);
     writeln!(writer, "row,segment,x,score,latency_ms")?;
-    for row in 0..rows {
+    for row in start_row..start_row + rows {
         let segment_index = row % 4;
         let segment = ["A", "B", "C", "D"][segment_index];
         let x = (row % 10_000) as f64 / 100.0;
@@ -845,8 +1499,8 @@ fn generate_million_row_csv(root: &Path, rows: usize) -> Result<(), Box<dyn std:
         writeln!(writer, "{row},{segment},{x:.2},{score:.3},{latency:.3}")?;
     }
     writer.flush()?;
-    fs::rename(&tmp, &out)?;
-    println!("generated {} rows at {}", rows, relative(root, &out));
+    fs::rename(&tmp, out)?;
+    println!("generated {} rows at {}", rows, relative(root, out));
     Ok(())
 }
 
@@ -1049,6 +1703,38 @@ fn command_output(root: &Path, program: &str, args: &[&str]) -> String {
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn cpu_model(root: &Path) -> String {
+    if cfg!(target_os = "macos") {
+        let model = command_output(root, "sysctl", &["-n", "machdep.cpu.brand_string"]);
+        let model = model.trim();
+        if !model.is_empty() && model != "unknown" {
+            return model.to_string();
+        }
+    }
+    if cfg!(target_os = "linux") {
+        let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+        if let Some(model) = cpuinfo.lines().find_map(|line| {
+            line.strip_prefix("model name")
+                .and_then(|value| value.split_once(':').map(|(_, model)| model.trim()))
+        }) {
+            return model.to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
+fn shuffle_workloads(workloads: &mut [&Workload], seed_bytes: &[u8]) {
+    let mut seed = seed_bytes.iter().fold(0xcbf29ce484222325_u64, |acc, byte| {
+        acc.wrapping_mul(0x100000001b3)
+            .wrapping_add(u64::from(*byte))
+    });
+    for index in (1..workloads.len()).rev() {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let swap_with = (seed as usize) % (index + 1);
+        workloads.swap(index, swap_with);
+    }
 }
 
 fn sanitize_label(label: &str) -> String {

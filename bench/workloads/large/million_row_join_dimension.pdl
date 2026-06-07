@@ -1,0 +1,12 @@
+let segments =
+  load "../../data/generated/segment-dimension.csv"
+
+load "../../data/generated/million-row.csv"
+  | join segments on segment kind left
+  | mutate score_per_latency = round(score / latency_ms, 6)
+  | group_by tier
+  | agg
+      row_count = count(),
+      avg_score = mean(score),
+      avg_score_per_latency = mean(score_per_latency)
+  | sort tier

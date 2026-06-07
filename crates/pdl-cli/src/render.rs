@@ -3,7 +3,7 @@ use pdl_driver::{
     DriverPlan, FormatDecision, PipelineLabel, PreparedProgram, SinkDescriptor, SniffingDecision,
     SniffingReason, SourceDescriptor, StreamDirection, StreamKind,
 };
-use pdl_exec::{ExecutionPlan, ExecutionPlanStep};
+use pdl_exec::{ExecutionPlan, ExecutionPlanStep, NativeUnsupportedReason, PlanObservability};
 use pdl_semantics::{
     BinaryOpIr, CompleteFillItemIr, ContextDeclIr, ContextKindIr, ExprIr, FrameBoundIr, JoinKindIr,
     PipelineSchemaLabel, PipelineStartIr, ProgramIr, SinkIr, SortDirectionIr, StageIr, UnaryOpIr,
@@ -74,6 +74,41 @@ pub fn render_plan_text(prepared: &PreparedProgram, plan: &ExecutionPlan) -> Str
         }
     }
     text.push_str("execution:\n");
+    text.push_str(&format!(
+        "  requested engine: {}\n",
+        plan.observability.requested_engine.as_str()
+    ));
+    text.push_str(&format!(
+        "  selected engine: {}\n",
+        plan.observability.selected_engine.as_str()
+    ));
+    text.push_str(&format!(
+        "  eligible engine: {}\n",
+        plan.observability.eligible_engine.as_str()
+    ));
+    if let Some(reason) = plan.observability.fallback_reason {
+        text.push_str(&format!("  fallback reason: {}\n", reason.code()));
+    }
+    text.push_str(&format!(
+        "  sink strategy: {}\n",
+        plan.observability.sink_strategy.as_str()
+    ));
+    text.push_str(&format!(
+        "  row materialization: {}\n",
+        plan.observability.row_materialization
+    ));
+    if let Some(columns) = &plan.observability.required_source_columns {
+        text.push_str(&format!(
+            "  required source columns: {}\n",
+            columns.join(", ")
+        ));
+    }
+    if !plan.observability.blocking_stages.is_empty() {
+        text.push_str(&format!(
+            "  blocking stages: {}\n",
+            plan.observability.blocking_stages.join(", ")
+        ));
+    }
     for step in &plan.steps {
         text.push_str("  - ");
         text.push_str(&execution_step_text(step));
@@ -119,9 +154,9 @@ pub fn plan_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> PlanOutput
 pub fn manifest_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> ManifestJson {
     let stdout_format = plan.stdout_format.map(|format| format.canonical_name());
     ManifestJson {
-        manifest_version: "0.26.0",
+        manifest_version: "0.36.0",
         implementation_version: env!("CARGO_PKG_VERSION"),
-        language_version: "0.26.0",
+        language_version: "0.36.0",
         source_path: prepared.path.display().to_string(),
         driver: driver_plan_json(&prepared.driver_plan),
         execution: execution_plan_json(plan),
@@ -335,7 +370,29 @@ struct ExecutionPlanJson {
     dry_run: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stdout_format: Option<String>,
+    observability: PlanObservabilityJson,
     steps: Vec<ExecutionStepJson>,
+}
+
+#[derive(Serialize)]
+struct PlanObservabilityJson {
+    requested_engine: &'static str,
+    selected_engine: &'static str,
+    eligible_engine: &'static str,
+    native_eligible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_boundary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_format: Option<String>,
+    sink_strategy: &'static str,
+    blocking_stages: Vec<String>,
+    row_materialization: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_source_columns: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -413,7 +470,27 @@ fn execution_plan_json(plan: &ExecutionPlan) -> ExecutionPlanJson {
         stdout_format: plan
             .stdout_format
             .map(|format| format.canonical_name().to_string()),
+        observability: plan_observability_json(&plan.observability),
         steps: plan.steps.iter().map(execution_step_json).collect(),
+    }
+}
+
+fn plan_observability_json(observability: &PlanObservability) -> PlanObservabilityJson {
+    PlanObservabilityJson {
+        requested_engine: observability.requested_engine.as_str(),
+        selected_engine: observability.selected_engine.as_str(),
+        eligible_engine: observability.eligible_engine.as_str(),
+        native_eligible: observability.native_eligible,
+        fallback_reason: observability
+            .fallback_reason
+            .map(NativeUnsupportedReason::code),
+        source_boundary: observability.source_boundary.clone(),
+        input_format: observability.input_format.clone(),
+        output_format: observability.output_format.clone(),
+        sink_strategy: observability.sink_strategy.as_str(),
+        blocking_stages: observability.blocking_stages.clone(),
+        row_materialization: observability.row_materialization,
+        required_source_columns: observability.required_source_columns.clone(),
     }
 }
 

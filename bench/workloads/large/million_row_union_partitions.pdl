@@ -1,0 +1,13 @@
+let part_b =
+  load "../../data/generated/million-row-part-b.csv"
+
+load "../../data/generated/million-row-part-a.csv"
+  | union part_b by_name true
+  | filter score >= 60
+  | mutate score_per_latency = round(score / latency_ms, 6)
+  | group_by segment
+  | agg
+      row_count = count(),
+      avg_score = mean(score),
+      avg_score_per_latency = mean(score_per_latency)
+  | sort segment

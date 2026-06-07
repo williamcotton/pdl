@@ -1,17 +1,20 @@
 # PDL Detailed Specification
 
-Status: Draft 0.34.0
+Status: Draft 0.36.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current released repository implementation line is `0.34.0`. The working
-tree may contain unreleased v0.35 development slices tracked in
-`docs/V0_35_PLAN.md`; version stamps remain on `0.34.0` until that release is
-closed.
+The current released repository implementation line is `0.36.0`, tracked in
+`docs/V0_36_PLAN.md`. Version 0.36.0 closes the native execution maturity slice:
+it adds a first-class native coverage matrix, structured plan/manifest
+observability for engine choice and fallback reasons, repeated benchmark
+sampling with median/variance/memory fields, tracked PDL-to-Algraf Arrow IPC
+smoke coverage, native `count_distinct` aggregate lowering, and v0.36 release
+version stamps.
 
-The initial v0.35 development slice adds native Polars-backed `mutate` for the
+The native v0.36 implementation supports Polars-backed `mutate` for the
 supported simple expression subset, extends native expression lowering for
 `filter`, `mutate`, and aggregate arguments, and writes Parquet, Arrow IPC file,
 and Arrow IPC stream sinks directly from native plans. CSV and JSON Lines output
@@ -2556,9 +2559,9 @@ references on path-backed CSV and Parquet inputs. Since version 0.34.0,
 path-backed Arrow IPC stream inputs are also eligible for native execution when
 the rest of the pipeline has native parity coverage.
 
-The initial v0.35 development native subset also supports row-preserving
-`mutate` assignments and aggregate arguments when each expression can be lowered
-to the shared native expression subset. That subset includes column references,
+Since version 0.35.0, the native subset also supports row-preserving `mutate`
+assignments and aggregate arguments when each expression can be lowered to the
+shared native expression subset. That subset includes column references,
 numeric, string, boolean, and null literals, arithmetic, comparison operators,
 boolean `and`, `or`, and `not`, and the scalar functions `is_null`,
 `not_null`, `coalesce`, `concat`, `lower`, `upper`, `trim`, `abs`, and `round`.
@@ -2567,12 +2570,17 @@ later assignments in the same `mutate` stage do not see earlier assignments,
 replacements keep existing column positions, and new columns append in
 assignment order.
 
+Since version 0.36.0, native aggregate coverage includes `count_distinct(expr)`
+over the supported native expression subset. Null values are excluded from the
+distinct count to match row runtime semantics.
+
 Unsupported aggregate functions, byte-backed input, stdin, bindings, named
 outputs, multi-output execution, joins, unions, `pivot_longer`, `complete`,
-windows, `to_number`, `if_else`, dynamic or uncertain coercions, and other
-unsupported expressions fall back to rows in automatic mode before native scans
-are opened when they are known to be unsupported. Forced native mode reports a
-diagnostic instead of silently falling back.
+windows, `to_number`, `if_else`, data-dependent dynamic `col(...)`, uncertain
+coercions, and other unsupported expressions fall back to rows in automatic
+mode before native scans are opened when they are known to be unsupported.
+Forced native mode reports an `E1211` diagnostic with a stable unsupported
+native reason category instead of silently falling back.
 
 Browser/WASM builds MUST keep the native Polars feature set disabled. The WASM
 runtime MUST NOT enable `native-formats`, `polars-engine`, or any dependency
@@ -2582,6 +2590,21 @@ path that pulls Polars into the wasm target dependency graph.
 
 `group_by` plus `agg`, `sort`, `join`, `distinct`, window expressions, and
 some `union` modes may require materialization.
+
+Since version 0.36.0, `pdl plan --json` and `pdl manifest` include a stable
+execution observability object with requested engine, selected engine, eligible
+engine, native eligibility, fallback reason, source boundary, input format,
+output format, sink strategy, blocking stages, public row-materialization
+status, and required source columns where the planner can compute them. Human
+plan output also includes the same facts. Observability MUST NOT write to binary
+stdout during `run`; it is exposed through plan/manifest JSON, text plan output,
+stderr diagnostics, or benchmark sidecar reports.
+
+Version 0.36.0 defines the native coverage matrix in
+`docs/PDL_NATIVE_COVERAGE.csv` and documents it in
+`docs/PDL_NATIVE_COVERAGE.md`. Matrix statuses are limited to `native parity`,
+`native partial`, `row-only by design`, `planned native`, `unsupported`, and
+`deferred`.
 
 The plan SHOULD identify blocking stages.
 
@@ -2601,7 +2624,7 @@ Strict mode MUST fail on row-level parse errors.
 
 The runtime SHOULD emit a run manifest when requested.
 
-The version 0.26.0 native CLI implements `pdl manifest file.pdl` as a
+The version 0.36.0 native CLI implements `pdl manifest file.pdl` as a
 deterministic dry-run manifest inspection command. It plans but does not execute
 the pipeline, and it does not write output artifacts.
 
@@ -2618,8 +2641,27 @@ Manifest fields SHOULD include:
 - content hashes where computed
 - diagnostics
 - stream interop hints when stdout format is Arrow IPC
+- execution observability for selected engine, fallback reason, sink strategy,
+  blocking stages, row-materialization status, and required source columns
 
 Manifest JSON MUST be deterministic.
+
+### 15.7 Benchmark Reports
+
+The `pdl-bench` crate is the repository-local benchmark harness.
+
+Since version 0.36.0, `pdl-bench run` SHOULD support repeated measured samples,
+warmups, randomized workload order, and optional cool-down between samples.
+Reports SHOULD include min, median, p90, max, standard deviation, measured
+sample count, warmup count, failed sample count, unsupported-native sample
+count, output rows, output bytes, selected engine, eligible engine, fallback
+reason, sink strategy, row-materialization status, required source columns,
+system metadata, Rust version, build profile, git ref, dirty flag, feature
+flags, and peak RSS where the developer platform exposes it.
+
+`pdl-bench compare` SHOULD compare medians when present and fall back to
+single-run elapsed time for older reports. Regression gates SHOULD be
+configurable by both absolute milliseconds and relative percentage.
 
 ## 16. Stream Interoperability
 
@@ -2652,10 +2694,9 @@ writer-oriented data sink when the active native plan can do so without
 materializing a public row table. Diagnostics and logs MUST continue to use
 stderr so stdout remains stream bytes only.
 
-The initial v0.35 development native writer path also writes Parquet and Arrow
-IPC file sinks directly from native plans. CSV and JSON Lines output remain on
-the public row-format writer path because their exact text formatting is
-PDL-visible behavior.
+The v0.36 native writer path writes Parquet and Arrow IPC file sinks directly
+from native plans. CSV and JSON Lines output remain on the public row-format
+writer path because their exact text formatting is PDL-visible behavior.
 
 The consumer's responsibility is to consume stdin if it supports that mode.
 
@@ -2723,7 +2764,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.34.0` LSP implementation provides diagnostics,
+The current `0.36.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3177,7 +3218,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.34.0"
+version = "0.36.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -4767,7 +4808,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.34.0.
+PDL source does not require an explicit version declaration in draft 0.36.0.
 
 The implementation SHOULD report supported language version.
 

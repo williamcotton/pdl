@@ -5,7 +5,8 @@ use pdl_driver::{
     PrepareOptions,
 };
 use pdl_exec::{
-    plan_prepared, planning::PlanningOptions, run_prepared_with_engine, ExecutionEngine, RunOptions,
+    plan_prepared, planning::PlanningOptions, run_prepared_with_engine, ExecutionEngine,
+    PlannedEngine, RunOptions,
 };
 use serde::Serialize;
 use std::fs;
@@ -127,6 +128,7 @@ pub fn run_cli() -> Result<ExitCode, String> {
             file,
             stdin_format,
             stdout_format,
+            engine,
             json,
         } => {
             let prepared = match prepare_for_planning(&file, stdin_format) {
@@ -142,6 +144,7 @@ pub fn run_cli() -> Result<ExitCode, String> {
                     stdout_format,
                     dry_run: true,
                     allow_binary_stdout: true,
+                    engine: engine.into(),
                 },
             ) {
                 Ok(plan) => plan,
@@ -213,6 +216,7 @@ pub fn run_cli() -> Result<ExitCode, String> {
             file,
             stdin_format,
             stdout_format,
+            engine,
         } => {
             let prepared = match prepare_for_planning(&file, stdin_format) {
                 Ok(prepared) => prepared,
@@ -227,6 +231,7 @@ pub fn run_cli() -> Result<ExitCode, String> {
                     stdout_format,
                     dry_run: true,
                     allow_binary_stdout: true,
+                    engine: engine.into(),
                 },
             ) {
                 Ok(plan) => plan,
@@ -258,7 +263,7 @@ pub fn run_cli() -> Result<ExitCode, String> {
         }
         Command::Version => {
             println!(
-                "pdl {} (language draft 0.26.0, data engine {})",
+                "pdl {} (language draft 0.36.0, data engine {})",
                 env!("CARGO_PKG_VERSION"),
                 pdl_data::native_engine_name()
             );
@@ -332,6 +337,16 @@ impl From<crate::args::EngineArg> for ExecutionEngine {
             crate::args::EngineArg::Auto => ExecutionEngine::Auto,
             crate::args::EngineArg::Row => ExecutionEngine::Row,
             crate::args::EngineArg::Native => ExecutionEngine::Native,
+        }
+    }
+}
+
+impl From<crate::args::EngineArg> for PlannedEngine {
+    fn from(value: crate::args::EngineArg) -> Self {
+        match value {
+            crate::args::EngineArg::Auto => PlannedEngine::Auto,
+            crate::args::EngineArg::Row => PlannedEngine::Row,
+            crate::args::EngineArg::Native => PlannedEngine::Native,
         }
     }
 }

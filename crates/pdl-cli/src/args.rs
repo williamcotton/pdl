@@ -42,6 +42,8 @@ pub enum Command {
         stdin_format: Option<String>,
         #[arg(long)]
         stdout_format: Option<String>,
+        #[arg(long, value_enum, default_value_t = EngineArg::Auto)]
+        engine: EngineArg,
         #[arg(long)]
         json: bool,
     },
@@ -57,6 +59,8 @@ pub enum Command {
         stdin_format: Option<String>,
         #[arg(long)]
         stdout_format: Option<String>,
+        #[arg(long, value_enum, default_value_t = EngineArg::Auto)]
+        engine: EngineArg,
     },
     Lsp,
     Version,

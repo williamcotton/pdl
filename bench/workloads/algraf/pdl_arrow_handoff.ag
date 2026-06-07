@@ -1,0 +1,14 @@
+Chart(data: "pdl-arrow-handoff.arrow", width: 760, height: 460, title: "Adjusted score distribution") {
+    Theme(name: "minimal")
+
+    Space(adjusted_score) {
+        Histogram(
+            binWidth: 5,
+            boundary: 0,
+            fill: "steelblue",
+            stroke: "#ffffff",
+            strokeWidth: 1,
+            alpha: 0.86,
+        )
+    }
+}

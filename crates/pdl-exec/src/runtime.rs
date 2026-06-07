@@ -18,7 +18,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::output::{emit_stdout, write_output};
-use crate::planning::{plan_prepared, ExecutionPlan, PlanningOptions};
+use crate::planning::{
+    plan_prepared, ExecutionPlan, NativeUnsupportedReason, PlannedEngine, PlanningOptions,
+};
 
 #[derive(Clone, Debug)]
 pub struct RunOptions {
@@ -109,6 +111,11 @@ pub fn run_prepared_with_io_and_context_and_engine(
             stdout_format: options.stdout_format.clone(),
             dry_run: options.dry_run,
             allow_binary_stdout: options.allow_binary_stdout,
+            engine: match engine {
+                ExecutionEngine::Auto => PlannedEngine::Auto,
+                ExecutionEngine::Row => PlannedEngine::Row,
+                ExecutionEngine::Native => PlannedEngine::Native,
+            },
         },
     ) {
         Ok(plan) => plan,
@@ -805,7 +812,7 @@ fn lower_data_agg_items(
         .map(|item| {
             let args = match item.function.as_str() {
                 "count" if item.args.is_empty() => Vec::new(),
-                "count" | "sum" | "mean" | "min" | "max" => {
+                "count" | "sum" | "mean" | "min" | "max" | "count_distinct" => {
                     let [arg] = item.args.as_slice() else {
                         return Err(unsupported_native_pipeline(
                             "aggregate arity is not supported by native execution",
@@ -919,7 +926,50 @@ fn value_to_data_literal(value: &Value) -> DataExpr {
 }
 
 fn unsupported_native_pipeline(reason: &'static str) -> Diagnostic {
-    Diagnostic::error(codes::E1211, reason, Span::zero())
+    Diagnostic::error(
+        codes::E1211,
+        format!(
+            "native execution unsupported [{}]: {reason}",
+            unsupported_native_reason_category(reason).code()
+        ),
+        Span::zero(),
+    )
+}
+
+fn unsupported_native_reason_category(reason: &str) -> NativeUnsupportedReason {
+    if reason.contains("named outputs") {
+        NativeUnsupportedReason::NamedOutputs
+    } else if reason.contains("no runnable main") {
+        NativeUnsupportedReason::NoRunnableMain
+    } else if reason.contains("bindings") || reason.contains("from bindings") {
+        NativeUnsupportedReason::BindingStart
+    } else if reason.contains("path-backed input") {
+        NativeUnsupportedReason::SourceBoundary
+    } else if reason.contains("real filesystem path") {
+        NativeUnsupportedReason::SourcePathMissing
+    } else if reason.contains("input format") {
+        NativeUnsupportedReason::InputFormat
+    } else if reason.contains("save stages") {
+        NativeUnsupportedReason::SaveNotTerminal
+    } else if reason.contains("stdout bytes") {
+        NativeUnsupportedReason::NativeStdoutBytes
+    } else if reason.contains("window expressions") {
+        NativeUnsupportedReason::WindowExpression
+    } else if reason.contains("col()") {
+        NativeUnsupportedReason::DynamicColumn
+    } else if reason.contains("scalar function arity") {
+        NativeUnsupportedReason::ScalarFunctionArity
+    } else if reason.contains("scalar function") {
+        NativeUnsupportedReason::ScalarFunction
+    } else if reason.contains("aggregate arity") {
+        NativeUnsupportedReason::AggregateArity
+    } else if reason.contains("aggregate function") {
+        NativeUnsupportedReason::AggregateFunction
+    } else if reason.contains("driver") {
+        NativeUnsupportedReason::DriverFacts
+    } else {
+        NativeUnsupportedReason::Stage
+    }
 }
 
 struct Runtime<'a> {
@@ -3292,6 +3342,7 @@ mod tests {
                 stdout_format: Some(DataFormat::Csv.canonical_name().to_string()),
                 dry_run: false,
                 allow_binary_stdout: true,
+                engine: PlannedEngine::Auto,
             },
         )
         .expect("execution plan");
@@ -3449,13 +3500,14 @@ mod tests {
     #[test]
     fn native_engine_runs_grouped_aggregate_csv_parquet_and_arrow_stream() {
         let workspace = temp_workspace("native-aggregate");
-        let csv = "region,score,latency_ms\nWest,30,100\nEast,10,80\nWest,50,120\nEast,30,90\n";
+        let csv = "region,score,latency_ms,category\nWest,30,100,alpha\nEast,10,80,beta\nWest,50,120,alpha\nEast,30,90,\n";
         fs::write(workspace.join("sales.csv"), csv).expect("write csv");
         let table = Table::new(
             vec![
                 "region".to_string(),
                 "score".to_string(),
                 "latency_ms".to_string(),
+                "category".to_string(),
             ],
             vec![
                 Row {
@@ -3463,6 +3515,7 @@ mod tests {
                         Value::String("West".to_string()),
                         Value::Number(30.0),
                         Value::Number(100.0),
+                        Value::String("alpha".to_string()),
                     ],
                 },
                 Row {
@@ -3470,6 +3523,7 @@ mod tests {
                         Value::String("East".to_string()),
                         Value::Number(10.0),
                         Value::Number(80.0),
+                        Value::String("beta".to_string()),
                     ],
                 },
                 Row {
@@ -3477,6 +3531,7 @@ mod tests {
                         Value::String("West".to_string()),
                         Value::Number(50.0),
                         Value::Number(120.0),
+                        Value::String("alpha".to_string()),
                     ],
                 },
                 Row {
@@ -3484,6 +3539,7 @@ mod tests {
                         Value::String("East".to_string()),
                         Value::Number(30.0),
                         Value::Number(90.0),
+                        Value::Null,
                     ],
                 },
             ],
@@ -3522,7 +3578,9 @@ mod tests {
       min_latency_ms = min(latency_ms),
       min_latency_minus_score = min(latency_ms - score),
       max_latency_ms = max(latency_ms),
-      max_latency_plus_score = max(latency_ms + score)
+      max_latency_plus_score = max(latency_ms + score),
+      categories = count_distinct(category),
+      latency_buckets = count_distinct(round(latency_ms / 10, 0))
   | sort region"#
                 ),
                 &io,

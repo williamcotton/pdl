@@ -1,0 +1,8 @@
+load "../../data/generated/million-row.csv"
+  | filter score >= 50
+  | mutate
+      score_per_latency = round(score / latency_ms, 6),
+      adjusted_score = score + x * 0.5
+  | select row, segment, adjusted_score, score_per_latency, latency_ms
+  | sort adjusted_score desc
+  | limit 250000

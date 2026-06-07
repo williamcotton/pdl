@@ -1,0 +1,50 @@
+area,item,status,notes
+stage,load,native partial,path-backed CSV, Parquet, and Arrow IPC stream are native; stdin and byte-backed host files are row-only
+stage,filter,native parity,supported scalar expressions lower to native predicates
+stage,select,native parity,row-preserving projection and aliasing
+stage,drop,native parity,row-preserving projection
+stage,rename,native parity,row-preserving aliasing
+stage,mutate,native partial,supported scalar expressions lower to native with parallel assignment semantics
+stage,group_by,native partial,native only when followed by supported aggregate coverage
+stage,agg,native partial,count/sum/mean/min/max/count_distinct over supported expressions
+stage,sort,native parity,blocking stage with deterministic sort options
+stage,limit,native parity,row-preserving limit
+stage,distinct,native parity,stable first-row distinct
+stage,join,planned native,row runtime is reference; native join parity deferred for duplicate columns/null keys/composite keys
+stage,union,planned native,row runtime is reference; native union parity deferred for schema/type/null-padding rules
+stage,pivot_longer,row-only by design,row runtime preserves deterministic long output and mixed value behavior
+stage,complete,row-only by design,row runtime preserves key expansion/fill expression semantics
+stage,save,native partial,binary Parquet/Arrow sinks use native direct writers; CSV/JSON Lines use row-format writer
+expression,literals,native parity,string numeric boolean and null literals lower natively
+expression,column references,native parity,static column references lower natively
+expression,context references,native partial,scalar contexts lower as literals; context column positions resolve before native planning
+expression,dynamic col,native partial,string literal or string context only; data-dependent indirection is row-only
+expression,arithmetic,native parity,+ - * / % over numeric values lower natively
+expression,comparisons,native parity,== != < <= > >= lower natively
+expression,booleans,native parity,and or not lower natively
+expression,null checks,native parity,is_null and not_null lower natively
+expression,string functions,native partial,concat lower upper trim lower natively; other string functions are row-only
+expression,numeric functions,native partial,abs and round lower natively; uncertain coercions are row-only
+expression,cast-style functions,row-only by design,to_number remains row-only until parse/null/format parity is promoted
+expression,conditional functions,row-only by design,if_else remains row-only until branch/null semantics are promoted
+expression,aggregate arguments,native partial,supported scalar expressions lower for count/sum/mean/min/max/count_distinct
+expression,window expressions,row-only by design,window parity is deferred
+source,path-backed CSV,native parity,Polars lazy CSV scan is eligible
+source,path-backed Parquet,native parity,Polars lazy Parquet scan is eligible
+source,path-backed Arrow IPC file,unsupported,Arrow IPC file scan is row-only until native file reader parity is added
+source,path-backed Arrow IPC stream,native partial,stream file is read into native dataframe then lazy pipeline continues
+source,JSON Lines,row-only by design,schema inference and text semantics stay on row runtime
+source,stdin,row-only by design,keeps stdout purity and bounded buffering policy simple
+source,byte-backed host files,row-only by design,browser and host byte boundaries stay native-free
+source,named bindings,row-only by design,native starts from a single path-backed main load only
+sink,path,native partial,binary formats direct; CSV/JSON Lines row-format fallback
+sink,stdout,native partial,binary formats byte-clean; CSV/JSON Lines row-format fallback
+sink,bytes,native partial,binary formats direct; CSV/JSON Lines row-format fallback
+sink,CSV,row-only by design,text formatting remains PDL-visible
+sink,JSON Lines,row-only by design,text formatting remains PDL-visible
+sink,Parquet,native parity,native direct writer
+sink,Arrow IPC file,native parity,native direct writer
+sink,Arrow IPC stream,native parity,native direct writer
+host,WASM,row-only by design,Polars Arrow native readers Parquet object-store and native filesystem assumptions are excluded
+host,LSP/editor,row-only by design,language services expose no native dataframe internals
+host,PDL-to-Algraf Arrow IPC,native partial,PDL emits Arrow IPC stream; Algraf consumes it across the process boundary

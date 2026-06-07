@@ -5,7 +5,10 @@ pub mod preview;
 pub mod runtime;
 
 pub use output::{emit_stdout, write_output};
-pub use planning::{plan_prepared, ExecutionPlan, ExecutionPlanStep};
+pub use planning::{
+    plan_prepared, ExecutionPlan, ExecutionPlanStep, NativeUnsupportedReason, PlanObservability,
+    PlannedEngine, SinkStrategy,
+};
 pub use runtime::{
     run_prepared, run_prepared_with_engine, run_prepared_with_io, run_prepared_with_io_and_context,
     run_prepared_with_io_and_context_and_engine, ExecutionEngine, RunOptions, RunResult,

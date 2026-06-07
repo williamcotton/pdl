@@ -27,6 +27,12 @@ const runtime = await loadPdlRuntime({ wasmUrl: "/wasm/pdl.wasm" });
 The PDL demo consumes these verified published package versions unless a newer
 browser package release has actually been published.
 
+For the v0.36 Rust/CLI release, npm was checked before changing package fields:
+`pdl-wasm` publishes `0.30.0`; `pdl-editor` publishes `0.30.0` and `0.30.1`.
+No `0.36.0` browser packages are published, so `packages/wasm`,
+`editors/monaco`, demo dependencies, and downstream install instructions remain
+on the verified 0.30.x package line.
+
 ## Package Validation
 
 Use packed mode for package-surface validation before publishing:

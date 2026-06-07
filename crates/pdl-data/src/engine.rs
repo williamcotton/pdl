@@ -1028,6 +1028,7 @@ fn native_agg_expr(item: &DataAggItem) -> Result<native::Expr, Diagnostic> {
         "mean" => native_unary_agg(item, |expr| expr.mean())?,
         "min" => native_unary_agg(item, |expr| expr.min())?,
         "max" => native_unary_agg(item, |expr| expr.max())?,
+        "count_distinct" => native_unary_agg(item, |expr| expr.drop_nulls().n_unique())?,
         _ => return Err(unsupported_native_operation("aggregate function")),
     };
     Ok(expr.alias(&item.alias))
