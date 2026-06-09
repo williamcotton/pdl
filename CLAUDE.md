@@ -10,10 +10,10 @@ and saves or streams the result. A typical PDL program looks like:
 
 ```pdl
 load "sales.parquet"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age"
-  | sort "total_revenue" desc
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age)
+  | sort total_revenue desc
   | limit 5
   | save "top_regions.csv"
 ```
@@ -75,6 +75,31 @@ README or generated docs, VS Code package manifests, browser demo manifests if
 present, and user-facing release strings in diagnostics, hovers, or help text.
 Mark the implemented plan's `Status:` complete/shipped and start the next minor
 plan if the release is now closed.
+
+### NPM package version checks
+
+PDL browser packages are not guaranteed to be published for every Rust/CLI
+version bump. Treat local package version stamps and published npm dependency
+pins as separate concerns.
+
+Before changing any npm package `version` field or npm-consumer version for
+internal PDL packages, verify that the target version actually exists on npm:
+
+```bash
+npm view pdl-wasm versions --json
+npm view pdl-editor versions --json
+```
+
+This applies to package manifests for `pdl-wasm` and `pdl-editor`, demo
+dependencies, Studio/downstream install instructions, peer dependency ranges,
+package-lock `node_modules/pdl-*` entries, and docs such as
+`docs/NPM_PACKAGES.md`. Do not point a package version, consumer dependency, or
+install command at `pdl-wasm@<version>` or `pdl-editor@<version>` unless npm
+confirms that exact version exists, or the user explicitly says the change is
+preparing an unpublished local package release. If a package is not published
+for the new workspace version, keep package and consumer pins on the latest
+verified published version and document that browser package publication is
+independent from the Rust/CLI release.
 
 ## Workspace layout
 
@@ -266,3 +291,11 @@ editor/WASM examples.
   selected parser.
 - PDL source must not execute shell commands, arbitrary code, or network fetches
   by default.
+
+## Commits
+
+Do not create git commits. Make file edits, run the required validation
+checks, and stop. Every commit must be authored manually by a human
+author after they review the working tree. Stage and commit only when
+explicitly asked to do so for a specific commit, and never as part of
+finishing a task or closing out a multi-step plan.

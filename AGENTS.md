@@ -10,10 +10,10 @@ and saves or streams the result. A typical PDL program looks like:
 
 ```pdl
 load "sales.parquet"
-  | filter "status" == "completed"
-  | group_by "region"
-  | agg sum("amount") as "total_revenue", mean("customer_age") as "avg_age"
-  | sort "total_revenue" desc
+  | filter status == "completed"
+  | group_by region
+  | agg total_revenue = sum(amount), avg_age = mean(customer_age)
+  | sort total_revenue desc
   | limit 5
   | save "top_regions.csv"
 ```
@@ -291,3 +291,11 @@ editor/WASM examples.
   selected parser.
 - PDL source must not execute shell commands, arbitrary code, or network fetches
   by default.
+
+## Commits
+
+Do not create git commits. Make file edits, run the required validation
+checks, and stop. Every commit must be authored manually by a human
+author after they review the working tree. Stage and commit only when
+explicitly asked to do so for a specific commit, and never as part of
+finishing a task or closing out a multi-step plan.
