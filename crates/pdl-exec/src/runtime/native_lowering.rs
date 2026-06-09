@@ -14,6 +14,7 @@ use pdl_semantics::{
 };
 use std::collections::BTreeMap;
 
+use crate::planning::NativeUnsupportedReason;
 use crate::runtime::native_planning::{
     resolve_native_column_name, resolve_native_column_names, unsupported_native_pipeline,
 };
@@ -88,6 +89,7 @@ pub(crate) fn lower_data_agg_items(
                 "count" | "sum" | "mean" | "min" | "max" | "count_distinct" => {
                     let [arg] = item.args.as_slice() else {
                         return Err(unsupported_native_pipeline(
+                            NativeUnsupportedReason::AggregateArity,
                             "aggregate arity is not supported by native execution",
                         ));
                     };
@@ -95,6 +97,7 @@ pub(crate) fn lower_data_agg_items(
                 }
                 _ => {
                     return Err(unsupported_native_pipeline(
+                        NativeUnsupportedReason::AggregateFunction,
                         "aggregate function is not supported by native execution",
                     ));
                 }
@@ -132,6 +135,7 @@ pub(crate) fn check_native_mutate_multi_key_window_order_groups(
     for item in items {
         if expr_multi_key_window_order_incompatible(&item.expr, &mut group) {
             return Err(unsupported_native_pipeline(
+                NativeUnsupportedReason::WindowExpression,
                 "multiple multi-key window order groups",
             ));
         }
@@ -204,6 +208,7 @@ pub(crate) fn lower_data_call(
         return match lower_data_expr(arg, context)? {
             DataExpr::Literal(DataLiteral::String(column)) => Ok(DataExpr::Column(column)),
             _ => Err(unsupported_native_pipeline(
+                NativeUnsupportedReason::DataDependentColIndirection,
                 "native col() requires a string literal or context string",
             )),
         };
@@ -230,6 +235,7 @@ pub(crate) fn lower_data_call(
             };
             if !native_static_text_arg(pattern) || !native_static_text_arg(replacement) {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::DataDependentReplacePattern,
                     "native replace() requires literal pattern and replacement",
                 ));
             }
@@ -255,6 +261,7 @@ pub(crate) fn lower_data_call(
         }
         _ => {
             return Err(unsupported_native_pipeline(
+                NativeUnsupportedReason::ScalarFunction,
                 "scalar function is not supported by native execution",
             ));
         }
@@ -293,6 +300,7 @@ pub(crate) fn lower_data_window(
         "row_number" => {
             if !args.is_empty() {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::WindowExpression,
                     "window function arity is not supported by native execution",
                 ));
             }
@@ -301,11 +309,13 @@ pub(crate) fn lower_data_window(
         "rank" | "dense_rank" => {
             if !args.is_empty() {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::WindowExpression,
                     "window function arity is not supported by native execution",
                 ));
             }
             if spec.order_by.is_empty() {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::WindowExpression,
                     "native rank windows require at least one order key",
                 ));
             }
@@ -318,11 +328,13 @@ pub(crate) fn lower_data_window(
         "percent_rank" | "cume_dist" => {
             if !args.is_empty() {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::WindowExpression,
                     "window function arity is not supported by native execution",
                 ));
             }
             if spec.order_by.is_empty() {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::WindowExpression,
                     "native distribution windows require at least one order key",
                 ));
             }
@@ -335,11 +347,13 @@ pub(crate) fn lower_data_window(
         "lag" | "lead" => {
             if args.is_empty() || args.len() > 3 {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::WindowExpression,
                     "window function arity is not supported by native execution",
                 ));
             }
             if spec.order_by.is_empty() {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::WindowExpression,
                     "native offset windows require at least one order key",
                 ));
             }
@@ -348,6 +362,7 @@ pub(crate) fn lower_data_window(
                 Some(ExprIr::Number { value, .. }) if *value >= 0.0 && value.fract() == 0.0 => {}
                 Some(_) => {
                     return Err(unsupported_native_pipeline(
+                        NativeUnsupportedReason::WindowExpression,
                         "native offset windows require a non-negative integer literal offset",
                     ));
                 }
@@ -361,6 +376,7 @@ pub(crate) fn lower_data_window(
         "first_value" | "last_value" => {
             let [_] = args else {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::WindowExpression,
                     "window function arity is not supported by native execution",
                 ));
             };
@@ -373,6 +389,7 @@ pub(crate) fn lower_data_window(
         "count" => {
             if args.len() > 1 {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::WindowExpression,
                     "window function arity is not supported by native execution",
                 ));
             }
@@ -381,6 +398,7 @@ pub(crate) fn lower_data_window(
         "sum" | "mean" | "min" | "max" => {
             let [_] = args else {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::WindowExpression,
                     "window function arity is not supported by native execution",
                 ));
             };
@@ -394,6 +412,7 @@ pub(crate) fn lower_data_window(
         }
         _ => {
             return Err(unsupported_native_pipeline(
+                NativeUnsupportedReason::WindowExpression,
                 "window function is not supported by native execution",
             ));
         }
@@ -422,6 +441,7 @@ pub(crate) fn lower_data_window_frame(spec: &WindowSpecIr) -> Result<DataWindowF
             ..
         }) => Ok(DataWindowFrame::UnboundedPrecedingToCurrentRow),
         Some(_) => Err(unsupported_native_pipeline(
+            NativeUnsupportedReason::WindowExpression,
             "bounded window frames are not supported by native execution",
         )),
     }

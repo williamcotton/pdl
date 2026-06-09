@@ -38,6 +38,10 @@ pub enum PlannedEngine {
     #[default]
     Auto,
     Row,
+    /// Row execution that additionally asserts no part of the run silently
+    /// used native lowering. Only ever a requested engine; the selected
+    /// engine for a row-strict request is `Row`.
+    RowStrict,
     Native,
 }
 
@@ -46,6 +50,7 @@ impl PlannedEngine {
         match self {
             PlannedEngine::Auto => "auto",
             PlannedEngine::Row => "row",
+            PlannedEngine::RowStrict => "row-strict",
             PlannedEngine::Native => "native",
         }
     }
@@ -90,46 +95,137 @@ impl SinkStrategy {
     }
 }
 
+/// Typed observability values explaining why a pipeline is not eligible for
+/// native execution. These are not diagnostic codes; they surface through
+/// `pdl plan`, `pdl plan --json`, and `pdl manifest` under
+/// `execution.observability.fallback_reason`.
+///
+/// The v0.43 refinement split the coarse v0.40–v0.42 categories into
+/// coverage-boundary variants. Variants marked "reserve" are defined ahead of
+/// the v0.44–v0.49 native-coverage promotions and are not yet produced by the
+/// planner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeUnsupportedReason {
-    NamedOutputs,
+    /// No runnable main pipeline exists.
     NoRunnableMain,
-    BindingStart,
-    SourceBoundary,
-    SourcePathMissing,
+    /// Path-backed input format has no native scan (e.g. JSON Lines paths).
     InputFormat,
-    SaveNotTerminal,
-    Stage,
+    /// Scalar function is outside the native allowlist.
     ScalarFunction,
+    /// Scalar function arity is outside the native contract.
     ScalarFunctionArity,
+    /// Aggregate function is outside the native allowlist.
     AggregateFunction,
+    /// Aggregate arity is outside the native contract.
     AggregateArity,
+    /// Window function, frame, or order grouping is outside the native subset.
     WindowExpression,
-    DynamicColumn,
+    /// `col(...)` argument is not a string literal or string-typed context
+    /// default; the column reference is data-dependent.
+    DataDependentColIndirection,
+    /// `replace` pattern or replacement is not a string literal or
+    /// string-typed context default; the pattern is data-dependent.
+    DataDependentReplacePattern,
+    /// `to_number` / `to_string` / `to_boolean` input falls outside the v0.47
+    /// coercion contract (v0.47 reserve).
+    UnsupportedNumericCoercion,
+    /// `union` participants have heterogeneous schemas and require
+    /// null-padding alignment (v0.41 row-only reserve).
+    UnionNullPadding,
+    /// Join predicate is not an equality on columns (v0.41 row-only reserve).
+    NonEquiJoin,
+    /// Pipeline-start binding references a binding the native planner cannot
+    /// lower (v0.48 reserve refines this further).
+    BindingStartNotEligible,
+    /// Multi-output program has at least one row-only output and per-output
+    /// observability is not enabled (v0.48 reserve refines this further).
+    NamedOutputMixedEngines,
+    /// Non-terminal `save` requires fan-out the native planner does not yet
+    /// support (v0.48 reserve refines this further).
+    NonTerminalSaveFanout,
+    /// Stdin-backed format requires a byte-backed scan adapter the native
+    /// data facade does not yet support (v0.46 reserve refines this further).
+    StdinBytesBackedScan,
+    /// Host-supplied bytes for a CSV / Parquet / NDJSON path require a
+    /// byte-backed scan adapter (v0.46 reserve refines this further).
+    HostBytesBackedScan,
+    /// Sink format is not yet wired to `NativeDirectWriter` (v0.44 reserve,
+    /// drops out of use when writers ship).
+    NativeSinkWriter,
+    /// Stage is `row-only by design` with no narrower variant. Catch-all for
+    /// stages the coverage matrix declares row-only.
+    RowOnlyStage,
+    /// Driver source or sink facts are unavailable for native planning.
     DriverFacts,
-    NativeStdoutBytes,
+    /// Non-execution observability boundary for the WASM contract. Not
+    /// produced by the planner at runtime; documents the WASM boundary in the
+    /// coverage matrix and tests.
+    WasmTargetGraph,
+    /// Non-execution observability boundary for the LSP / editor-services
+    /// surface. Same use as `WasmTargetGraph`.
+    EditorService,
 }
 
 impl NativeUnsupportedReason {
     pub fn code(self) -> &'static str {
         match self {
-            NativeUnsupportedReason::NamedOutputs => "named-outputs",
             NativeUnsupportedReason::NoRunnableMain => "no-runnable-main",
-            NativeUnsupportedReason::BindingStart => "binding-start",
-            NativeUnsupportedReason::SourceBoundary => "source-boundary",
-            NativeUnsupportedReason::SourcePathMissing => "source-path-missing",
             NativeUnsupportedReason::InputFormat => "input-format",
-            NativeUnsupportedReason::SaveNotTerminal => "save-not-terminal",
-            NativeUnsupportedReason::Stage => "stage",
             NativeUnsupportedReason::ScalarFunction => "scalar-function",
             NativeUnsupportedReason::ScalarFunctionArity => "scalar-function-arity",
             NativeUnsupportedReason::AggregateFunction => "aggregate-function",
             NativeUnsupportedReason::AggregateArity => "aggregate-arity",
             NativeUnsupportedReason::WindowExpression => "window-expression",
-            NativeUnsupportedReason::DynamicColumn => "dynamic-column",
+            NativeUnsupportedReason::DataDependentColIndirection => {
+                "data-dependent-col-indirection"
+            }
+            NativeUnsupportedReason::DataDependentReplacePattern => {
+                "data-dependent-replace-pattern"
+            }
+            NativeUnsupportedReason::UnsupportedNumericCoercion => "unsupported-numeric-coercion",
+            NativeUnsupportedReason::UnionNullPadding => "union-null-padding",
+            NativeUnsupportedReason::NonEquiJoin => "non-equi-join",
+            NativeUnsupportedReason::BindingStartNotEligible => "binding-start-not-eligible",
+            NativeUnsupportedReason::NamedOutputMixedEngines => "named-output-mixed-engines",
+            NativeUnsupportedReason::NonTerminalSaveFanout => "non-terminal-save-fanout",
+            NativeUnsupportedReason::StdinBytesBackedScan => "stdin-bytes-backed-scan",
+            NativeUnsupportedReason::HostBytesBackedScan => "host-bytes-backed-scan",
+            NativeUnsupportedReason::NativeSinkWriter => "native-sink-writer",
+            NativeUnsupportedReason::RowOnlyStage => "row-only-stage",
             NativeUnsupportedReason::DriverFacts => "driver-facts",
-            NativeUnsupportedReason::NativeStdoutBytes => "native-stdout-bytes",
+            NativeUnsupportedReason::WasmTargetGraph => "wasm-target-graph",
+            NativeUnsupportedReason::EditorService => "editor-service",
         }
+    }
+
+    /// Every variant the planner may attach to a runnable row-only pipeline,
+    /// plus the two non-execution boundary variants. Used by the parity
+    /// harness to assert reported reasons stay inside the typed surface.
+    pub fn all_codes() -> &'static [&'static str] {
+        &[
+            "no-runnable-main",
+            "input-format",
+            "scalar-function",
+            "scalar-function-arity",
+            "aggregate-function",
+            "aggregate-arity",
+            "window-expression",
+            "data-dependent-col-indirection",
+            "data-dependent-replace-pattern",
+            "unsupported-numeric-coercion",
+            "union-null-padding",
+            "non-equi-join",
+            "binding-start-not-eligible",
+            "named-output-mixed-engines",
+            "non-terminal-save-fanout",
+            "stdin-bytes-backed-scan",
+            "host-bytes-backed-scan",
+            "native-sink-writer",
+            "row-only-stage",
+            "driver-facts",
+            "wasm-target-graph",
+            "editor-service",
+        ]
     }
 }
 
@@ -400,7 +496,7 @@ fn build_observability(
     };
     let selected_engine = match options.engine {
         PlannedEngine::Auto => eligible_engine,
-        PlannedEngine::Row => PlannedEngine::Row,
+        PlannedEngine::Row | PlannedEngine::RowStrict => PlannedEngine::Row,
         PlannedEngine::Native => PlannedEngine::Native,
     };
     let output_format = plan_output_format(prepared, stdout_format, steps);
@@ -504,7 +600,7 @@ fn native_unsupported_reason(
     ir: &ProgramIr,
 ) -> Option<NativeUnsupportedReason> {
     if !ir.outputs.is_empty() {
-        return Some(NativeUnsupportedReason::NamedOutputs);
+        return Some(NativeUnsupportedReason::NamedOutputMixedEngines);
     }
     let Some(main) = ir.main.as_ref() else {
         return Some(NativeUnsupportedReason::NoRunnableMain);
@@ -523,7 +619,9 @@ fn native_pipeline_unsupported_reason(
                 return Some(reason);
             }
         }
-        PipelineStartIr::Binding { .. } => return Some(NativeUnsupportedReason::BindingStart),
+        PipelineStartIr::Binding { .. } => {
+            return Some(NativeUnsupportedReason::BindingStartNotEligible)
+        }
     }
 
     for (stage_index, stage) in pipeline.stages.iter().enumerate() {
@@ -555,7 +653,7 @@ fn native_pipeline_unsupported_reason(
                 }
             }
             StageIr::Save { .. } if !is_terminal => {
-                return Some(NativeUnsupportedReason::SaveNotTerminal);
+                return Some(NativeUnsupportedReason::NonTerminalSaveFanout);
             }
             StageIr::Save { .. } => {}
             StageIr::Join { source, .. } => {
@@ -590,7 +688,7 @@ fn native_pipeline_unsupported_reason(
             }
             StageIr::PivotLonger { .. }
             | StageIr::Complete { .. }
-            | StageIr::Unsupported { .. } => return Some(NativeUnsupportedReason::Stage),
+            | StageIr::Unsupported { .. } => return Some(NativeUnsupportedReason::RowOnlyStage),
         }
     }
     None
@@ -646,7 +744,7 @@ fn native_load_unsupported_reason(
             if matches!(format, DataFormat::ArrowFile | DataFormat::ArrowStream) {
                 None
             } else {
-                Some(NativeUnsupportedReason::SourceBoundary)
+                Some(NativeUnsupportedReason::StdinBytesBackedScan)
             }
         }
     }
@@ -687,7 +785,7 @@ fn native_expr_unsupported_reason(expr: &ExprIr) -> Option<NativeUnsupportedReas
             if name == "col" {
                 return match args.as_slice() {
                     [ExprIr::Quoted { .. } | ExprIr::Context { .. }] => None,
-                    [_] => Some(NativeUnsupportedReason::DynamicColumn),
+                    [_] => Some(NativeUnsupportedReason::DataDependentColIndirection),
                     _ => Some(NativeUnsupportedReason::ScalarFunctionArity),
                 };
             }
@@ -855,8 +953,7 @@ fn native_static_text_arg_reason(arg: &ExprIr) -> Option<NativeUnsupportedReason
         | ExprIr::Number { .. }
         | ExprIr::Bool { .. }
         | ExprIr::Context { .. } => None,
-        ExprIr::Null { .. } => Some(NativeUnsupportedReason::ScalarFunction),
-        _ => Some(NativeUnsupportedReason::ScalarFunction),
+        _ => Some(NativeUnsupportedReason::DataDependentReplacePattern),
     }
 }
 
@@ -1309,7 +1406,7 @@ load "sales.csv"
         assert_eq!(plan.observability.eligible_engine, PlannedEngine::Row);
         assert_eq!(
             plan.observability.fallback_reason,
-            Some(NativeUnsupportedReason::Stage)
+            Some(NativeUnsupportedReason::RowOnlyStage)
         );
     }
 

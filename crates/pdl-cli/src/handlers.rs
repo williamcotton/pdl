@@ -55,6 +55,16 @@ pub fn run_cli() -> Result<ExitCode, String> {
             if has_errors(&result.diagnostics) {
                 return Ok(ExitCode::from(1));
             }
+            if engine == crate::args::EngineArg::RowStrict
+                && result.backend != pdl_data::DataBackend::PortableRows
+            {
+                eprintln!(
+                    "--engine row-strict requires portable row execution, but the run \
+                     reported backend `{:?}`",
+                    result.backend
+                );
+                return Ok(ExitCode::from(1));
+            }
             if let Some(stdout) = result.stdout {
                 io::stdout()
                     .write_all(&stdout)
@@ -263,7 +273,7 @@ pub fn run_cli() -> Result<ExitCode, String> {
         }
         Command::Version => {
             println!(
-                "pdl {} (language draft 0.40.0, data engine {})",
+                "pdl {} (language draft 0.43.0, data engine {})",
                 env!("CARGO_PKG_VERSION"),
                 pdl_data::native_engine_name()
             );
@@ -336,6 +346,7 @@ impl From<crate::args::EngineArg> for ExecutionEngine {
         match value {
             crate::args::EngineArg::Auto => ExecutionEngine::Auto,
             crate::args::EngineArg::Row => ExecutionEngine::Row,
+            crate::args::EngineArg::RowStrict => ExecutionEngine::RowStrict,
             crate::args::EngineArg::Native => ExecutionEngine::Native,
         }
     }
@@ -346,6 +357,7 @@ impl From<crate::args::EngineArg> for PlannedEngine {
         match value {
             crate::args::EngineArg::Auto => PlannedEngine::Auto,
             crate::args::EngineArg::Row => PlannedEngine::Row,
+            crate::args::EngineArg::RowStrict => PlannedEngine::RowStrict,
             crate::args::EngineArg::Native => PlannedEngine::Native,
         }
     }

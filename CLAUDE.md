@@ -76,6 +76,19 @@ present, and user-facing release strings in diagnostics, hovers, or help text.
 Mark the implemented plan's `Status:` complete/shipped and start the next minor
 plan if the release is now closed.
 
+### selected_engine fixture update protocol
+
+`crates/pdl-parity-tests/fixtures/selected_engine/<example>.txt` pins each
+example's expected `PlanObservability.selected_engine` under `--engine auto`.
+These fixtures are the silent-demotion canary: the
+`selected_engine_fixtures` test fails when any example flips engine in either
+direction. Never update a fixture just to make the test pass. A fixture flip
+must travel in the same commit as the corresponding plan promotion entry
+update (the `docs/V0_<minor>_PLAN.md` item that promotes or demotes the
+cell), with a one-line reference to that plan section in the commit message
+or fixture-adjacent comment. When adding a new example, add its fixture in
+the same change.
+
 ### NPM package version checks
 
 PDL browser packages are not guaranteed to be published for every Rust/CLI

@@ -28,10 +28,12 @@ pub(crate) fn try_execute_native(
     io: &dyn DriverIo,
 ) -> Result<RunResult, Diagnostic> {
     check_native_program_eligibility(prepared, ir, plan, context)?;
-    let main = ir
-        .main
-        .as_ref()
-        .ok_or_else(|| unsupported_native_pipeline("no runnable main pipeline"))?;
+    let main = ir.main.as_ref().ok_or_else(|| {
+        unsupported_native_pipeline(
+            NativeUnsupportedReason::NoRunnableMain,
+            "no runnable main pipeline",
+        )
+    })?;
     let stdout =
         match execute_native_pipeline(prepared, ir, main, plan, context, io, &mut Vec::new())? {
             NativePipelineResult::Plan(data_plan) => {
@@ -41,7 +43,10 @@ pub(crate) fn try_execute_native(
                             format: stdout_format,
                         })?
                         .ok_or_else(|| {
-                            unsupported_native_pipeline("native stdout bytes were not returned")
+                            unsupported_native_pipeline(
+                                NativeUnsupportedReason::NativeSinkWriter,
+                                "native stdout bytes were not returned",
+                            )
                         })?
                         .into()
                 } else {
@@ -66,13 +71,16 @@ pub(crate) fn check_native_program_eligibility(
 ) -> Result<(), Diagnostic> {
     if !ir.outputs.is_empty() {
         return Err(unsupported_native_pipeline(
+            NativeUnsupportedReason::NamedOutputMixedEngines,
             "native execution for named outputs is deferred",
         ));
     }
-    let main = ir
-        .main
-        .as_ref()
-        .ok_or_else(|| unsupported_native_pipeline("no runnable main pipeline"))?;
+    let main = ir.main.as_ref().ok_or_else(|| {
+        unsupported_native_pipeline(
+            NativeUnsupportedReason::NoRunnableMain,
+            "no runnable main pipeline",
+        )
+    })?;
     check_native_pipeline_eligibility(prepared, main, plan, context)
 }
 
@@ -88,6 +96,7 @@ pub(crate) fn check_native_pipeline_eligibility(
         }
         PipelineStartIr::Binding { .. } => {
             return Err(unsupported_native_pipeline(
+                NativeUnsupportedReason::BindingStartNotEligible,
                 "native execution from bindings is deferred",
             ));
         }
@@ -132,6 +141,7 @@ pub(crate) fn check_native_pipeline_eligibility(
             StageIr::Save { format, span, .. } => {
                 if !is_terminal {
                     return Err(unsupported_native_pipeline(
+                        NativeUnsupportedReason::NonTerminalSaveFanout,
                         "native save stages are supported only as terminal stages",
                     ));
                 }
@@ -171,6 +181,7 @@ pub(crate) fn check_native_pipeline_eligibility(
             | StageIr::Complete { .. }
             | StageIr::Unsupported { .. } => {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::RowOnlyStage,
                     "pipeline stage is not supported by native execution",
                 ));
             }
@@ -212,6 +223,7 @@ pub(crate) fn check_native_load_eligibility(
     };
     if !native_supported {
         return Err(unsupported_native_pipeline(
+            NativeUnsupportedReason::StdinBytesBackedScan,
             "native execution requires a path-backed input or Arrow IPC bytes",
         ));
     }
@@ -220,6 +232,7 @@ pub(crate) fn check_native_load_eligibility(
         DataFormat::Csv | DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::ArrowStream
     ) {
         return Err(unsupported_native_pipeline(
+            NativeUnsupportedReason::InputFormat,
             "input format is not supported by native execution",
         ));
     }
@@ -263,6 +276,7 @@ pub(crate) fn execute_native_pipeline(
         }
         PipelineStartIr::Binding { .. } => {
             return Err(unsupported_native_pipeline(
+                NativeUnsupportedReason::BindingStartNotEligible,
                 "native execution from bindings is deferred",
             ));
         }
@@ -356,6 +370,7 @@ pub(crate) fn execute_native_pipeline(
             StageIr::Save { format, span, .. } => {
                 if !is_terminal {
                     return Err(unsupported_native_pipeline(
+                        NativeUnsupportedReason::NonTerminalSaveFanout,
                         "native save stages are supported only as terminal stages",
                     ));
                 }
@@ -429,6 +444,7 @@ pub(crate) fn execute_native_pipeline(
             | StageIr::Complete { .. }
             | StageIr::Unsupported { .. } => {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::RowOnlyStage,
                     "pipeline stage is not supported by native execution",
                 ));
             }
@@ -481,6 +497,7 @@ pub(crate) fn execute_native_binding(
     match result? {
         NativePipelineResult::Plan(plan) => Ok(plan),
         NativePipelineResult::Completed { .. } => Err(unsupported_native_pipeline(
+            NativeUnsupportedReason::NonTerminalSaveFanout,
             "native binding outputs must remain table plans",
         )),
     }
@@ -527,7 +544,10 @@ pub(crate) fn execute_native_save(
             let stdout = plan
                 .write_to_sink(DataSink::Bytes { format })?
                 .ok_or_else(|| {
-                    unsupported_native_pipeline("native stdout bytes were not returned")
+                    unsupported_native_pipeline(
+                        NativeUnsupportedReason::NativeSinkWriter,
+                        "native stdout bytes were not returned",
+                    )
                 })?;
             Ok(NativePipelineResult::Completed {
                 stdout: Some(stdout),
@@ -570,6 +590,7 @@ pub(crate) fn native_load_plan(
             }
             if !matches!(format, DataFormat::ArrowFile | DataFormat::ArrowStream) {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::HostBytesBackedScan,
                     "native execution requires a real filesystem path",
                 ));
             }
@@ -600,6 +621,7 @@ pub(crate) fn native_load_plan(
             )?;
             if !matches!(format, DataFormat::ArrowFile | DataFormat::ArrowStream) {
                 return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::StdinBytesBackedScan,
                     "input format is not supported by native execution",
                 ));
             }
@@ -666,51 +688,15 @@ pub(crate) fn resolve_native_join_keys(
         .collect()
 }
 
-pub(crate) fn unsupported_native_pipeline(reason: &'static str) -> Diagnostic {
+pub(crate) fn unsupported_native_pipeline(
+    reason: NativeUnsupportedReason,
+    detail: &'static str,
+) -> Diagnostic {
     Diagnostic::error(
         codes::E1211,
-        format!(
-            "native execution unsupported [{}]: {reason}",
-            unsupported_native_reason_category(reason).code()
-        ),
+        format!("native execution unsupported [{}]: {detail}", reason.code()),
         Span::zero(),
     )
-}
-
-fn unsupported_native_reason_category(reason: &str) -> NativeUnsupportedReason {
-    if reason.contains("named outputs") {
-        NativeUnsupportedReason::NamedOutputs
-    } else if reason.contains("no runnable main") {
-        NativeUnsupportedReason::NoRunnableMain
-    } else if reason.contains("bindings") || reason.contains("from bindings") {
-        NativeUnsupportedReason::BindingStart
-    } else if reason.contains("path-backed input") {
-        NativeUnsupportedReason::SourceBoundary
-    } else if reason.contains("real filesystem path") {
-        NativeUnsupportedReason::SourcePathMissing
-    } else if reason.contains("input format") {
-        NativeUnsupportedReason::InputFormat
-    } else if reason.contains("save stages") {
-        NativeUnsupportedReason::SaveNotTerminal
-    } else if reason.contains("stdout bytes") {
-        NativeUnsupportedReason::NativeStdoutBytes
-    } else if reason.contains("window") {
-        NativeUnsupportedReason::WindowExpression
-    } else if reason.contains("col()") {
-        NativeUnsupportedReason::DynamicColumn
-    } else if reason.contains("scalar function arity") {
-        NativeUnsupportedReason::ScalarFunctionArity
-    } else if reason.contains("scalar function") {
-        NativeUnsupportedReason::ScalarFunction
-    } else if reason.contains("aggregate arity") {
-        NativeUnsupportedReason::AggregateArity
-    } else if reason.contains("aggregate function") {
-        NativeUnsupportedReason::AggregateFunction
-    } else if reason.contains("driver") {
-        NativeUnsupportedReason::DriverFacts
-    } else {
-        NativeUnsupportedReason::Stage
-    }
 }
 
 fn context_kind_label(kind: ContextKindIr) -> &'static str {

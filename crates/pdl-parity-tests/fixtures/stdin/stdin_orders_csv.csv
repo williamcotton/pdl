@@ -1,0 +1,4 @@
+order_id,region,amount,status
+A2,South,20,pending
+A1,North,10,completed
+A3,West,30,completed

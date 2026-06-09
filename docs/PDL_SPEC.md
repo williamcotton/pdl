@@ -1,13 +1,27 @@
 # PDL Detailed Specification
 
-Status: Draft 0.40.0
+Status: Draft 0.43.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.40.0`, tracked in
-`docs/V0_40_PLAN.md`. Version 0.40.0 promotes selected remaining native gaps
+The current repository implementation line is `0.43.0`, tracked in
+`docs/V0_43_PLAN.md`. Version 0.43.0 is a test-infrastructure and
+observability release that lays the foundation for the v0.44–v0.49 native
+coverage expansion. It adds the row-vs-native parity harness in
+`crates/pdl-parity-tests/`, the `selected_engine` regression-guard fixtures,
+the refined typed `NativeUnsupportedReason` observability surface, and the
+`--engine row-strict` CLI flag. It promotes no native coverage cells: the set
+of pipelines that select the native backend under `--engine auto` is
+identical to v0.42.
+
+Version 0.42.0, tracked in `docs/V0_42_PLAN.md`, was an internal maintenance
+release that split the oversized runtime, editor-services, and CLI render
+modules without changing the language surface, diagnostics, output bytes, or
+engine selection.
+
+Version 0.40.0, tracked in `docs/V0_40_PLAN.md`, promoted selected remaining native gaps
 where row/native semantics are explicit while keeping browser execution and
 PDL-visible row semantics separate from Polars internals.
 
@@ -2393,7 +2407,7 @@ Recommended options:
 
 - `--stdin-format <format>`
 - `--stdout-format <format>`
-- `--engine <auto|row|native>`
+- `--engine <auto|row|row-strict|native>`
 - `--output <path>`
 - `--manifest <path>`
 - `--dry-run`
@@ -2419,6 +2433,15 @@ native plans before opening native scans so row-only pipelines do not pay
 failed-native execution overhead. `row` forces the portable row runtime.
 `native` requires native backend execution and MUST report an ordinary PDL
 diagnostic when the pipeline contains unsupported native operations.
+
+Since version 0.43.0, the CLI also accepts `--engine row-strict` for
+`pdl run`, `pdl plan`, and `pdl manifest`. `row-strict` plans and executes
+exactly like `row` and additionally fails the run when the result reports any
+backend other than the portable row runtime, proving the row engine still
+handles the pipeline end-to-end with no silent native lowering. The
+row-strict violation is a CLI-level error on stderr, not a new diagnostic
+code; plan observability reports `requested_engine` `row-strict` with
+`selected_engine` `row`.
 
 ### 14.3 pdl check
 
@@ -2723,6 +2746,42 @@ rows in automatic mode before native scans are opened when they are known to be
 unsupported. Forced native mode reports an `E1211` diagnostic with a stable
 unsupported native reason category instead of silently falling back.
 
+Since version 0.43.0, the unsupported-native reason surface is typed.
+`NativeUnsupportedReason` in `pdl-exec` replaces the v0.40–v0.42 coarse
+free-form fallback categories with coverage-boundary variants:
+`no-runnable-main`, `input-format`, `scalar-function`,
+`scalar-function-arity`, `aggregate-function`, `aggregate-arity`,
+`window-expression`, `data-dependent-col-indirection`,
+`data-dependent-replace-pattern`, `unsupported-numeric-coercion` (v0.47
+reserve), `union-null-padding` (v0.41 reserve), `non-equi-join` (v0.41
+reserve), `binding-start-not-eligible`, `named-output-mixed-engines`,
+`non-terminal-save-fanout`, `stdin-bytes-backed-scan`,
+`host-bytes-backed-scan`, `native-sink-writer`, `row-only-stage`,
+`driver-facts`, and the non-execution documentation boundaries
+`wasm-target-graph` and `editor-service`. These are internal observability
+values, not diagnostic codes. `pdl plan` text output names the variant, and
+`pdl plan --json` and `pdl manifest` serialize it under
+`execution.observability.fallback_reason`. Every runnable pipeline that is
+not natively eligible MUST carry a variant. Row-dependent `col(...)` reports
+`data-dependent-col-indirection`, and row-dependent `replace` patterns or
+replacements report `data-dependent-replace-pattern`.
+
+Version 0.43.0 also ships the row-vs-native parity harness
+(`cargo test -p pdl-parity-tests parity_examples`) and the silent-demotion
+canary (`cargo test -p pdl-parity-tests selected_engine_fixtures`). The
+harness runs every example in `examples/` through `pdl run` on the row,
+row-strict, auto, and (for examples pinned native) forced native engines
+with stdin fixtures supplied per example, then diffs stdout payloads and
+saved or named-output files against the row engine. The row engine is the
+parity spec: CSV and JSON Lines payloads MUST match byte-for-byte. Arrow IPC
+file, Arrow IPC stream, and Parquet payloads are compared as decoded tables
+because the native direct writers emit semantically equal but not
+byte-identical encodings; unifying those bytes is v0.44 native sink writer
+work. Each example carries a `selected_engine` fixture under
+`crates/pdl-parity-tests/fixtures/selected_engine/`, and the canary MUST
+fail when an example flips engine under `--engine auto` without a fixture
+update that travels in the same commit as a plan promotion entry.
+
 Browser/WASM builds MUST keep the native Polars feature set disabled. The WASM
 runtime MUST NOT enable `native-formats`, `polars-engine`, or any dependency
 path that pulls Polars, Arrow, or Parquet into the wasm target dependency graph.
@@ -2905,7 +2964,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.40.0` LSP implementation provides diagnostics,
+The current `0.43.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3300,6 +3359,11 @@ package manifests or consumer install pins to move past the latest verified
 published `pdl-wasm@0.39.0` and `pdl-editor@0.39.0` packages unless those
 packages are explicitly prepared and published.
 
+Versions 0.42.0 and 0.43.0 are likewise native Rust/CLI releases. Browser
+package publication stays independent: local package manifests carry the
+workspace release version, while consumer dependency pins remain on the
+latest verified published `pdl-wasm@0.39.0` and `pdl-editor@0.39.0`.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3366,11 +3430,13 @@ members = [
     "crates/pdl-editor-services",
     "crates/pdl-lsp",
     "crates/pdl-cli",
+    "crates/pdl-bench",
+    "crates/pdl-parity-tests",
     "crates/pdl-wasm",
 ]
 
 [workspace.package]
-version = "0.40.0"
+version = "0.43.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -4964,7 +5030,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.40.0.
+PDL source does not require an explicit version declaration in draft 0.43.0.
 
 The implementation SHOULD report supported language version.
 

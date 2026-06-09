@@ -55,6 +55,10 @@ pub enum ExecutionEngine {
     #[default]
     Auto,
     Row,
+    /// Row execution plus a strict guarantee: no pipeline in the run may
+    /// silently use native lowering. Hosts verify the returned backend is
+    /// `PortableRows` and treat anything else as an error.
+    RowStrict,
     Native,
 }
 
@@ -135,6 +139,7 @@ pub fn run_prepared_with_io_and_context_and_engine(
             engine: match engine {
                 ExecutionEngine::Auto => PlannedEngine::Auto,
                 ExecutionEngine::Row => PlannedEngine::Row,
+                ExecutionEngine::RowStrict => PlannedEngine::RowStrict,
                 ExecutionEngine::Native => PlannedEngine::Native,
             },
         },
@@ -178,7 +183,7 @@ pub fn run_prepared_with_io_and_context_and_engine(
         };
     }
 
-    if !matches!(engine, ExecutionEngine::Row) {
+    if !matches!(engine, ExecutionEngine::Row | ExecutionEngine::RowStrict) {
         match try_execute_native(prepared, ir, &plan, &context, io) {
             Ok(result) => return result,
             Err(diagnostic) if matches!(engine, ExecutionEngine::Native) => {

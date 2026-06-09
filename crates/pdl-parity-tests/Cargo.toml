@@ -1,0 +1,17 @@
+[package]
+name = "pdl-parity-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Test-only crate: nothing in the workspace depends on it, so it can never
+# enter the `pdl-wasm` target graph. All real dependencies are
+# dev-dependencies of the integration tests.
+
+[dev-dependencies]
+pdl-data = { workspace = true, features = ["native-formats"] }
+pdl-exec = { workspace = true, features = ["native-formats"] }
+serde_json = { workspace = true }

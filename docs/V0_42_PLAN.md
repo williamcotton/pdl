@@ -1,6 +1,6 @@
 # PDL v0.42 Plan
 
-Status: Proposed
+Status: Shipped (module split landed in the v0.42.0 commit; version stamps were aligned in v0.43.0)
 Target version: 0.42.0
 Owner: PDL maintainers
 Related spec: [`PDL_SPEC.md`](PDL_SPEC.md)

@@ -70,5 +70,6 @@ pub enum Command {
 pub enum EngineArg {
     Auto,
     Row,
+    RowStrict,
     Native,
 }
