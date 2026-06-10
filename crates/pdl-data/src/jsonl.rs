@@ -1,6 +1,7 @@
 use indexmap::IndexSet;
 use pdl_core::{codes, Diagnostic, Span};
 use serde_json::{Map, Number};
+use std::io::Write;
 use std::path::Path;
 
 use crate::{format_number, Row, Table, Value};
@@ -49,15 +50,33 @@ pub fn read_json_lines_from_bytes(path: &Path, bytes: &[u8]) -> Result<Table, Di
 pub fn write_json_lines_to_vec(table: &Table) -> Result<Vec<u8>, Diagnostic> {
     let mut output = Vec::new();
     for row in &table.rows {
-        let mut object = Map::new();
-        for (index, column) in table.columns.iter().enumerate() {
-            let value = row.values.get(index).unwrap_or(&Value::Null);
-            object.insert(column.clone(), table_value_to_json(value)?);
-        }
-        serde_json::to_writer(&mut output, &object).map_err(json_write_error)?;
-        output.push(b'\n');
+        write_json_lines_record(&mut output, &table.columns, &row.values)?;
     }
     Ok(output)
+}
+
+/// Emits one JSON Lines record with the row writer's exact encoding (stable
+/// column-order fields, integral-number narrowing, trailing `\n`). The native
+/// engine writes through this so NDJSON bytes stay byte-identical to the row
+/// writer without materializing a row table.
+pub(crate) fn write_json_lines_record(
+    writer: &mut dyn Write,
+    columns: &[String],
+    values: &[Value],
+) -> Result<(), Diagnostic> {
+    let mut object = Map::new();
+    for (index, column) in columns.iter().enumerate() {
+        let value = values.get(index).unwrap_or(&Value::Null);
+        object.insert(column.clone(), table_value_to_json(value)?);
+    }
+    serde_json::to_writer(&mut *writer, &object).map_err(json_write_error)?;
+    writer.write_all(b"\n").map_err(|error| {
+        Diagnostic::error(
+            codes::E1704,
+            format!("JSON Lines write failed: {error}"),
+            Span::zero(),
+        )
+    })
 }
 
 fn parse_json_lines(

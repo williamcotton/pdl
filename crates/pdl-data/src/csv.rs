@@ -106,32 +106,55 @@ pub fn write_csv_to_vec(table: &Table) -> Result<Vec<u8>, Diagnostic> {
 }
 
 fn write_csv_to_writer<W: Write>(writer: W, table: &Table) -> Result<(), Diagnostic> {
-    let mut writer = csv::WriterBuilder::new()
-        .has_headers(true)
-        .terminator(csv::Terminator::Any(b'\n'))
-        .from_writer(writer);
-    writer.write_record(&table.columns).map_err(|error| {
-        Diagnostic::error(
-            codes::E1704,
-            format!("CSV header write failed: {error}"),
-            Span::zero(),
-        )
-    })?;
+    let mut writer = CsvStreamWriter::new(writer, &table.columns)?;
     for row in &table.rows {
-        let record: Vec<String> = row.values.iter().map(Value::to_csv_cell).collect();
-        writer.write_record(record).map_err(|error| {
+        writer.write_row(&row.values)?;
+    }
+    writer.finish()
+}
+
+/// Streaming CSV emission over the row writer's exact dialect (header row,
+/// `\n` terminator, quoting, and `Value::to_csv_cell` formatting). The native
+/// engine writes through this so CSV bytes stay byte-identical to the row
+/// writer without materializing a row table.
+pub(crate) struct CsvStreamWriter<W: Write> {
+    writer: csv::Writer<W>,
+}
+
+impl<W: Write> CsvStreamWriter<W> {
+    pub(crate) fn new(writer: W, columns: &[String]) -> Result<Self, Diagnostic> {
+        let mut writer = csv::WriterBuilder::new()
+            .has_headers(true)
+            .terminator(csv::Terminator::Any(b'\n'))
+            .from_writer(writer);
+        writer.write_record(columns).map_err(|error| {
+            Diagnostic::error(
+                codes::E1704,
+                format!("CSV header write failed: {error}"),
+                Span::zero(),
+            )
+        })?;
+        Ok(Self { writer })
+    }
+
+    pub(crate) fn write_row(&mut self, values: &[Value]) -> Result<(), Diagnostic> {
+        let record: Vec<String> = values.iter().map(Value::to_csv_cell).collect();
+        self.writer.write_record(record).map_err(|error| {
             Diagnostic::error(
                 codes::E1704,
                 format!("CSV row write failed: {error}"),
                 Span::zero(),
             )
-        })?;
+        })
     }
-    writer.flush().map_err(|error| {
-        Diagnostic::error(
-            codes::E1704,
-            format!("CSV flush failed: {error}"),
-            Span::zero(),
-        )
-    })
+
+    pub(crate) fn finish(mut self) -> Result<(), Diagnostic> {
+        self.writer.flush().map_err(|error| {
+            Diagnostic::error(
+                codes::E1704,
+                format!("CSV flush failed: {error}"),
+                Span::zero(),
+            )
+        })
+    }
 }

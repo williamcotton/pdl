@@ -1,13 +1,23 @@
 # PDL Detailed Specification
 
-Status: Draft 0.43.5
+Status: Draft 0.44.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.43.5`, tracked in
-`docs/V0_43_5_PLAN.md`. Version 0.43.5 replaces the SQL-shaped window-frame
+The current repository implementation line is `0.44.0`, tracked in
+`docs/V0_44_PLAN.md`. Version 0.44.0 promotes the CSV and JSON Lines sink
+writers to native parity. Native execution writes CSV and NDJSON output
+through native direct writers that stream dataframe rows through the row
+writers' cell encoders, so emitted bytes stay byte-identical to the row
+writer across path, stdout, and bytes sinks without materializing a row
+table. The release adds no language surface, stages, functions, diagnostic
+codes, or formats; it widens which existing format writes execute on the
+native engine and completes the sink side of the native coverage matrix.
+
+Version 0.43.5, tracked in
+`docs/V0_43_5_PLAN.md`, replaces the SQL-shaped window-frame
 clause with the named-frame surface `frame <name> [N]` (`whole_partition`,
 `running`, `remaining`, `trailing N`, `leading N`, `centered N`). It is a
 breaking source change with no deprecation cycle: the former `rows`/`between`
@@ -2378,7 +2388,7 @@ Non-deterministic function not allowed MUST produce `E1405`.
 Divide by zero detected statically MUST produce `E1407`.
 
 Invalid window specifications MUST produce stable diagnostics; version
-0.43.5 uses `E1203`, `E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1230`,
+0.44.0 uses `E1203`, `E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1230`,
 `E1231`, `E1232`, `E1401`, or `E1402` depending on the malformed clause.
 
 ## 13. Row Ordering And Determinism
@@ -2779,10 +2789,22 @@ Since version 0.40.0, `col(...)` with a string literal or string context default
 is eligible for native planning as a static column reference. Data-dependent
 `col(...)` remains row-only.
 
+Since version 0.44.0, the native engine writes every supported output format
+through a native direct writer: Parquet, Arrow IPC file, and Arrow IPC stream
+use the native binary writers (since 0.42.0), and CSV and JSON Lines use
+native text emission that streams collected dataframe rows through the row
+writers' cell encoders. Native CSV and NDJSON output MUST be byte-identical
+to the row writer — header row, quoting, escaping, line terminators, null
+rendering, field ordering, numeric formatting, and trailing newline — across
+path, stdout, and bytes sinks. Text output no longer forces a row
+materialization on the native engine, and the planner reports
+`native-direct-writer` (saves) or `bytes-sink` (stdout payloads) for every
+format when the native engine is selected.
+
 Unsupported aggregate functions, non-Arrow byte-backed input, non-Arrow stdin,
 binding starts, named outputs, multi-output execution, non-equi joins,
 incompatible-schema union extensions, `pivot_longer`, `complete`, JSON Lines
-input, CSV/JSON Lines text writers, unsupported bounded-frame windows,
+input, unsupported bounded-frame windows,
 incompatible multi-key window order groups, data-dependent dynamic `col(...)`,
 uncertain coercions, and other unsupported expressions fall back to
 rows in automatic mode before native scans are opened when they are known to be
@@ -2816,11 +2838,13 @@ harness runs every example in `examples/` through `pdl run` on the row,
 row-strict, auto, and (for examples pinned native) forced native engines
 with stdin fixtures supplied per example, then diffs stdout payloads and
 saved or named-output files against the row engine. The row engine is the
-parity spec: CSV and JSON Lines payloads MUST match byte-for-byte. Arrow IPC
-file, Arrow IPC stream, and Parquet payloads are compared as decoded tables
-because the native direct writers emit semantically equal but not
-byte-identical encodings; unifying those bytes is v0.44 native sink writer
-work. Each example carries a `selected_engine` fixture under
+parity spec: CSV and JSON Lines payloads MUST match byte-for-byte — since
+version 0.44.0 the native direct writers emit those bytes through the row
+writers' cell encoders, so the byte contract holds without row-engine
+execution. Arrow IPC file, Arrow IPC stream, and Parquet payloads are
+compared as decoded tables because the binary direct writers emit
+semantically equal but engine-specific encodings by design.
+Each example carries a `selected_engine` fixture under
 `crates/pdl-parity-tests/fixtures/selected_engine/`, and the canary MUST
 fail when an example flips engine under `--engine auto` without a fixture
 update that travels in the same commit as a plan promotion entry.
@@ -3007,7 +3031,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.43.5` LSP implementation provides diagnostics,
+The current `0.44.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3405,10 +3429,14 @@ packages are explicitly prepared and published.
 Versions 0.42.0 and 0.43.0 are likewise native Rust/CLI releases. Version
 0.43.5 changes the language surface the browser packages carry, so it
 prepares new browser package versions (`pdl-wasm@0.43.5`,
-`pdl-editor@0.43.6`). Browser package publication stays independent:
-consumer dependency pins remain on the latest verified published
-`pdl-wasm@0.39.0` and `pdl-editor@0.39.0` until the prepared versions are
-published to npm.
+`pdl-editor@0.43.6`); both have since been published to npm and consumer
+dependency pins moved to them. Browser package publication stays independent
+of Rust/CLI version bumps.
+
+Version 0.44.0 is a native Rust/CLI release: the native sink writer
+promotion changes no parser, runtime, editor-service, or WASM-visible
+behavior, so browser package versions and consumer pins stay at the
+published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`.
 
 ## 19. Rust Crate Architecture
 
@@ -3482,7 +3510,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.43.5"
+version = "0.44.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -5085,7 +5113,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.43.5.
+PDL source does not require an explicit version declaration in draft 0.44.0.
 
 The implementation SHOULD report supported language version.
 

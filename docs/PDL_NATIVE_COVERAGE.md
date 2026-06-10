@@ -1,6 +1,6 @@
 # PDL Native Coverage Matrix
 
-Status: v0.43.5 source of truth
+Status: v0.44.0 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
 This matrix records what the native execution strategy may claim in v0.40. The
@@ -37,7 +37,7 @@ boundary changes status, update the CSV and the tests in the same change.
 | `union` | native partial | Native covers compatible-schema binding inputs by name or position with optional `distinct`; incompatible schemas, language-level null padding, and browser byte boundaries stay row-only. |
 | `pivot_longer` | row-only by design | Row runtime preserves deterministic long output and mixed value behavior. |
 | `complete` | row-only by design | Row runtime preserves key expansion and fill expression semantics. |
-| `save` | native partial | Binary Parquet and Arrow sinks use native direct writers; CSV/JSON Lines use the row-format writer. |
+| `save` | native partial | Terminal saves use native direct writers for every format since v0.44; non-terminal save fan-out stays row-only (v0.48). |
 
 ## Expression Coverage
 
@@ -84,11 +84,11 @@ boundary changes status, update the CSV and the tests in the same change.
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| path | native partial | Binary formats direct; CSV/JSON Lines row-format fallback. |
-| stdout | native partial | Binary formats byte-clean; CSV/JSON Lines row-format fallback. |
-| bytes | native partial | Binary formats direct; CSV/JSON Lines row-format fallback. |
-| CSV | row-only by design | Text formatting remains PDL-visible. |
-| JSON Lines | row-only by design | Text formatting remains PDL-visible. |
+| path | native parity | Every format uses the native direct writer. |
+| stdout | native parity | Every format is byte-clean through the native direct writer. |
+| bytes | native parity | Every format uses the native direct writer. |
+| CSV | native parity | Native direct writer streams rows through the row writer's cell encoder; bytes match the row writer (v0.44). |
+| JSON Lines | native parity | Native direct writer streams rows through the row writer's record encoder; bytes match the row writer (v0.44). |
 | Parquet | native parity | Native direct writer. |
 | Arrow IPC file | native parity | Native direct writer. |
 | Arrow IPC stream | native parity | Native direct writer. |

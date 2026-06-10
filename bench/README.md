@@ -49,8 +49,10 @@ system, Rust/Cargo versions, source report, and snapshot timestamp.
 
 The current generated source family is `million-row` in CSV, Parquet, and Arrow
 IPC stream form. The large suite also includes CSV partition files, a segment
-dimension table, composite-key join workloads, and window-heavy rank, running,
-offset, value, and distribution workloads.
+dimension table, composite-key join workloads, window-heavy rank, running,
+offset, value, and distribution workloads, and a writer-dominated
+`million_row_text_emission` workload (v0.44) that measures CSV and NDJSON
+emission row-vs-native.
 
 ## PDL-to-Algraf Arrow Smoke
 

@@ -2,9 +2,10 @@
 // through `pdl run` on both engines with stdin fixtures supplied per example.
 // The row engine is the parity spec: stdout payloads and saved/named-output
 // files from the other engine legs must match it. CSV and JSON Lines are
-// compared byte-for-byte; Arrow IPC file/stream and Parquet are compared as
-// decoded tables until the v0.44 native sink writers unify the byte
-// encodings (see `common::binary_table_format`).
+// compared byte-for-byte — since v0.44 the native direct writers emit those
+// bytes through the row writers' cell encoders. Arrow IPC file/stream and
+// Parquet keep engine-specific encodings by design and are compared as
+// decoded tables (see `common::binary_table_format`).
 
 mod common;
 

@@ -149,8 +149,10 @@ pub enum NativeUnsupportedReason {
     /// Host-supplied bytes for a CSV / Parquet / NDJSON path require a
     /// byte-backed scan adapter (v0.46 reserve refines this further).
     HostBytesBackedScan,
-    /// Sink format is not yet wired to `NativeDirectWriter` (v0.44 reserve,
-    /// drops out of use when writers ship).
+    /// Sink format is not wired to `NativeDirectWriter`. Since the v0.44
+    /// CSV/NDJSON writer promotions every format has a native direct writer;
+    /// the variant survives as the defensive boundary for native sink writes
+    /// that fail to return bytes. Vocabulary cleanup is v0.49 work.
     NativeSinkWriter,
     /// Stage is `row-only by design` with no narrower variant. Catch-all for
     /// stages the coverage matrix declares row-only.
@@ -501,8 +503,10 @@ fn build_observability(
     };
     let output_format = plan_output_format(prepared, stdout_format, steps);
     let sink_strategy = sink_strategy(prepared, stdout_format, selected_engine, &output_format);
-    let row_materialization = selected_engine == PlannedEngine::Row
-        || matches!(output_format.as_deref(), Some("csv" | "jsonl" | "ndjson"));
+    // Since v0.44 the native CSV/NDJSON writers stream dataframe rows through
+    // the row writers' cell encoders, so text output no longer forces a row
+    // materialization on the native engine.
+    let row_materialization = selected_engine == PlannedEngine::Row;
 
     PlanObservability {
         requested_engine: options.engine,
@@ -574,7 +578,9 @@ fn sink_strategy(
         .and_then(DataFormat::from_name)
         .unwrap_or(DataFormat::Csv);
     if stdout_format.is_some() {
-        return if selected_engine == PlannedEngine::Native && format.is_binary() {
+        // Since v0.44 every format has a native direct writer, so the native
+        // engine always hands stdout payloads over as bytes.
+        return if selected_engine == PlannedEngine::Native {
             SinkStrategy::BytesSink
         } else {
             SinkStrategy::RowFormatWriter
@@ -583,7 +589,7 @@ fn sink_strategy(
     let Some(sink) = prepared.driver_plan.sinks.last() else {
         return SinkStrategy::None;
     };
-    if selected_engine == PlannedEngine::Native && format.is_binary() {
+    if selected_engine == PlannedEngine::Native {
         return SinkStrategy::NativeDirectWriter;
     }
     if matches!(format, DataFormat::Csv | DataFormat::JsonLines) {
@@ -1246,11 +1252,58 @@ mod tests {
             plan.observability.required_source_columns,
             Some(vec!["amount".to_string(), "region".to_string()])
         );
-        assert_eq!(
-            plan.observability.sink_strategy,
-            SinkStrategy::RowFormatWriter
-        );
-        assert!(plan.observability.row_materialization);
+        assert_eq!(plan.observability.sink_strategy, SinkStrategy::BytesSink);
+        assert!(!plan.observability.row_materialization);
+    }
+
+    /// v0.44: CSV and JSON Lines saves route through the native direct
+    /// writer on the native engine and keep the row-format writer on the row
+    /// engine.
+    #[test]
+    fn planning_routes_text_saves_through_native_direct_writer() {
+        for (sink, format_name) in [("top.csv", "csv"), ("top.jsonl", "jsonl")] {
+            let io =
+                InMemoryDriverIo::default().with_schema("memory/sales.csv", ["amount", "region"]);
+            let prepared = prepare_source_with_io(
+                "memory/main.pdl",
+                format!(r#"load "sales.csv" | filter amount > 0 | save "{sink}""#),
+                &io,
+            );
+
+            let plan = |engine: PlannedEngine| {
+                plan_prepared(
+                    &prepared,
+                    PlanningOptions {
+                        stdout_format: None,
+                        dry_run: true,
+                        allow_binary_stdout: false,
+                        engine,
+                    },
+                )
+                .expect("execution plan")
+            };
+
+            let auto = plan(PlannedEngine::Auto);
+            assert_eq!(
+                auto.observability.selected_engine,
+                PlannedEngine::Native,
+                "{format_name}"
+            );
+            assert_eq!(
+                auto.observability.sink_strategy,
+                SinkStrategy::NativeDirectWriter,
+                "{format_name}"
+            );
+            assert!(!auto.observability.row_materialization, "{format_name}");
+
+            let row = plan(PlannedEngine::Row);
+            assert_eq!(
+                row.observability.sink_strategy,
+                SinkStrategy::RowFormatWriter,
+                "{format_name}"
+            );
+            assert!(row.observability.row_materialization, "{format_name}");
+        }
     }
 
     #[test]

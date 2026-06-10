@@ -942,6 +942,24 @@ fn large_workloads() -> &'static [Workload] {
             output_format: "arrow-stream",
             required_path: "bench/data/generated/million-row.csv",
         },
+        // v0.44: writer-dominated workload measuring the native CSV and
+        // NDJSON direct writers against the row-format writers.
+        Workload {
+            name: "million_row_text_emission",
+            program: "bench/workloads/large/million_row_text_emission.pdl",
+            dataset: "million-row",
+            input_format: "csv",
+            output_format: "csv",
+            required_path: "bench/data/generated/million-row.csv",
+        },
+        Workload {
+            name: "million_row_text_emission",
+            program: "bench/workloads/large/million_row_text_emission.pdl",
+            dataset: "million-row",
+            input_format: "csv",
+            output_format: "jsonl",
+            required_path: "bench/data/generated/million-row.csv",
+        },
     ]
 }
 

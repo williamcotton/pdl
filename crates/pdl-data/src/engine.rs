@@ -1186,25 +1186,20 @@ fn write_native_to_sink(
             Ok(None)
         }
         DataSink::Path { path, format } => {
-            if native_direct_writer_format(format) {
-                let file = std::fs::File::create(path).map_err(|error| {
-                    Diagnostic::error(
-                        codes::E1704,
-                        format!(
-                            "output file `{}` could not be created: {error}",
-                            path.display()
-                        ),
-                        Span::zero(),
-                    )
-                })?;
-                let mut writer = std::io::BufWriter::new(file);
-                write_native_to_writer(plan, format, &mut writer)?;
-                Ok(None)
-            } else {
-                let table = native_collect_to_table(plan)?;
-                write_table_to_path(path, format, &table)?;
-                Ok(None)
-            }
+            let file = std::fs::File::create(path).map_err(|error| {
+                Diagnostic::error(
+                    codes::E1704,
+                    format!(
+                        "output file `{}` could not be created: {error}",
+                        path.display()
+                    ),
+                    Span::zero(),
+                )
+            })?;
+            let mut writer = std::io::BufWriter::new(file);
+            write_native_to_writer(plan, format, &mut writer)?;
+            writer.flush().map_err(output_write_error)?;
+            Ok(None)
         }
     }
 }
@@ -1215,13 +1210,6 @@ fn write_native_to_writer(
     format: DataFormat,
     writer: &mut dyn Write,
 ) -> Result<(), Diagnostic> {
-    if !native_direct_writer_format(format) {
-        let table = native_collect_to_table(plan)?;
-        let bytes = write_table_to_bytes(format, &table)?;
-        writer.write_all(&bytes).map_err(output_write_error)?;
-        return Ok(());
-    }
-
     let mut frame = plan
         .plan
         .collect()
@@ -1237,16 +1225,65 @@ fn write_native_to_writer(
         DataFormat::ArrowStream => native::IpcStreamWriter::new(writer)
             .finish(&mut frame)
             .map_err(native_write_error("Arrow IPC stream")),
-        DataFormat::Csv | DataFormat::JsonLines => unreachable!("handled by row-format fallback"),
+        // The row writers are the byte spec for the text formats. Native
+        // emission streams dataframe rows through the row writers' cell
+        // encoders so the bytes stay identical without building a row table.
+        DataFormat::Csv => write_native_csv(&frame, writer),
+        DataFormat::JsonLines => write_native_json_lines(&frame, writer),
     }
 }
 
 #[cfg(feature = "polars-engine")]
-fn native_direct_writer_format(format: DataFormat) -> bool {
-    matches!(
-        format,
-        DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::ArrowStream
-    )
+fn write_native_csv(frame: &native::DataFrame, writer: &mut dyn Write) -> Result<(), Diagnostic> {
+    let columns = native_frame_column_names(frame);
+    let mut csv_writer = crate::csv::CsvStreamWriter::new(writer, &columns)?;
+    let mut values = Vec::with_capacity(columns.len());
+    for row_index in 0..frame.height() {
+        native_frame_row_values(frame, row_index, &mut values)?;
+        csv_writer.write_row(&values)?;
+    }
+    csv_writer.finish()
+}
+
+#[cfg(feature = "polars-engine")]
+fn write_native_json_lines(
+    frame: &native::DataFrame,
+    writer: &mut dyn Write,
+) -> Result<(), Diagnostic> {
+    let columns = native_frame_column_names(frame);
+    let mut values = Vec::with_capacity(columns.len());
+    for row_index in 0..frame.height() {
+        native_frame_row_values(frame, row_index, &mut values)?;
+        crate::jsonl::write_json_lines_record(writer, &columns, &values)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_frame_column_names(frame: &native::DataFrame) -> Vec<String> {
+    frame
+        .get_column_names()
+        .iter()
+        .map(|name| name.as_str().to_string())
+        .collect()
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_frame_row_values(
+    frame: &native::DataFrame,
+    row_index: usize,
+    values: &mut Vec<Value>,
+) -> Result<(), Diagnostic> {
+    values.clear();
+    for column in frame.columns() {
+        values.push(
+            column
+                .get(row_index)
+                .map_err(native_value_error)
+                .and_then(native_value_to_pdl)?,
+        );
+    }
+    Ok(())
 }
 
 fn output_write_error(error: std::io::Error) -> Diagnostic {
@@ -2392,24 +2429,14 @@ fn native_collect_to_table(plan: NativePlan) -> Result<Table, Diagnostic> {
 
 #[cfg(feature = "polars-engine")]
 fn native_frame_to_table(frame: &native::DataFrame) -> Result<Table, Diagnostic> {
-    let columns = frame
-        .get_column_names()
-        .iter()
-        .map(|name| name.as_str().to_string())
-        .collect::<Vec<_>>();
+    let columns = native_frame_column_names(frame);
     let mut rows = Vec::with_capacity(frame.height());
+    let mut values = Vec::with_capacity(columns.len());
     for row_index in 0..frame.height() {
-        let values = frame
-            .columns()
-            .iter()
-            .map(|column| {
-                column
-                    .get(row_index)
-                    .map_err(native_value_error)
-                    .and_then(native_value_to_pdl)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.push(Row { values });
+        native_frame_row_values(frame, row_index, &mut values)?;
+        rows.push(Row {
+            values: values.clone(),
+        });
     }
     Ok(Table { columns, rows })
 }
@@ -2547,5 +2574,128 @@ mod tests {
             String::from_utf8(bytes).expect("utf8"),
             "region,amount\nWest,30\n"
         );
+    }
+
+    /// Parity corpus for the v0.44 native text writers: embedded delimiters,
+    /// quotes, newlines, multibyte UTF-8 in headers and cells, explicit
+    /// nulls, booleans, and numeric edges (int64-scale magnitudes, f64
+    /// subnormals, negative fractions).
+    #[cfg(feature = "polars-engine")]
+    fn text_writer_parity_table() -> Table {
+        let columns = vec![
+            "región, área".to_string(),
+            "notes \"q\"".to_string(),
+            "amount".to_string(),
+            "active".to_string(),
+        ];
+        let rows = vec![
+            Row {
+                values: vec![
+                    Value::String("West, upper".to_string()),
+                    Value::String("said \"hi\"\nsecond line".to_string()),
+                    Value::Number(9.007199254740991e15),
+                    Value::Bool(true),
+                ],
+            },
+            Row {
+                values: vec![
+                    Value::String("北区 ❄".to_string()),
+                    Value::Null,
+                    Value::Number(f64::MIN_POSITIVE / 2.0),
+                    Value::Bool(false),
+                ],
+            },
+            Row {
+                values: vec![
+                    Value::String(String::new()),
+                    Value::String("plain".to_string()),
+                    Value::Number(-1234.5),
+                    Value::Null,
+                ],
+            },
+        ];
+        Table::new(columns, rows)
+    }
+
+    #[cfg(feature = "polars-engine")]
+    fn engine_plan(backend: DataBackend, arrow_bytes: &[u8]) -> DataPlan {
+        DataPlan::scan_with_backend(
+            DataSource::Bytes {
+                logical_path: Path::new("memory.arrows"),
+                format: DataFormat::ArrowStream,
+                bytes: arrow_bytes,
+            },
+            backend,
+        )
+        .expect("scan arrow-stream bytes")
+    }
+
+    #[cfg(feature = "polars-engine")]
+    fn assert_native_text_writer_parity(table: &Table, format: DataFormat) {
+        let arrow_bytes =
+            crate::write_table_to_bytes(DataFormat::ArrowStream, table).expect("encode arrow");
+
+        let row_bytes = engine_plan(DataBackend::PortableRows, &arrow_bytes)
+            .write_to_sink(DataSink::Bytes { format })
+            .expect("row bytes sink")
+            .expect("row bytes");
+        let native_bytes = engine_plan(DataBackend::NativePolars, &arrow_bytes)
+            .write_to_sink(DataSink::Bytes { format })
+            .expect("native bytes sink")
+            .expect("native bytes");
+        assert_eq!(
+            String::from_utf8_lossy(&row_bytes),
+            String::from_utf8_lossy(&native_bytes),
+            "{} bytes-sink output differs between engines",
+            format.canonical_name()
+        );
+
+        let mut native_writer_bytes = Vec::new();
+        engine_plan(DataBackend::NativePolars, &arrow_bytes)
+            .write_to_sink(DataSink::Writer {
+                format,
+                writer: &mut native_writer_bytes,
+            })
+            .expect("native writer sink");
+        assert_eq!(row_bytes, native_writer_bytes);
+
+        static NONCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "pdl-data-native-writer-{}-{}-{}",
+            format.canonical_name(),
+            std::process::id(),
+            NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("create temp dir");
+        let path = directory.join("native-output");
+        engine_plan(DataBackend::NativePolars, &arrow_bytes)
+            .write_to_sink(DataSink::Path {
+                path: &path,
+                format,
+            })
+            .expect("native path sink");
+        let native_path_bytes = std::fs::read(&path).expect("read native path output");
+        std::fs::remove_dir_all(&directory).expect("clean temp dir");
+        assert_eq!(row_bytes, native_path_bytes);
+    }
+
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_csv_writer_matches_row_writer_bytes() {
+        assert_native_text_writer_parity(&text_writer_parity_table(), DataFormat::Csv);
+    }
+
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_json_lines_writer_matches_row_writer_bytes() {
+        assert_native_text_writer_parity(&text_writer_parity_table(), DataFormat::JsonLines);
+    }
+
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_text_writers_match_row_writer_bytes_for_empty_input() {
+        let empty = Table::new(vec!["región".to_string(), "amount".to_string()], Vec::new());
+        assert_native_text_writer_parity(&empty, DataFormat::Csv);
+        assert_native_text_writer_parity(&empty, DataFormat::JsonLines);
     }
 }

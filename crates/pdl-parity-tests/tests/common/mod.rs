@@ -259,11 +259,11 @@ fn snapshot_files(directory: &Path) -> BTreeMap<String, Vec<u8>> {
 }
 
 /// Formats whose output bytes are produced by engine-specific direct writers
-/// in v0.42/v0.43. The encodings are semantically equal but not yet
-/// byte-identical between engines; byte unification is the v0.44
-/// `native-sink-writer` work. These payloads are compared as decoded tables.
-/// CSV and JSON Lines always go through the row writers and are compared as
-/// bytes; the row engine is the byte spec.
+/// since v0.42/v0.43. The encodings are semantically equal but not
+/// byte-identical between engines, by design; these payloads are compared as
+/// decoded tables. CSV and JSON Lines are compared as bytes: the row writer
+/// is the byte spec, and since v0.44 the native direct writers emit CSV and
+/// NDJSON through the row writers' cell encoders to keep the bytes identical.
 pub fn binary_table_format(format: DataFormat) -> bool {
     matches!(
         format,

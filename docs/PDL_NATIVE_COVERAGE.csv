@@ -14,7 +14,7 @@ stage,join,native partial,native covers path-backed main inputs joined to native
 stage,union,native partial,native covers compatible-schema binding inputs by name or position with optional distinct; incompatible schemas language-level null padding and browser byte boundaries stay row-only
 stage,pivot_longer,row-only by design,row runtime preserves deterministic long output and mixed value behavior
 stage,complete,row-only by design,row runtime preserves key expansion/fill expression semantics
-stage,save,native partial,binary Parquet/Arrow sinks use native direct writers; CSV/JSON Lines use row-format writer
+stage,save,native partial,terminal saves use native direct writers for every format since v0.44; non-terminal save fan-out stays row-only (v0.48)
 expression,literals,native parity,string numeric boolean and null literals lower natively
 expression,column references,native parity,static column references lower natively
 expression,context references,native partial,scalar contexts lower as literals; context column positions resolve before native planning
@@ -46,11 +46,11 @@ source,JSON Lines,row-only by design,schema inference and text semantics stay on
 source,stdin,native partial,Arrow IPC file/stream stdin bytes are native; CSV JSON Lines Parquet and unknown stdin bytes stay row-only
 source,byte-backed host files,native partial,Arrow IPC file/stream host bytes are native when no real filesystem path is available; other host byte formats stay row-only
 source,named bindings,native partial,binding-backed inputs are native for supported join/union right sides; binding starts and named outputs remain row-only
-sink,path,native partial,binary formats direct; CSV/JSON Lines row-format fallback
-sink,stdout,native partial,binary formats byte-clean; CSV/JSON Lines row-format fallback
-sink,bytes,native partial,binary formats direct; CSV/JSON Lines row-format fallback
-sink,CSV,row-only by design,text formatting remains PDL-visible
-sink,JSON Lines,row-only by design,text formatting remains PDL-visible
+sink,path,native parity,every format uses the native direct writer
+sink,stdout,native parity,every format is byte-clean through the native direct writer
+sink,bytes,native parity,every format uses the native direct writer
+sink,CSV,native parity,native direct writer streams rows through the row writer's cell encoder; bytes match the row writer (v0.44)
+sink,JSON Lines,native parity,native direct writer streams rows through the row writer's record encoder; bytes match the row writer (v0.44)
 sink,Parquet,native parity,native direct writer
 sink,Arrow IPC file,native parity,native direct writer
 sink,Arrow IPC stream,native parity,native direct writer
