@@ -129,6 +129,11 @@ pub enum NativeUnsupportedReason {
     /// `to_number` / `to_string` / `to_boolean` input falls outside the v0.47
     /// coercion contract (v0.47 reserve).
     UnsupportedNumericCoercion,
+    /// Temporal scalar functions (`date`, `datetime`, `year`, `month`,
+    /// `day`, `date_floor`, `date_format`) are row-only by design in
+    /// v0.46.5; native lowering is deferred to a later native-coverage
+    /// release.
+    TemporalFunction,
     /// `union` participants have heterogeneous schemas and require
     /// null-padding alignment (v0.41 row-only reserve).
     UnionNullPadding,
@@ -189,6 +194,7 @@ impl NativeUnsupportedReason {
                 "data-dependent-replace-pattern"
             }
             NativeUnsupportedReason::UnsupportedNumericCoercion => "unsupported-numeric-coercion",
+            NativeUnsupportedReason::TemporalFunction => "temporal-function",
             NativeUnsupportedReason::UnionNullPadding => "union-null-padding",
             NativeUnsupportedReason::NonEquiJoin => "non-equi-join",
             NativeUnsupportedReason::BindingStartNotEligible => "binding-start-not-eligible",
@@ -219,6 +225,7 @@ impl NativeUnsupportedReason {
             "data-dependent-col-indirection",
             "data-dependent-replace-pattern",
             "unsupported-numeric-coercion",
+            "temporal-function",
             "union-null-padding",
             "non-equi-join",
             "binding-start-not-eligible",
@@ -860,6 +867,12 @@ fn native_expr_unsupported_reason(expr: &ExprIr) -> Option<NativeUnsupportedReas
                     [_, _] => Some(NativeUnsupportedReason::ScalarFunctionArity),
                     _ => Some(NativeUnsupportedReason::ScalarFunctionArity),
                 },
+                // Temporal scalar functions are row-only by design in
+                // v0.46.5 (see docs/PDL_NATIVE_COVERAGE.md, "temporal
+                // functions"); native lowering is deferred.
+                "date" | "datetime" | "year" | "month" | "day" | "date_floor" | "date_format" => {
+                    Some(NativeUnsupportedReason::TemporalFunction)
+                }
                 _ => Some(NativeUnsupportedReason::ScalarFunction),
             }
         }
@@ -1551,6 +1564,54 @@ load "sales.csv"
             plan.observability.fallback_reason,
             Some(NativeUnsupportedReason::WindowExpression)
         );
+    }
+
+    /// v0.46.5: temporal scalar functions stay row-only by design; the
+    /// planner must demote them with the typed `temporal-function` reason.
+    #[test]
+    fn planning_demotes_temporal_functions_with_temporal_function_reason() {
+        for expr in [
+            "date(stamp)",
+            "datetime(stamp)",
+            "year(stamp)",
+            "month(stamp)",
+            "day(stamp)",
+            r#"date_floor(stamp, "month")"#,
+            r#"date_format(stamp, "%Y-%m")"#,
+        ] {
+            let io =
+                InMemoryDriverIo::default().with_schema("memory/commits.csv", ["repo", "stamp"]);
+            let prepared = prepare_source_with_io(
+                "memory/main.pdl",
+                format!(
+                    r#"load "commits.csv"
+  | mutate out = {expr}"#
+                ),
+                &io,
+            );
+
+            let plan = plan_prepared(
+                &prepared,
+                PlanningOptions {
+                    stdout_format: Some("csv".to_string()),
+                    dry_run: true,
+                    allow_binary_stdout: true,
+                    engine: PlannedEngine::Auto,
+                },
+            )
+            .expect("execution plan");
+
+            assert_eq!(
+                plan.observability.selected_engine,
+                PlannedEngine::Row,
+                "`{expr}` must stay row-only"
+            );
+            assert_eq!(
+                plan.observability.fallback_reason,
+                Some(NativeUnsupportedReason::TemporalFunction),
+                "`{expr}`"
+            );
+        }
     }
 
     #[test]

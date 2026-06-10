@@ -57,6 +57,14 @@ execution stays on the row engine. Browser package versions and consumer
 pins stay at the published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`; no
 `0.46.x` browser packages are prepared.
 
+The v0.46.5 temporal scalar function release adds `date`, `datetime`,
+`year`, `month`, `day`, `date_floor`, and `date_format` to the row
+runtime, semantic registry, and editor services that `pdl-wasm` wraps, so
+a future browser package release will pick them up. Browser package
+publication remains independent of the Rust/CLI release line: consumer
+pins stay at the published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`, and no
+`0.46.5` browser packages are prepared.
+
 ## Package Validation
 
 Use packed mode for package-surface validation before publishing:

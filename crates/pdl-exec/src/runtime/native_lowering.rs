@@ -259,6 +259,14 @@ pub(crate) fn lower_data_call(
             };
             DataScalarFunction::Round { digits }
         }
+        // Row-only by design in v0.46.5; see the "temporal functions" row in
+        // docs/PDL_NATIVE_COVERAGE.md.
+        "date" | "datetime" | "year" | "month" | "day" | "date_floor" | "date_format" => {
+            return Err(unsupported_native_pipeline(
+                NativeUnsupportedReason::TemporalFunction,
+                "temporal scalar functions are row-only by design",
+            ));
+        }
         _ => {
             return Err(unsupported_native_pipeline(
                 NativeUnsupportedReason::ScalarFunction,

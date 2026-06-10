@@ -159,6 +159,13 @@ pub enum DataScalarFunction {
     ToBoolean,
     Abs,
     Round { digits: u32 },
+    Date,
+    Datetime,
+    Year,
+    Month,
+    Day,
+    DateFloor,
+    DateFormat,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2021,6 +2028,79 @@ fn eval_scalar_function(
                 },
             )
         }
+        DataScalarFunction::DateFloor => {
+            let [value, unit] = args else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "date_floor() expects two arguments",
+                    Span::zero(),
+                ));
+            };
+            let unit = match eval_row_expr(unit, table, row)? {
+                Value::String(unit) => {
+                    crate::temporal::parse_temporal_unit(&unit).ok_or_else(|| {
+                        Diagnostic::error(
+                            codes::E1406,
+                            format!(
+                                "date_floor() unit `{unit}` is not supported; use \"day\", \
+                                 \"week\", \"month\", or \"year\""
+                            ),
+                            Span::zero(),
+                        )
+                    })?
+                }
+                _ => {
+                    return Err(Diagnostic::error(
+                        codes::E1403,
+                        "date_floor() unit must be a string",
+                        Span::zero(),
+                    ));
+                }
+            };
+            let value = eval_row_expr(value, table, row)?;
+            Ok(parse_temporal_value(value)
+                .map(|parsed| {
+                    let floored = crate::temporal::floor_temporal(&parsed, unit);
+                    Value::String(
+                        crate::temporal::normalize_datetime(&floored)
+                            .unwrap_or_else(|| crate::temporal::normalize_date(&floored)),
+                    )
+                })
+                .unwrap_or(Value::Null))
+        }
+        DataScalarFunction::DateFormat => {
+            let [value, pattern] = args else {
+                return Err(Diagnostic::error(
+                    codes::E1402,
+                    "date_format() expects two arguments",
+                    Span::zero(),
+                ));
+            };
+            let pattern = match eval_row_expr(pattern, table, row)? {
+                Value::String(pattern) => {
+                    crate::temporal::validate_format_pattern(&pattern).map_err(|token| {
+                        Diagnostic::error(
+                            codes::E1406,
+                            format!("date_format() pattern token `{token}` is not supported"),
+                            Span::zero(),
+                        )
+                    })?;
+                    pattern
+                }
+                _ => {
+                    return Err(Diagnostic::error(
+                        codes::E1403,
+                        "date_format() pattern must be a string",
+                        Span::zero(),
+                    ));
+                }
+            };
+            let value = eval_row_expr(value, table, row)?;
+            Ok(parse_temporal_value(value)
+                .and_then(|parsed| crate::temporal::format_temporal(&parsed, &pattern))
+                .map(Value::String)
+                .unwrap_or(Value::Null))
+        }
         DataScalarFunction::IsNull
         | DataScalarFunction::NotNull
         | DataScalarFunction::Lower
@@ -2030,7 +2110,12 @@ fn eval_scalar_function(
         | DataScalarFunction::ToNumber
         | DataScalarFunction::ToBoolean
         | DataScalarFunction::Abs
-        | DataScalarFunction::Round { .. } => {
+        | DataScalarFunction::Round { .. }
+        | DataScalarFunction::Date
+        | DataScalarFunction::Datetime
+        | DataScalarFunction::Year
+        | DataScalarFunction::Month
+        | DataScalarFunction::Day => {
             let [arg] = args else {
                 return Err(Diagnostic::error(
                     codes::E1402,
@@ -2074,15 +2159,39 @@ fn eval_scalar_function(
                     _ => Err(type_error("abs() requires a number")),
                 },
                 DataScalarFunction::Round { digits } => round_value(value, digits),
+                DataScalarFunction::Date => Ok(parse_temporal_value(value)
+                    .map(|parsed| Value::String(crate::temporal::normalize_date(&parsed)))
+                    .unwrap_or(Value::Null)),
+                DataScalarFunction::Datetime => Ok(parse_temporal_value(value)
+                    .and_then(|parsed| crate::temporal::normalize_datetime(&parsed))
+                    .map(Value::String)
+                    .unwrap_or(Value::Null)),
+                DataScalarFunction::Year => Ok(parse_temporal_value(value)
+                    .map(|parsed| Value::Number(f64::from(crate::temporal::temporal_year(&parsed))))
+                    .unwrap_or(Value::Null)),
+                DataScalarFunction::Month => Ok(parse_temporal_value(value)
+                    .map(|parsed| {
+                        Value::Number(f64::from(crate::temporal::temporal_month(&parsed)))
+                    })
+                    .unwrap_or(Value::Null)),
+                DataScalarFunction::Day => Ok(parse_temporal_value(value)
+                    .map(|parsed| Value::Number(f64::from(crate::temporal::temporal_day(&parsed))))
+                    .unwrap_or(Value::Null)),
                 DataScalarFunction::Coalesce
                 | DataScalarFunction::Concat
                 | DataScalarFunction::Contains
                 | DataScalarFunction::StartsWith
                 | DataScalarFunction::Replace
-                | DataScalarFunction::IfElse => unreachable!(),
+                | DataScalarFunction::IfElse
+                | DataScalarFunction::DateFloor
+                | DataScalarFunction::DateFormat => unreachable!(),
             }
         }
     }
+}
+
+fn parse_temporal_value(value: Value) -> Option<crate::temporal::TemporalValue> {
+    value_to_optional_text(value).and_then(|text| crate::temporal::parse_temporal(&text))
 }
 
 fn value_to_optional_text(value: Value) -> Option<String> {
@@ -2160,6 +2269,18 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
             }
         }
         DataExpr::Call { function, args } => match function {
+            // Temporal scalar functions are row-only by design in v0.46.5;
+            // the native planner demotes them before lowering reaches this
+            // point (`NativeUnsupportedReason::TemporalFunction`).
+            DataScalarFunction::Date
+            | DataScalarFunction::Datetime
+            | DataScalarFunction::Year
+            | DataScalarFunction::Month
+            | DataScalarFunction::Day
+            | DataScalarFunction::DateFloor
+            | DataScalarFunction::DateFormat => {
+                return Err(unsupported_native_operation("temporal scalar function"));
+            }
             DataScalarFunction::Coalesce => {
                 let expressions = args
                     .iter()
@@ -2277,7 +2398,14 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
                     | DataScalarFunction::Contains
                     | DataScalarFunction::StartsWith
                     | DataScalarFunction::Replace
-                    | DataScalarFunction::IfElse => {
+                    | DataScalarFunction::IfElse
+                    | DataScalarFunction::Date
+                    | DataScalarFunction::Datetime
+                    | DataScalarFunction::Year
+                    | DataScalarFunction::Month
+                    | DataScalarFunction::Day
+                    | DataScalarFunction::DateFloor
+                    | DataScalarFunction::DateFormat => {
                         unreachable!()
                     }
                 }
@@ -2975,6 +3103,134 @@ mod tests {
         assert_eq!(
             String::from_utf8(bytes).expect("utf8"),
             "region,amount\nWest,30\n"
+        );
+    }
+
+    /// v0.46.5: the data facade's row path mirrors the `pdl-exec` row
+    /// runtime for temporal scalar functions: normalization, calendar
+    /// fields, flooring, formatting, and null on unparseable input.
+    #[test]
+    fn temporal_scalar_functions_row_path_mirrors_row_runtime() {
+        let source = DataSource::Bytes {
+            logical_path: Path::new("memory.csv"),
+            format: DataFormat::Csv,
+            bytes: b"stamp\n2025-02-17T14:20:59Z\n2025-02-17T14:20:59+00:00\n2024-01-15T10:22:33.123-05:00\n2024-01-15\nnot-a-date\n",
+        };
+        let call = |function, args| DataExpr::Call { function, args };
+        let stamp = || DataExpr::Column("stamp".to_string());
+        let text = |value: &str| DataExpr::Literal(DataLiteral::String(value.to_string()));
+        let plan = DataPlan::scan(source)
+            .expect("row plan")
+            .mutate(&[
+                (
+                    "date".to_string(),
+                    call(DataScalarFunction::Date, vec![stamp()]),
+                ),
+                (
+                    "datetime".to_string(),
+                    call(DataScalarFunction::Datetime, vec![stamp()]),
+                ),
+                (
+                    "y".to_string(),
+                    call(DataScalarFunction::Year, vec![stamp()]),
+                ),
+                (
+                    "m".to_string(),
+                    call(DataScalarFunction::Month, vec![stamp()]),
+                ),
+                (
+                    "d".to_string(),
+                    call(DataScalarFunction::Day, vec![stamp()]),
+                ),
+                (
+                    "floored".to_string(),
+                    call(DataScalarFunction::DateFloor, vec![stamp(), text("month")]),
+                ),
+                (
+                    "month_key".to_string(),
+                    call(DataScalarFunction::DateFormat, vec![stamp(), text("%Y-%m")]),
+                ),
+            ])
+            .expect("mutate")
+            .drop_columns(&["stamp".to_string()])
+            .expect("drop");
+        let mut bytes = Vec::new();
+        plan.write_to_sink(DataSink::Writer {
+            format: DataFormat::Csv,
+            writer: &mut bytes,
+        })
+        .expect("write");
+        assert_eq!(
+            String::from_utf8(bytes).expect("utf8"),
+            "date,datetime,y,m,d,floored,month_key\n\
+             2025-02-17,2025-02-17T14:20:59Z,2025,2,17,2025-02-01T00:00:00Z,2025-02\n\
+             2025-02-17,2025-02-17T14:20:59Z,2025,2,17,2025-02-01T00:00:00Z,2025-02\n\
+             2024-01-15,2024-01-15T10:22:33-05:00,2024,1,15,2024-01-01T00:00:00-05:00,2024-01\n\
+             2024-01-15,,2024,1,15,2024-01-01,2024-01\n\
+             ,,,,,,\n"
+        );
+    }
+
+    /// v0.46.5: invalid `date_floor` units and `date_format` patterns
+    /// report `E1406`; non-string units and patterns report `E1403`.
+    #[test]
+    fn temporal_scalar_functions_unit_and_pattern_diagnostics() {
+        let scan = || {
+            DataPlan::scan(DataSource::Bytes {
+                logical_path: Path::new("memory.csv"),
+                format: DataFormat::Csv,
+                bytes: b"stamp\n2024-01-15\n",
+            })
+            .expect("row plan")
+        };
+        let stamp = || DataExpr::Column("stamp".to_string());
+        let mutate = |function, arg| {
+            scan().mutate(&[(
+                "out".to_string(),
+                DataExpr::Call {
+                    function,
+                    args: vec![stamp(), arg],
+                },
+            )])
+        };
+
+        let week = mutate(
+            DataScalarFunction::DateFloor,
+            DataExpr::Literal(DataLiteral::String("week".to_string())),
+        );
+        assert!(week.is_ok(), "week is a supported unit since v0.46.5");
+
+        let fortnight = mutate(
+            DataScalarFunction::DateFloor,
+            DataExpr::Literal(DataLiteral::String("fortnight".to_string())),
+        );
+        assert_eq!(
+            fortnight.err().expect("fortnight unit fails").code,
+            codes::E1406
+        );
+
+        let numeric_unit = mutate(
+            DataScalarFunction::DateFloor,
+            DataExpr::Literal(DataLiteral::Number(1.0)),
+        );
+        assert_eq!(
+            numeric_unit.err().expect("numeric unit fails").code,
+            codes::E1403
+        );
+
+        let bad_token = mutate(
+            DataScalarFunction::DateFormat,
+            DataExpr::Literal(DataLiteral::String("%B".to_string())),
+        );
+        assert_eq!(bad_token.err().expect("%B fails").code, codes::E1406);
+
+        let null_pattern = mutate(
+            DataScalarFunction::DateFormat,
+            DataExpr::Literal(DataLiteral::Null),
+        );
+        assert_eq!(
+            null_pattern.err().expect("null pattern fails").code,
+            codes::E1403
         );
     }
 

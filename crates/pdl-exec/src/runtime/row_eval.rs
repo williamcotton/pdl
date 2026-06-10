@@ -441,12 +441,168 @@ pub(crate) fn eval_call(
                 span,
             )),
         },
+        "date" => eval_single_arg(
+            args,
+            table,
+            row,
+            span,
+            window_row_index,
+            runtime_context,
+            |value| {
+                Ok(parse_temporal_value(value)
+                    .map(|parsed| Value::String(pdl_data::normalize_date(&parsed)))
+                    .unwrap_or(Value::Null))
+            },
+        ),
+        "datetime" => eval_single_arg(
+            args,
+            table,
+            row,
+            span,
+            window_row_index,
+            runtime_context,
+            |value| {
+                Ok(parse_temporal_value(value)
+                    .and_then(|parsed| pdl_data::normalize_datetime(&parsed))
+                    .map(Value::String)
+                    .unwrap_or(Value::Null))
+            },
+        ),
+        "year" | "month" | "day" => eval_single_arg(
+            args,
+            table,
+            row,
+            span,
+            window_row_index,
+            runtime_context,
+            |value| {
+                Ok(parse_temporal_value(value)
+                    .map(|parsed| {
+                        Value::Number(match name {
+                            "year" => f64::from(pdl_data::temporal_year(&parsed)),
+                            "month" => f64::from(pdl_data::temporal_month(&parsed)),
+                            "day" => f64::from(pdl_data::temporal_day(&parsed)),
+                            _ => unreachable!("matched temporal field function"),
+                        })
+                    })
+                    .unwrap_or(Value::Null))
+            },
+        ),
+        "date_floor" => match args {
+            [value_expr, unit_expr] => {
+                let unit_value = eval_row_expr(
+                    unit_expr,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?;
+                let unit = temporal_floor_unit(&unit_value, span)?;
+                let value = eval_row_expr(
+                    value_expr,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?;
+                Ok(parse_temporal_value(value)
+                    .map(|parsed| {
+                        let floored = pdl_data::floor_temporal(&parsed, unit);
+                        Value::String(
+                            pdl_data::normalize_datetime(&floored)
+                                .unwrap_or_else(|| pdl_data::normalize_date(&floored)),
+                        )
+                    })
+                    .unwrap_or(Value::Null))
+            }
+            _ => Err(Diagnostic::error(
+                codes::E1402,
+                "date_floor() expects two arguments",
+                span,
+            )),
+        },
+        "date_format" => match args {
+            [value_expr, pattern_expr] => {
+                let pattern_value = eval_row_expr(
+                    pattern_expr,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?;
+                let pattern = temporal_format_pattern(&pattern_value, span)?;
+                let value = eval_row_expr(
+                    value_expr,
+                    table,
+                    row,
+                    ExprRole::Default,
+                    window_row_index,
+                    runtime_context,
+                )?;
+                Ok(parse_temporal_value(value)
+                    .and_then(|parsed| pdl_data::format_temporal(&parsed, &pattern))
+                    .map(Value::String)
+                    .unwrap_or(Value::Null))
+            }
+            _ => Err(Diagnostic::error(
+                codes::E1402,
+                "date_format() expects two arguments",
+                span,
+            )),
+        },
         _ => Err(Diagnostic::error(
             codes::E1401,
             format!("unknown function `{name}`"),
             span,
         )),
     }
+}
+
+fn parse_temporal_value(value: Value) -> Option<pdl_data::TemporalValue> {
+    value_to_optional_text(value).and_then(|text| pdl_data::parse_temporal(&text))
+}
+
+pub(crate) fn temporal_floor_unit(
+    unit: &Value,
+    span: Span,
+) -> Result<pdl_data::TemporalUnit, Diagnostic> {
+    let Value::String(unit) = unit else {
+        return Err(Diagnostic::error(
+            codes::E1403,
+            "date_floor() unit must be a string",
+            span,
+        ));
+    };
+    pdl_data::parse_temporal_unit(unit).ok_or_else(|| {
+        Diagnostic::error(
+            codes::E1406,
+            format!(
+                "date_floor() unit `{unit}` is not supported; use \"day\", \"week\", \"month\", or \"year\""
+            ),
+            span,
+        )
+    })
+}
+
+pub(crate) fn temporal_format_pattern(pattern: &Value, span: Span) -> Result<String, Diagnostic> {
+    let Value::String(pattern) = pattern else {
+        return Err(Diagnostic::error(
+            codes::E1403,
+            "date_format() pattern must be a string",
+            span,
+        ));
+    };
+    pdl_data::validate_format_pattern(pattern).map_err(|token| {
+        Diagnostic::error(
+            codes::E1406,
+            format!("date_format() pattern token `{token}` is not supported"),
+            span,
+        )
+    })?;
+    Ok(pattern.clone())
 }
 
 pub(crate) fn round_digits(expr: &ExprIr, span: Span) -> Result<i32, Diagnostic> {

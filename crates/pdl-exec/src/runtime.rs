@@ -4356,4 +4356,102 @@ load "left.csv"
             .any(|diagnostic| diagnostic.code == "E1208"));
         assert!(result.stdout.is_none());
     }
+
+    /// v0.46.5 temporal scalar functions: parsing, normalization, calendar
+    /// fields, flooring, and formatting on the row runtime. `Z` and
+    /// `+00:00` inputs must produce identical calendar fields and month
+    /// keys, fractional seconds must parse, and unparseable text must
+    /// return null. The automatic engine must demote to rows because the
+    /// temporal subset has no native lowering in v0.46.5.
+    #[test]
+    fn temporal_scalar_functions_row_runtime_end_to_end() {
+        let io = InMemoryDriverIo::default().with_stdin_bytes(
+            "stamp\n\
+             2025-02-17T14:20:59Z\n\
+             2025-02-17T14:20:59+00:00\n\
+             2024-01-15T10:22:33.123456-05:00\n\
+             2024-01-15\n\
+             not-a-date\n",
+        );
+        let prepared = prepare_source_for_run_with_io(
+            "memory/main.pdl",
+            r#"load stdin format "csv"
+  | mutate
+      day_key = date(stamp),
+      normalized = datetime(stamp),
+      y = year(stamp),
+      m = month(stamp),
+      d = day(stamp),
+      month_start = date_floor(stamp, "month"),
+      month_key = date_format(stamp, "%Y-%m"),
+      week_key = date_format(stamp, "%G-W%V")
+  | drop stamp"#,
+            None,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.backend, DataBackend::PortableRows);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "day_key,normalized,y,m,d,month_start,month_key,week_key\n\
+             2025-02-17,2025-02-17T14:20:59Z,2025,2,17,2025-02-01T00:00:00Z,2025-02,2025-W08\n\
+             2025-02-17,2025-02-17T14:20:59Z,2025,2,17,2025-02-01T00:00:00Z,2025-02,2025-W08\n\
+             2024-01-15,2024-01-15T10:22:33-05:00,2024,1,15,2024-01-01T00:00:00-05:00,2024-01,2024-W03\n\
+             2024-01-15,,2024,1,15,2024-01-01,2024-01,2024-W03\n\
+             ,,,,,,,\n"
+        );
+    }
+
+    /// v0.46.5 temporal diagnostics: unsupported literal units and pattern
+    /// tokens report `E1406`; non-string units and patterns report `E1403`.
+    #[test]
+    fn temporal_scalar_functions_report_unit_and_pattern_diagnostics() {
+        for (expr, code) in [
+            (r#"date_floor(stamp, "fortnight")"#, "E1406"),
+            (r#"date_floor(stamp, 7)"#, "E1403"),
+            (r#"date_format(stamp, "%B")"#, "E1406"),
+            (r#"date_format(stamp, null)"#, "E1403"),
+        ] {
+            let io = InMemoryDriverIo::default().with_stdin_bytes("stamp\n2024-01-15\n");
+            let prepared = prepare_source_for_run_with_io(
+                "memory/main.pdl",
+                format!(
+                    r#"load stdin format "csv"
+  | mutate out = {expr}"#
+                ),
+                None,
+                &io,
+            );
+
+            let result = run_prepared_with_io(
+                &prepared,
+                RunOptions {
+                    stdout_format: Some("csv".to_string()),
+                    dry_run: false,
+                    allow_binary_stdout: true,
+                },
+                &io,
+            );
+
+            assert!(
+                result
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code),
+                "`{expr}` must report {code}: {:?}",
+                result.diagnostics
+            );
+        }
+    }
 }

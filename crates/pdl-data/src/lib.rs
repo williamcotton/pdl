@@ -8,6 +8,7 @@ pub mod jsonl;
 #[cfg(feature = "parquet")]
 pub mod parquet;
 pub mod schema;
+pub mod temporal;
 pub mod value;
 
 pub use csv::{
@@ -25,4 +26,9 @@ pub use format::{
 };
 pub use frame::{compare_values, NullsOrder, Row, SortDirection, SortSpec, Table};
 pub use schema::{ColumnSchema, LogicalType, TableSchema};
+pub use temporal::{
+    floor_temporal, format_temporal, normalize_date, normalize_datetime, parse_temporal,
+    parse_temporal_unit, temporal_day, temporal_month, temporal_year, validate_format_pattern,
+    TemporalUnit, TemporalValue,
+};
 pub use value::Value;

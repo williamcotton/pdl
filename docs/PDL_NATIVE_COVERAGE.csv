@@ -26,6 +26,7 @@ expression,null checks,native parity,is_null and not_null lower natively
 expression,string functions,native partial,concat lower upper trim contains starts_with and literal-pattern replace lower natively; dynamic replace patterns are row-only
 expression,numeric functions,native partial,abs and round lower natively; uncertain coercions are row-only
 expression,cast-style functions,native partial,to_number to_string and to_boolean lower natively with row-identical null parse and formatting behavior for the promoted subset
+expression,temporal functions,row-only by design,date / datetime / year / month / day / date_floor / date_format evaluate on the row runtime (v0.46.5); the planner reports temporal-function; native lowering is deferred to a later native-coverage release
 expression,conditional functions,native partial,if_else lowers natively for supported native condition and branch expressions; typed native branch output must remain compatible
 expression,aggregate arguments,native partial,supported scalar expressions lower for count/sum/mean/min/max/count_distinct
 expression,window ranking functions,native partial,row_number rank and dense_rank lower natively for row-preserving mutate windows; ranking requires order_by and supports one key or one compatible multi-key order group

@@ -1,0 +1,8 @@
+load "order_events.csv"
+  | mutate
+      order_month = date_format(ordered_at, "%Y-%m"),
+      order_year = year(ordered_at),
+      order_day = date(ordered_at)
+  | group_by region, order_month
+  | agg orders = count(), revenue = sum(amount)
+  | sort order_month, region

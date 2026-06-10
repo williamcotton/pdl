@@ -1,6 +1,6 @@
 # PDL Native Coverage Matrix
 
-Status: v0.46.0 source of truth
+Status: v0.46.5 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
 This matrix records what the native execution strategy may claim in v0.40. The
@@ -54,6 +54,7 @@ boundary changes status, update the CSV and the tests in the same change.
 | string functions | native partial | `concat`, `lower`, `upper`, `trim`, `contains`, `starts_with`, and literal-pattern `replace` lower natively; dynamic replace patterns remain row-only. |
 | numeric functions | native partial | `abs` and `round` lower natively; uncertain coercions are row-only. |
 | cast-style functions | native partial | `to_number`, `to_string`, and `to_boolean` lower natively with row-identical null, parse, and formatting behavior for the promoted subset. |
+| temporal functions | row-only by design | `date`, `datetime`, `year`, `month`, `day`, `date_floor`, and `date_format` evaluate on the row runtime (v0.46.5). The planner reports the `temporal-function` reason; native lowering is deferred to a later native-coverage release. |
 | conditional functions | native partial | `if_else` lowers natively for supported native condition and branch expressions; typed native branch output must remain compatible. |
 | aggregate arguments | native partial | Supported scalar expressions lower for `count`, `sum`, `mean`, `min`, `max`, and `count_distinct`. |
 | window ranking functions | native partial | `row_number`, `rank`, and `dense_rank` lower natively for row-preserving mutate windows; ranking requires `order_by` and supports one key or one compatible multi-key order group. |

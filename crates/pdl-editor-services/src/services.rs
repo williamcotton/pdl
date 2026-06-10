@@ -1138,6 +1138,25 @@ mod tests {
         assert!(items.iter().any(|item| item.label == "filter"));
     }
 
+    /// v0.46.5: the temporal scalar functions surface through the shared
+    /// registry, so expression completion offers them alongside the
+    /// existing scalar functions.
+    #[test]
+    fn temporal_function_completion_in_mutate_expressions() {
+        let source = "load \"orders.csv\"\n  | mutate month_key = da";
+
+        let items = completions(source, None, position_for_byte_offset(source, source.len()));
+
+        for name in ["date", "datetime", "day", "date_floor", "date_format"] {
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.label == name && item.kind == CompletionKind::Function),
+                "missing temporal function completion `{name}`: {items:?}"
+            );
+        }
+    }
+
     #[test]
     fn provides_binding_completion_at_join_source() {
         let source = r#"let customers =

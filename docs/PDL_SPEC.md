@@ -1,13 +1,26 @@
 # PDL Detailed Specification
 
-Status: Draft 0.46.0
+Status: Draft 0.46.5
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.46.0`, tracked in
-`docs/V0_46_PLAN.md`. Version 0.46.0 promotes the remaining row-only
+The current repository implementation line is `0.46.5`, tracked in
+`docs/V0_46_5_PLAN.md`. Version 0.46.5 adds the first deterministic
+temporal scalar functions: `date`, `datetime`, `year`, `month`, `day`,
+`date_floor`, and `date_format`. The functions parse `YYYY-MM-DD` dates
+and RFC3339 datetimes — with `Z` as a first-class UTC designator and
+fractional seconds accepted — at the function boundary and return existing
+PDL value classes: normalized strings, numeric calendar fields, and null
+on unparseable input. The release adds no primitive temporal value
+classes, no wall-clock or locale-dependent functions, and no
+timezone-database names. Temporal scalar functions evaluate on the row
+runtime; native lowering is deferred, and the planner demotes them with
+the typed `temporal-function` reason.
+
+Version 0.46.0, tracked in
+`docs/V0_46_PLAN.md`, promotes the remaining row-only
 sources to native execution. Stdin CSV and Parquet bytes, and CSV and
 Parquet contents supplied as in-memory host files with no real filesystem
 path, scan natively through byte-backed adapters in `pdl-data`: CSV bytes
@@ -2252,21 +2265,89 @@ expressions:
   condition is true, `when_false` when it is false, and null when the condition
   is null.
 
+Since version 0.46.5, the language also supports these temporal scalar
+functions in row expressions:
+
+- `date(value)`: parses a date or datetime-like value and returns a
+  normalized `YYYY-MM-DD` string. Datetime input uses the calendar date as
+  written in its fixed offset. Null or unparseable input returns null.
+- `datetime(value)`: parses an RFC3339 datetime-like value and returns a
+  normalized RFC3339 string with whole seconds. UTC renders as `Z`; other
+  offsets render as `+HH:MM`/`-HH:MM`. Date-only input has no time or
+  offset and returns null. Null or unparseable input returns null.
+- `year(value)`: parses a date or datetime-like value and returns the
+  four-digit year as a number. Null or unparseable input returns null.
+- `month(value)`: parses a date or datetime-like value and returns the
+  month number `1` through `12`. Null or unparseable input returns null.
+- `day(value)`: parses a date or datetime-like value and returns the day
+  of month `1` through `31`. Null or unparseable input returns null.
+- `date_floor(value, unit)`: floors a parsed value to the start of
+  `"day"`, `"week"`, `"month"`, or `"year"`. Date input returns a
+  normalized date. Datetime input returns a normalized datetime at the
+  start of the requested unit in its own offset's local calendar,
+  preserving the parsed fixed offset. The `"week"` unit floors to the ISO
+  Monday of the value's week, consistent with the `%G`/`%V`/`%u` format
+  tokens; near calendar-year boundaries the floored date can fall in the
+  previous calendar year. A non-string unit MUST produce `E1403`; an
+  unsupported unit MUST produce `E1406`. Null or unparseable input
+  returns null.
+- `date_format(value, pattern)`: formats a parsed value with a
+  deterministic strftime-style pattern subset. Version 0.46.5 supports
+  exactly `%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%G` (four-digit ISO
+  week-year), `%V` (two-digit ISO week number `01` through `53`), `%u`
+  (ISO weekday number `1` for Monday through `7` for Sunday), `%j`
+  (three-digit day of year `001` through `366`), `%z`, `%:z`, and `%%`.
+  A non-string pattern MUST produce `E1403`; an unsupported pattern token
+  MUST produce `E1406`. ISO week tokens follow the first-Thursday rule,
+  so dates near the calendar year boundary can belong to the previous or
+  next ISO week-year (`%G` can differ from `%Y`). Calendar tokens derive
+  from the date as written in the value's fixed offset. Date-only input
+  renders time tokens as `00` and returns null for the offset tokens
+  `%z` and `%:z` because no offset was written. Fractional seconds are
+  not representable in the token subset. Null or unparseable input
+  returns null.
+
+Temporal parsing accepts these input forms after trimming whitespace:
+
+- Dates: `YYYY-MM-DD`.
+- Datetimes with a `T` separator and a `Z` or fixed-offset designator:
+  `YYYY-MM-DDTHH:MM:SSZ`, `YYYY-MM-DDTHH:MM:SS+00:00`,
+  `YYYY-MM-DDTHH:MM:SS-05:00`.
+- Datetimes with fractional seconds in the same offset forms.
+
+`Z` is a first-class UTC designator and parses to the same calendar
+fields and normalized output as `+00:00`. Implementations MAY also accept
+a space separator between the date and time. Temporal parsing is
+locale-neutral: month and day names, local time-zone abbreviations,
+ambiguous short dates such as `02/03/2025`, and timezone-database names
+such as `America/Chicago` are not accepted. Temporal parse failures are
+data-level failures and return null, like `to_number(value)` on
+unparseable text; they do not produce diagnostics.
+
+Temporal functions return existing PDL value classes: normalized dates and
+datetimes are strings, and calendar fields are numbers. Version 0.46.5
+defines no primitive date or datetime value classes. Lexicographic sort
+over `date(value)` and `date_format(value, "%Y-%m")` output remains
+chronological because the strings are fixed-width and
+most-significant-field first.
+
 Recommended future scalar functions:
 
 - `ends_with(value, suffix)`
-- `date(value)`
-- `datetime(value)`
-- `date_floor(value, unit)`
-- `year(value)`
-- `month(value)`
-- `day(value)`
+- `weekday(value)`
+- `hour(value)`
+- `date_add(value, n, unit)`
+- `date_diff(left, right, unit)`
+- a strict temporal parsing surface such as `parse_datetime_strict(value)`
+  for evidence-quality validation
 
 Unknown functions MUST produce `E1401`.
 
 Invalid scalar function arity MUST produce `E1402`.
 
-Function calls MUST be pure.
+Function calls MUST be pure. Temporal functions perform no wall-clock
+reads, local time-zone lookup, locale access, filesystem metadata reads,
+or environment-variable access.
 
 ### 12.4 Aggregate Functions
 
@@ -2875,6 +2956,13 @@ release retired the v0.43 `stdin-bytes-backed-scan` and
 `host-bytes-backed-scan` reserve reasons; the planner no longer produces
 them, and the variants remain in the vocabulary until the v0.49 cleanup.
 
+Since version 0.46.5, the temporal scalar functions `date`, `datetime`,
+`year`, `month`, `day`, `date_floor`, and `date_format` are row-only by
+design: native lowering is deferred to a later native-coverage release.
+In automatic mode pipelines using them demote to the row engine and the
+planner reports the typed `temporal-function` reason; forced native mode
+reports `E1211`.
+
 Unsupported aggregate functions,
 binding starts, named outputs, multi-output execution, non-equi joins,
 incompatible-schema union extensions, JSON Lines
@@ -2892,8 +2980,10 @@ free-form fallback categories with coverage-boundary variants:
 `scalar-function-arity`, `aggregate-function`, `aggregate-arity`,
 `window-expression`, `data-dependent-col-indirection`,
 `data-dependent-replace-pattern`, `unsupported-numeric-coercion` (v0.47
-reserve), `union-null-padding` (v0.41 reserve), `non-equi-join` (v0.41
-reserve), `binding-start-not-eligible`, `named-output-mixed-engines`,
+reserve), `temporal-function` (since v0.46.5; temporal scalar functions
+are row-only by design), `union-null-padding` (v0.41 reserve),
+`non-equi-join` (v0.41 reserve),
+`binding-start-not-eligible`, `named-output-mixed-engines`,
 `non-terminal-save-fanout`, `stdin-bytes-backed-scan` (retired in v0.46;
 no longer produced), `host-bytes-backed-scan` (retired in v0.46; no
 longer produced), `native-sink-writer`, `row-only-stage`,
@@ -3106,7 +3196,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.46.0` LSP implementation provides diagnostics,
+The current `0.46.5` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3524,6 +3614,12 @@ behavior (`pdl-wasm` host-byte execution stays on the row engine), so
 browser package versions and consumer pins stay at the published
 `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`.
 
+Version 0.46.5 adds the temporal scalar functions to the row runtime,
+semantic registry, and editor services that `pdl-wasm` wraps, but browser
+package publication remains independent of the Rust/CLI release line:
+consumer pins stay at the published `pdl-wasm@0.43.5` /
+`pdl-editor@0.43.6` until a browser package release is cut.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3596,7 +3692,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.46.0"
+version = "0.46.5"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -5202,7 +5298,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.46.0.
+PDL source does not require an explicit version declaration in draft 0.46.5.
 
 The implementation SHOULD report supported language version.
 

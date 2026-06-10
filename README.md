@@ -19,11 +19,11 @@ Runnable examples live in [`examples/`](examples/).
 Live site: [`https://williamcotton.github.io/pdl/`](https://williamcotton.github.io/pdl/)
 Full demos: [`https://williamcotton.github.io/pdl/demos`](https://williamcotton.github.io/pdl/demos)
 
-## A tour in seven pipelines
+## A tour in eight pipelines
 
 Each example below is a runnable file under [`examples/`](examples/). The tour
-starts with one table and one aggregation, then adds cleanup, joins, unions,
-window analytics, and typed stream handoff.
+starts with one table and one aggregation, then adds cleanup, temporal
+bucketing, joins, unions, window analytics, and typed stream handoff.
 
 ## 1. Top regions: filter, aggregate, sort
 
@@ -64,7 +64,30 @@ load "orders_raw.csv"
   | sort order_id
 ```
 
-## 3. Segment revenue: join a lookup table
+## 3. Monthly order totals: temporal bucketing
+
+Temporal scalar functions parse ISO dates and RFC3339 timestamps (`Z` and
+fixed offsets) deterministically. `date_format` builds stable bucket keys —
+monthly `%Y-%m`, ISO-weekly `%G-W%V`, hourly `%H` — `date`/`year`/`month`/`day`
+extract calendar fields, and `date_floor` snaps a value to the start of a day,
+month, or year. Unparseable values become null.
+
+```pdl
+load "order_events.csv"
+  | mutate
+      order_month = date_format(ordered_at, "%Y-%m"),
+      order_year = year(ordered_at),
+      order_day = date(ordered_at)
+  | group_by region, order_month
+  | agg orders = count(), revenue = sum(amount)
+  | sort order_month, region
+```
+
+```bash
+pdl run examples/monthly_order_totals.pdl --stdout-format csv
+```
+
+## 4. Segment revenue: join a lookup table
 
 Named `let` bindings keep lookup tables explicit. `join customers on
 customer_id kind left` adds customer segments before the revenue summary.
@@ -82,7 +105,7 @@ load "sales.csv"
   | sort revenue desc
 ```
 
-## 4. Daily orders: union files by name
+## 5. Daily orders: union files by name
 
 `union ... by_name true distinct true` combines same-shaped daily extracts while
 deduplicating rows and preserving deterministic output order.
@@ -96,7 +119,7 @@ load "daily_orders_2026_02_01.csv"
   | sort order_id
 ```
 
-## 5. Customer windows: row-preserving analytics
+## 6. Customer windows: row-preserving analytics
 
 Window expressions add ranks, row numbers, and totals without collapsing the
 table. Use explicit `partition_by` and `order_by` clauses when the analytic
@@ -137,7 +160,7 @@ load "sales.csv"
         )
 ```
 
-## 6. Reshape: pivot_longer and complete
+## 7. Reshape: pivot_longer and complete
 
 `pivot_longer` reshapes wide value columns into name/value rows, and
 `complete` inserts missing key combinations with explicit fills. See
@@ -154,7 +177,7 @@ load "daily_visits.csv"
   | complete region, day fill visits = 0
 ```
 
-## 7. Arrow streams: hand off typed tables
+## 8. Arrow streams: hand off typed tables
 
 PDL can read and write Arrow IPC streams on stdin/stdout. That makes it useful
 as a preparation step before a renderer or another tabular tool.
