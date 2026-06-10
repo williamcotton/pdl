@@ -17,13 +17,14 @@ csv = { workspace = true }
 indexmap = { workspace = true }
 parquet = { workspace = true, optional = true, features = ["arrow"] }
 polars = { workspace = true, optional = true }
+polars-buffer = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [features]
 default = ["native-formats"]
-polars-engine = ["dep:polars"]
+polars-engine = ["dep:polars", "dep:polars-buffer"]
 native-formats = ["polars-engine", "arrow-ipc", "parquet"]
 arrow-ipc = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:bytes"]
 parquet = ["dep:parquet", "arrow-ipc"]

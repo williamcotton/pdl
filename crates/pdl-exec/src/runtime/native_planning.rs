@@ -243,31 +243,21 @@ pub(crate) fn check_native_load_eligibility(
             stage_span,
         ));
     };
-    let (format, native_supported) = match &input.source {
-        SourceDescriptor::Path { .. } => (
-            resolve_input_format(input, explicit_format, None, None, stage_span)?,
-            true,
-        ),
-        SourceDescriptor::Stdin => {
-            let format = resolve_input_format(
-                input,
-                explicit_format,
-                prepared.stdin_format.as_deref(),
-                prepared.stdin_bytes.as_deref(),
-                stage_span,
-            )?;
-            (
-                format,
-                matches!(format, DataFormat::ArrowFile | DataFormat::ArrowStream),
-            )
+    let format = match &input.source {
+        SourceDescriptor::Path { .. } => {
+            resolve_input_format(input, explicit_format, None, None, stage_span)?
         }
+        // Since v0.46 the byte-backed scan adapters make stdin CSV and
+        // Parquet native alongside Arrow IPC; only JSON Lines stays
+        // row-only by design.
+        SourceDescriptor::Stdin => resolve_input_format(
+            input,
+            explicit_format,
+            prepared.stdin_format.as_deref(),
+            prepared.stdin_bytes.as_deref(),
+            stage_span,
+        )?,
     };
-    if !native_supported {
-        return Err(unsupported_native_pipeline(
-            NativeUnsupportedReason::StdinBytesBackedScan,
-            "native execution requires a path-backed input or Arrow IPC bytes",
-        ));
-    }
     if !matches!(
         format,
         DataFormat::Csv | DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::ArrowStream
@@ -658,10 +648,16 @@ pub(crate) fn native_load_plan(
                     DataBackend::NativePolars,
                 );
             }
-            if !matches!(format, DataFormat::ArrowFile | DataFormat::ArrowStream) {
+            if !matches!(
+                format,
+                DataFormat::Csv
+                    | DataFormat::Parquet
+                    | DataFormat::ArrowFile
+                    | DataFormat::ArrowStream
+            ) {
                 return Err(unsupported_native_pipeline(
-                    NativeUnsupportedReason::HostBytesBackedScan,
-                    "native execution requires a real filesystem path",
+                    NativeUnsupportedReason::InputFormat,
+                    "input format is not supported by native execution",
                 ));
             }
             let bytes = io.read_path_bytes(resolved_path)?;
@@ -689,9 +685,15 @@ pub(crate) fn native_load_plan(
                 Some(bytes),
                 stage_span,
             )?;
-            if !matches!(format, DataFormat::ArrowFile | DataFormat::ArrowStream) {
+            if !matches!(
+                format,
+                DataFormat::Csv
+                    | DataFormat::Parquet
+                    | DataFormat::ArrowFile
+                    | DataFormat::ArrowStream
+            ) {
                 return Err(unsupported_native_pipeline(
-                    NativeUnsupportedReason::StdinBytesBackedScan,
+                    NativeUnsupportedReason::InputFormat,
                     "input format is not supported by native execution",
                 ));
             }

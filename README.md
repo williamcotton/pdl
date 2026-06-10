@@ -211,10 +211,10 @@ target/debug/pdl run examples/reactive_trip_dashboard.pdl
 ## File formats and output
 
 PDL supports CSV, JSON Lines, Parquet, Arrow IPC file, and Arrow IPC stream
-loading/saving. Native execution covers path-backed CSV, Parquet, Arrow IPC
-file, and Arrow IPC stream inputs, Arrow IPC stdin/host-byte inputs, plus binary
-Parquet/Arrow sinks. Stdout can emit CSV, JSON Lines, Parquet, Arrow IPC file,
-or Arrow IPC stream when requested.
+loading/saving. Native execution covers path-backed, stdin, and host-byte
+CSV, Parquet, Arrow IPC file, and Arrow IPC stream inputs, plus every sink
+format; JSON Lines inputs stay on the row engine by design. Stdout can emit
+CSV, JSON Lines, Parquet, Arrow IPC file, or Arrow IPC stream when requested.
 
 ```bash
 pdl run examples/stdout_jsonl.pdl --stdout-format jsonl
@@ -239,10 +239,11 @@ pdl plan examples/top_regions.pdl --stdout-format csv
 
 `pdl plan` reports the selected engine and any fallback reasons stage by stage,
 so the cost of running natively (or not) is visible before you execute. Native
-coverage includes path-backed CSV/Parquet/Arrow IPC loads, single and
-composite-key equi-joins, grouped aggregates, window functions (`row_number`,
-`rank`, `lag`/`lead`, aggregate windows), `pivot_longer` and `complete`
-reshapes, and binary Parquet/Arrow output without a text round-trip.
+coverage includes path-backed, stdin, and host-byte CSV/Parquet/Arrow IPC
+loads, single and composite-key equi-joins, grouped aggregates, window
+functions (`row_number`, `rank`, `lag`/`lead`, aggregate windows),
+`pivot_longer` and `complete` reshapes, and binary Parquet/Arrow output
+without a text round-trip.
 
 ## Editor and browser support
 

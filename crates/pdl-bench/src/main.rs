@@ -249,6 +249,9 @@ struct Workload {
     input_format: &'static str,
     output_format: &'static str,
     required_path: &'static str,
+    /// When set, this file is fed to the pdl process on stdin so the
+    /// workload exercises the byte-backed stdin scan path (v0.46).
+    stdin_path: Option<&'static str>,
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -797,6 +800,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_segment_summary_parquet",
@@ -805,6 +809,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "parquet",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.parquet",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_segment_summary_arrow_stream",
@@ -813,6 +818,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "arrow-stream",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.arrow",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_segment_summary",
@@ -821,6 +827,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "arrow-stream",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_mutate_csv",
@@ -829,6 +836,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_mutate_parquet",
@@ -837,6 +845,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "parquet",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.parquet",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_mutate_arrow_stream",
@@ -845,6 +854,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "arrow-stream",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.arrow",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_mutate_csv",
@@ -853,6 +863,16 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "arrow-stream",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
+        },
+        Workload {
+            name: "million_row_mutate_csv_stdin",
+            program: "bench/workloads/large/million_row_mutate_csv_stdin.pdl",
+            dataset: "million-row",
+            input_format: "csv",
+            output_format: "csv",
+            required_path: "bench/data/generated/million-row.csv",
+            stdin_path: Some("bench/data/generated/million-row.csv"),
         },
         Workload {
             name: "million_row_top_scores",
@@ -861,6 +881,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_projection_smoke",
@@ -869,6 +890,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_distinct_segments",
@@ -877,6 +899,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_join_dimension",
@@ -885,6 +908,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/segment-dimension.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_composite_join_rollup",
@@ -893,6 +917,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_composite_join_lookup",
@@ -901,6 +926,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_union_partitions",
@@ -909,6 +935,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row-part-a.csv",
+            stdin_path: None,
         },
         Workload {
             name: "windowed_sales_rank",
@@ -917,6 +944,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_window_running",
@@ -925,6 +953,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_window_offsets_values",
@@ -933,6 +962,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "pdl_to_algraf_arrow_handoff",
@@ -941,6 +971,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "arrow-stream",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         // v0.44: writer-dominated workload measuring the native CSV and
         // NDJSON direct writers against the row-format writers.
@@ -951,6 +982,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         Workload {
             name: "million_row_text_emission",
@@ -959,6 +991,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "jsonl",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         // v0.45: reshape-dominated workload measuring the native
         // `pivot_longer` lowering (unpivot plus order-restoring sort)
@@ -970,6 +1003,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
         // v0.45: join-dominated workload measuring the native `complete`
         // lowering (key-domain cross join plus fill projection) against
@@ -981,6 +1015,7 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "csv",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
         },
     ]
 }
@@ -1112,12 +1147,17 @@ fn run_workload(
     } else {
         context.engine.as_str()
     };
+    let stdin_redirect = workload
+        .stdin_path
+        .map(|stdin_path| format!(" < {stdin_path}"))
+        .unwrap_or_default();
     let command_text = format!(
-        "{} run {} --stdout-format {} --engine {}",
+        "{} run {} --stdout-format {} --engine {}{}",
         relative(root, &pdl_bin(context)),
         workload.program,
         workload.output_format,
-        context.engine.as_str()
+        context.engine.as_str(),
+        stdin_redirect
     );
 
     let mut record = base_record(
@@ -1254,7 +1294,7 @@ fn run_pdl_command(
     } else {
         Command::new(&bin)
     };
-    let status = command
+    command
         .current_dir(context.root)
         .arg("run")
         .arg(workload.program)
@@ -1263,9 +1303,11 @@ fn run_pdl_command(
         .arg("--engine")
         .arg(context.engine.as_str())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .status()?;
-    Ok(status)
+        .stderr(Stdio::from(stderr));
+    if let Some(stdin_path) = workload.stdin_path {
+        command.stdin(Stdio::from(File::open(context.root.join(stdin_path))?));
+    }
+    Ok(command.status()?)
 }
 
 fn time_args() -> Option<&'static [&'static str]> {
@@ -1320,7 +1362,8 @@ fn plan_facts(
     context: &RunContext<'_>,
     workload: &Workload,
 ) -> Result<PlanFacts, Box<dyn std::error::Error>> {
-    let output = Command::new(pdl_bin(context))
+    let mut command = Command::new(pdl_bin(context));
+    command
         .current_dir(context.root)
         .arg("plan")
         .arg(workload.program)
@@ -1328,8 +1371,13 @@ fn plan_facts(
         .arg(workload.output_format)
         .arg("--engine")
         .arg(context.engine.as_str())
-        .arg("--json")
-        .output()?;
+        .arg("--json");
+    if let Some(stdin_path) = workload.stdin_path {
+        command.stdin(Stdio::from(File::open(context.root.join(stdin_path))?));
+    } else {
+        command.stdin(Stdio::null());
+    }
+    let output = command.output()?;
     if !output.status.success() {
         return Ok(PlanFacts::default());
     }

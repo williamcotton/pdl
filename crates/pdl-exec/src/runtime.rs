@@ -1052,6 +1052,178 @@ mod tests {
         );
     }
 
+    /// v0.46 stdin / host-byte promotion: the same program over the same
+    /// in-memory input must produce byte-identical stdout on the row,
+    /// auto, and forced native engines, with auto selecting native.
+    fn assert_byte_backed_native_parity(io: &InMemoryDriverIo, source: &str) {
+        let prepared = prepare_source_for_run_with_io("memory/main.pdl", source, None, io);
+        let run = |engine| {
+            run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                RunOptions {
+                    stdout_format: Some("csv".to_string()),
+                    dry_run: false,
+                    allow_binary_stdout: true,
+                },
+                io,
+                BTreeMap::new(),
+                engine,
+            )
+        };
+
+        let row = run(ExecutionEngine::Row);
+        assert!(row.diagnostics.is_empty(), "{:?}", row.diagnostics);
+        let row_stdout = row.stdout.expect("row stdout");
+
+        for engine in [ExecutionEngine::Auto, ExecutionEngine::Native] {
+            let candidate = run(engine);
+            assert!(
+                candidate.diagnostics.is_empty(),
+                "{engine:?}: {:?}",
+                candidate.diagnostics
+            );
+            assert_eq!(candidate.backend, DataBackend::NativePolars, "{engine:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&row_stdout),
+                String::from_utf8_lossy(&candidate.stdout.expect("stdout")),
+                "{engine:?} stdout differs from the row engine"
+            );
+        }
+    }
+
+    #[test]
+    fn native_engine_runs_stdin_csv_with_row_parity() {
+        let io = InMemoryDriverIo::default()
+            .with_stdin_bytes("status,amount\ncompleted,10\npending,20\ncompleted,5\n");
+        assert_byte_backed_native_parity(
+            &io,
+            r#"load stdin format "csv"
+  | filter status == "completed"
+  | select amount"#,
+        );
+    }
+
+    #[test]
+    fn native_engine_runs_sniffed_stdin_csv_with_row_parity() {
+        // No explicit or CLI format: stdin resolution falls through to
+        // sniffing and the CSV fallback, which must use the same
+        // byte-backed scan as explicit CSV.
+        let io = InMemoryDriverIo::default()
+            .with_stdin_bytes("status,amount\ncompleted,10\npending,20\n");
+        assert_byte_backed_native_parity(
+            &io,
+            r#"load stdin
+  | filter status == "completed""#,
+        );
+    }
+
+    #[test]
+    fn native_engine_runs_stdin_parquet_with_row_parity() {
+        let table = Table::new(
+            vec!["status".to_string(), "amount".to_string()],
+            vec![
+                Row {
+                    values: vec![Value::String("completed".to_string()), Value::Number(10.0)],
+                },
+                Row {
+                    values: vec![Value::String("pending".to_string()), Value::Null],
+                },
+            ],
+        );
+        let bytes =
+            pdl_data::write_table_to_bytes(DataFormat::Parquet, &table).expect("encode parquet");
+        let io = InMemoryDriverIo::default().with_stdin_bytes(bytes);
+        assert_byte_backed_native_parity(
+            &io,
+            r#"load stdin format "parquet"
+  | filter status == "completed""#,
+        );
+    }
+
+    #[test]
+    fn native_engine_runs_host_byte_csv_with_row_parity() {
+        let io = InMemoryDriverIo::default().with_file_bytes(
+            "memory/orders.csv",
+            "status,amount\ncompleted,10\npending,20\n",
+        );
+        assert_byte_backed_native_parity(
+            &io,
+            r#"load "orders.csv"
+  | filter status == "completed""#,
+        );
+    }
+
+    #[test]
+    fn native_engine_runs_host_byte_parquet_with_row_parity() {
+        let table = Table::new(
+            vec!["status".to_string(), "amount".to_string()],
+            vec![Row {
+                values: vec![Value::String("completed".to_string()), Value::Number(10.0)],
+            }],
+        );
+        let bytes =
+            pdl_data::write_table_to_bytes(DataFormat::Parquet, &table).expect("encode parquet");
+        let io = InMemoryDriverIo::default().with_file_bytes("memory/orders.parquet", bytes);
+        assert_byte_backed_native_parity(
+            &io,
+            r#"load "orders.parquet"
+  | filter status == "completed""#,
+        );
+    }
+
+    #[test]
+    fn stdin_json_lines_stays_row_only_with_input_format_reason() {
+        let io = InMemoryDriverIo::default()
+            .with_stdin_bytes("{\"status\":\"completed\",\"amount\":10}\n");
+        let prepared = prepare_source_for_run_with_io(
+            "memory/main.pdl",
+            r#"load stdin format "jsonl"
+  | select status"#,
+            None,
+            &io,
+        );
+        let options = || RunOptions {
+            stdout_format: Some("csv".to_string()),
+            dry_run: false,
+            allow_binary_stdout: true,
+        };
+
+        // Automatic mode demotes to rows and still runs the pipeline.
+        let auto = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options(),
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Auto,
+        );
+        assert!(auto.diagnostics.is_empty(), "{:?}", auto.diagnostics);
+        assert_eq!(auto.backend, DataBackend::PortableRows);
+        assert_eq!(
+            String::from_utf8(auto.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "status\ncompleted\n"
+        );
+
+        // Forced native mode reports the JSON Lines by-design reason, not
+        // the retired stdin scan-adapter reserve.
+        let forced = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options(),
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Native,
+        );
+        let diagnostic = forced
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "E1211")
+            .expect("forced native E1211");
+        assert!(
+            diagnostic.message.contains("[input-format]"),
+            "unexpected reason: {}",
+            diagnostic.message
+        );
+    }
+
     #[test]
     fn native_engine_runs_supported_path_backed_pipeline() {
         let workspace = temp_workspace("native-supported");

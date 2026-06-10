@@ -1,5 +1,5 @@
 area,item,status,notes
-stage,load,native partial,path-backed CSV, Parquet, Arrow IPC file, and Arrow IPC stream are native; stdin and byte-backed host Arrow IPC file/stream inputs are native; other stdin/byte formats are row-only
+stage,load,native partial,path-backed stdin and byte-backed host CSV Parquet and Arrow IPC file/stream inputs are native (v0.46); JSON Lines inputs are row-only by design
 stage,filter,native parity,supported scalar expressions lower to native predicates
 stage,select,native parity,row-preserving projection and aliasing
 stage,drop,native parity,row-preserving projection
@@ -40,11 +40,11 @@ expression,window running frame,native parity,frame running desugars to the unbo
 expression,window bounded frames,row-only by design,frame remaining / frame trailing N / frame leading N / frame centered N execute on the row engine; native execution rejects them with the bounded-frame window-expression reason
 source,path-backed CSV,native parity,Polars lazy CSV scan is eligible
 source,path-backed Parquet,native parity,Polars lazy Parquet scan is eligible
-source,path-backed Arrow IPC file,native partial,Arrow IPC file is read into the native dataframe path then the lazy pipeline continues
-source,path-backed Arrow IPC stream,native partial,stream file is read into native dataframe then lazy pipeline continues
-source,JSON Lines,row-only by design,schema inference and text semantics stay on row runtime
-source,stdin,native partial,Arrow IPC file/stream stdin bytes are native; CSV JSON Lines Parquet and unknown stdin bytes stay row-only
-source,byte-backed host files,native partial,Arrow IPC file/stream host bytes are native when no real filesystem path is available; other host byte formats stay row-only
+source,path-backed Arrow IPC file,native parity,Polars lazy IPC scan is eligible (v0.46)
+source,path-backed Arrow IPC stream,native parity,stream file is read into native dataframe then lazy pipeline continues; output bytes match the row engine (v0.46)
+source,JSON Lines,row-only by design,schema inference and text semantics stay on row runtime; v0.46 considered and declined the promotion for path stdin and host bytes; planner reports input-format for every JSON Lines source
+source,stdin,native parity,CSV Parquet and Arrow IPC file/stream stdin bytes scan natively through byte-backed adapters (v0.46); JSON Lines and unknown stdin bytes stay row-only by design
+source,byte-backed host files,native parity,CSV Parquet and Arrow IPC file/stream host bytes scan natively through the byte-backed adapters when no real filesystem path is available (v0.46); JSON Lines host bytes stay row-only by design
 source,named bindings,native partial,binding-backed inputs are native for supported join/union right sides; binding starts and named outputs remain row-only
 sink,path,native parity,every format uses the native direct writer
 sink,stdout,native parity,every format is byte-clean through the native direct writer

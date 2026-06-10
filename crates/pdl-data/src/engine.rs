@@ -1447,19 +1447,12 @@ fn scan_native(source: DataSource<'_>) -> Result<DataPlan, Diagnostic> {
                         .map_err(native_read_error(path, format))?
                         .lazy()
                 }
-                DataFormat::ArrowFile => {
-                    let file = std::fs::File::open(path).map_err(|error| {
-                        Diagnostic::error(
-                            codes::E1802,
-                            format!("could not read data file `{}`: {error}", path.display()),
-                            Span::zero(),
-                        )
-                    })?;
-                    native::IpcReader::new(file)
-                        .finish()
-                        .map_err(native_read_error(path, format))?
-                        .lazy()
-                }
+                DataFormat::ArrowFile => native::LazyFrame::scan_ipc(
+                    native_path(path)?,
+                    Default::default(),
+                    native::UnifiedScanArgs::default(),
+                )
+                .map_err(native_read_error(path, format))?,
                 DataFormat::JsonLines => {
                     return Err(unsupported_native_format(format));
                 }
@@ -1472,6 +1465,30 @@ fn scan_native(source: DataSource<'_>) -> Result<DataPlan, Diagnostic> {
             bytes,
         } => {
             let plan = match format {
+                // The byte-backed CSV adapter (v0.46) wraps the in-memory
+                // stream in the same lazy CSV scan the path-backed source
+                // uses, so schema inference and read semantics cannot drift
+                // between path and byte inputs.
+                DataFormat::Csv if bytes.is_empty() => {
+                    // The row reader yields a zero-column table for empty
+                    // CSV input where the native reader rejects it; match
+                    // the row engine.
+                    native::DataFrame::default().lazy()
+                }
+                DataFormat::Csv => {
+                    let plan = native::LazyCsvReader::new_with_sources(byte_scan_sources(bytes))
+                        .with_has_header(true)
+                        .finish()
+                        .map_err(native_read_error(logical_path, format))?;
+                    align_native_csv_header(plan, logical_path, bytes)?
+                }
+                // Parquet bytes are already buffered to completion, so the
+                // footer-driven eager read mirrors what the row engine does
+                // with the same stream.
+                DataFormat::Parquet => native::ParquetReader::new(Cursor::new(bytes))
+                    .finish()
+                    .map_err(native_read_error(logical_path, format))?
+                    .lazy(),
                 DataFormat::ArrowStream => native::IpcStreamReader::new(Cursor::new(bytes))
                     .finish()
                     .map_err(native_read_error(logical_path, format))?
@@ -1480,8 +1497,8 @@ fn scan_native(source: DataSource<'_>) -> Result<DataPlan, Diagnostic> {
                     .finish()
                     .map_err(native_read_error(logical_path, format))?
                     .lazy(),
-                DataFormat::Csv | DataFormat::Parquet | DataFormat::JsonLines => {
-                    return Err(unsupported_native_operation("byte-backed input"));
+                DataFormat::JsonLines => {
+                    return Err(unsupported_native_format(format));
                 }
             };
             (format, plan)
@@ -2247,7 +2264,13 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
                     }
                     DataScalarFunction::Abs => arg.abs(),
                     DataScalarFunction::Round { digits } => {
-                        arg.round(*digits, native::RoundMode::HalfAwayFromZero)
+                        // The row runtime normalizes `-0` to `0`. IEEE 754
+                        // compares `-0 == 0`, so the remap catches exactly
+                        // the negative-zero results; nulls fall through.
+                        let rounded = arg.round(*digits, native::RoundMode::HalfAwayFromZero);
+                        native::when(rounded.clone().eq(native::lit(0.0)))
+                            .then(native::lit(0.0))
+                            .otherwise(rounded)
                     }
                     DataScalarFunction::Coalesce
                     | DataScalarFunction::Concat
@@ -2750,6 +2773,39 @@ fn native_literal(literal: &DataLiteral) -> native::Expr {
     }
 }
 
+/// Wraps in-memory source bytes (stdin or host-supplied file contents) as a
+/// Polars scan source so byte-backed CSV inputs run through the same lazy
+/// scan implementation as path-backed inputs.
+#[cfg(feature = "polars-engine")]
+fn byte_scan_sources(bytes: &[u8]) -> native::ScanSources {
+    native::ScanSources::Buffers(std::sync::Arc::from([polars_buffer::Buffer::from(
+        bytes.to_vec(),
+    )]))
+}
+
+/// The native CSV reader keeps doubled-quote escapes inside quoted header
+/// cells verbatim; the row reader unescapes them. Rename the scanned columns
+/// positionally to the row reader's header parse so byte-backed native CSV
+/// scans carry row-engine column names.
+#[cfg(feature = "polars-engine")]
+fn align_native_csv_header(
+    mut plan: native::LazyFrame,
+    logical_path: &Path,
+    bytes: &[u8],
+) -> Result<native::LazyFrame, Diagnostic> {
+    let row_headers = crate::csv::read_csv_schema_from_bytes(logical_path, bytes)?;
+    let native_headers: Vec<String> = plan
+        .collect_schema()
+        .map_err(native_read_error(logical_path, DataFormat::Csv))?
+        .iter_names()
+        .map(|name| name.to_string())
+        .collect();
+    if native_headers == row_headers || native_headers.len() != row_headers.len() {
+        return Ok(plan);
+    }
+    Ok(plan.rename(&native_headers, &row_headers, true))
+}
+
 #[cfg(feature = "polars-engine")]
 fn native_path(path: &Path) -> Result<native::PlRefPath, Diagnostic> {
     native::PlRefPath::try_from_path(path).map_err(|error| {
@@ -3035,6 +3091,123 @@ mod tests {
     #[cfg(feature = "polars-engine")]
     fn native_json_lines_writer_matches_row_writer_bytes() {
         assert_native_text_writer_parity(&text_writer_parity_table(), DataFormat::JsonLines);
+    }
+
+    /// v0.46 byte-backed scan parity: scanning the same in-memory bytes on
+    /// both engines must produce byte-identical CSV output. This is the
+    /// unit-level corpus behind the stdin / host-byte source promotions.
+    #[cfg(feature = "polars-engine")]
+    fn assert_byte_scan_parity(name: &str, format: DataFormat, bytes: &[u8]) {
+        let scan = |backend| {
+            DataPlan::scan_with_backend(
+                DataSource::Bytes {
+                    logical_path: Path::new(name),
+                    format,
+                    bytes,
+                },
+                backend,
+            )
+            .unwrap_or_else(|error| panic!("{name}: byte-backed scan failed: {error:?}"))
+        };
+        let csv_bytes = |plan: DataPlan| {
+            plan.write_to_sink(DataSink::Bytes {
+                format: DataFormat::Csv,
+            })
+            .expect("csv bytes sink")
+            .expect("csv bytes")
+        };
+        let row = csv_bytes(scan(DataBackend::PortableRows));
+        let native = csv_bytes(scan(DataBackend::NativePolars));
+        assert_eq!(
+            String::from_utf8_lossy(&row),
+            String::from_utf8_lossy(&native),
+            "{name}: byte-backed scan output differs between engines"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_byte_backed_csv_scan_matches_rows_for_empty_input() {
+        assert_byte_scan_parity("empty.csv", DataFormat::Csv, b"");
+    }
+
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_byte_backed_csv_scan_matches_rows_for_header_only_input() {
+        assert_byte_scan_parity(
+            "header_only.csv",
+            DataFormat::Csv,
+            b"order_id,region,amount\n",
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_byte_backed_csv_scan_matches_rows_for_tricky_cells() {
+        // Embedded delimiters, quotes, and newlines; multibyte UTF-8 in
+        // headers and cells; empty-cell nulls; boolean-shaped strings; and
+        // numeric edge values (int53 boundary, f64 subnormal, exponent
+        // notation, negative fraction).
+        let csv = "\"regi\u{f3}n, \u{e1}rea\",\"notes \"\"q\"\"\",amount,flag\n\
+                   \"West, upper\",\"said \"\"hi\"\"\nsecond line\",9007199254740991,true\n\
+                   \u{5317}\u{533a} \u{2744},,5e-324,false\n\
+                   ,plain,-1234.5,\n\
+                   plain too,\u{2744},1e3,true\n";
+        assert_byte_scan_parity("tricky.csv", DataFormat::Csv, csv.as_bytes());
+    }
+
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_byte_backed_csv_scan_matches_rows_for_large_input() {
+        // Large enough to cross internal reader buffer boundaries and the
+        // default native schema-inference window.
+        let mut csv = String::from("id,segment,value\n");
+        for id in 0..50_000 {
+            csv.push_str(&format!("{id},seg{},{}.5\n", id % 7, id));
+        }
+        assert_byte_scan_parity("large.csv", DataFormat::Csv, csv.as_bytes());
+    }
+
+    #[test]
+    #[cfg(all(feature = "polars-engine", feature = "parquet"))]
+    fn native_byte_backed_parquet_scan_matches_rows_for_empty_table() {
+        let empty = Table::new(vec!["region".to_string(), "amount".to_string()], vec![]);
+        let bytes =
+            crate::write_table_to_bytes(DataFormat::Parquet, &empty).expect("encode parquet");
+        assert_byte_scan_parity("empty.parquet", DataFormat::Parquet, &bytes);
+    }
+
+    #[test]
+    #[cfg(all(feature = "polars-engine", feature = "parquet"))]
+    fn native_byte_backed_parquet_scan_matches_rows_for_nullable_columns() {
+        let bytes = crate::write_table_to_bytes(DataFormat::Parquet, &text_writer_parity_table())
+            .expect("encode parquet");
+        assert_byte_scan_parity("nullable.parquet", DataFormat::Parquet, &bytes);
+    }
+
+    #[test]
+    #[cfg(all(feature = "polars-engine", feature = "parquet"))]
+    fn native_byte_backed_parquet_scan_matches_rows_for_multi_row_group_file() {
+        let rows = (0..512)
+            .map(|id| Row {
+                values: vec![
+                    Value::Number(f64::from(id)),
+                    Value::String(format!("seg{}", id % 5)),
+                ],
+            })
+            .collect();
+        let table = Table::new(vec!["id".to_string(), "segment".to_string()], rows);
+        let batch = crate::arrow::table_to_batch(&table).expect("arrow batch");
+        let properties = ::parquet::file::properties::WriterProperties::builder()
+            .set_max_row_group_size(64)
+            .build();
+        let mut bytes = Vec::new();
+        let mut writer =
+            ::parquet::arrow::ArrowWriter::try_new(&mut bytes, batch.schema(), Some(properties))
+                .expect("parquet writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+        assert_byte_scan_parity("multi_row_group.parquet", DataFormat::Parquet, &bytes);
     }
 
     #[cfg(feature = "polars-engine")]

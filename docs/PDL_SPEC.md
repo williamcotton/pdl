@@ -1,13 +1,32 @@
 # PDL Detailed Specification
 
-Status: Draft 0.45.0
+Status: Draft 0.46.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.45.0`, tracked in
-`docs/V0_45_PLAN.md`. Version 0.45.0 promotes the `pivot_longer` and
+The current repository implementation line is `0.46.0`, tracked in
+`docs/V0_46_PLAN.md`. Version 0.46.0 promotes the remaining row-only
+sources to native execution. Stdin CSV and Parquet bytes, and CSV and
+Parquet contents supplied as in-memory host files with no real filesystem
+path, scan natively through byte-backed adapters in `pdl-data`: CSV bytes
+run through the same lazy CSV scan as path-backed CSV (with header names
+normalized to the row reader's parse), and Parquet bytes use the buffered
+footer-driven read the row engine already performs. Path-backed Arrow IPC
+file sources move to a lazy IPC scan and both path-backed Arrow IPC rows
+flip to native parity. Stdin format resolution and the preserved
+sniffing-bytes contract are unchanged, and the CSV-fallback path uses the
+same
+byte-backed CSV scan as explicit CSV. JSON Lines sources (path, stdin, and
+host bytes) stay row-only by design; the planner reports `input-format`
+for every JSON Lines source, retiring the v0.43 `stdin-bytes-backed-scan`
+and `host-bytes-backed-scan` reserve reasons. The release adds no language
+surface, stages, functions, diagnostic codes, or formats; it widens which
+existing source reads execute on the native engine.
+
+Version 0.45.0, tracked in
+`docs/V0_45_PLAN.md`, promotes the `pivot_longer` and
 `complete` stages to native execution. Both stages are purely local
 lowerings: `pivot_longer` lowers to a native unpivot with a hidden
 row-index sort that reproduces the row runtime's interleaved output order,
@@ -2834,7 +2853,29 @@ lowering time in automatic mode (with byte-identical output) and report
 `E1211` in forced native mode. Window-bearing `complete` fill expressions
 are also row-only; the row runtime rejects them at evaluation time.
 
-Unsupported aggregate functions, non-Arrow byte-backed input, non-Arrow stdin,
+Since version 0.46.0, the native engine scans every non-JSON-Lines source
+form. Stdin CSV and Parquet bytes and host-supplied in-memory CSV and
+Parquet file contents lower to byte-backed scan adapters in `pdl-data`:
+CSV bytes run through the same lazy CSV scan as path-backed CSV, with
+column names normalized to the row reader's header parse and empty input
+normalized to the row reader's zero-column table, and Parquet bytes use a
+buffered footer-driven read. Byte-backed native scans MUST produce output
+bytes byte-identical to the row runtime: schema inference, type coercion
+on read, null parsing, and row order match the row engine exactly. Stdin
+format resolution keeps the spec order (explicit format, CLI override,
+extension, magic-byte sniffing, text sniffing, CSV fallback), the
+byte-backed adapter receives the full stream including any bytes the
+sniffer consumed, and the CSV-fallback path uses the same byte-backed CSV
+scan as explicit CSV. Path-backed Arrow IPC file sources scan lazily and
+both path-backed Arrow IPC source forms hold native parity. JSON Lines
+sources (path, stdin, and host bytes) stay row-only by design — schema
+inference and text semantics remain row-runtime behavior — and the
+planner reports `input-format` for every JSON Lines source. The 0.46.0
+release retired the v0.43 `stdin-bytes-backed-scan` and
+`host-bytes-backed-scan` reserve reasons; the planner no longer produces
+them, and the variants remain in the vocabulary until the v0.49 cleanup.
+
+Unsupported aggregate functions,
 binding starts, named outputs, multi-output execution, non-equi joins,
 incompatible-schema union extensions, JSON Lines
 input, unsupported bounded-frame windows,
@@ -2853,8 +2894,9 @@ free-form fallback categories with coverage-boundary variants:
 `data-dependent-replace-pattern`, `unsupported-numeric-coercion` (v0.47
 reserve), `union-null-padding` (v0.41 reserve), `non-equi-join` (v0.41
 reserve), `binding-start-not-eligible`, `named-output-mixed-engines`,
-`non-terminal-save-fanout`, `stdin-bytes-backed-scan`,
-`host-bytes-backed-scan`, `native-sink-writer`, `row-only-stage`,
+`non-terminal-save-fanout`, `stdin-bytes-backed-scan` (retired in v0.46;
+no longer produced), `host-bytes-backed-scan` (retired in v0.46; no
+longer produced), `native-sink-writer`, `row-only-stage`,
 `driver-facts`, and the non-execution documentation boundaries
 `wasm-target-graph` and `editor-service`. These are internal observability
 values, not diagnostic codes. `pdl plan` text output names the variant, and
@@ -3064,7 +3106,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.45.0` LSP implementation provides diagnostics,
+The current `0.46.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3476,6 +3518,12 @@ and `complete` stage promotions change no parser, editor-service, or
 WASM-visible behavior, so browser package versions and consumer pins stay
 at the published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`.
 
+Version 0.46.0 is likewise a native Rust/CLI release: the byte-backed
+source-scan promotions change no parser, editor-service, or WASM-visible
+behavior (`pdl-wasm` host-byte execution stays on the row engine), so
+browser package versions and consumer pins stay at the published
+`pdl-wasm@0.43.5` / `pdl-editor@0.43.6`.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3548,7 +3596,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.45.0"
+version = "0.46.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -3594,6 +3642,9 @@ polars = { version = "0.53", default-features = false, features = [
     "temporal",
     "timezones",
 ] }
+# Version-locked to `polars`: supplies the buffer type the byte-backed
+# native scans wrap stdin/host bytes in (v0.46).
+polars-buffer = "0.53"
 tower-lsp = "0.20"
 lsp-types = "0.94.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }
@@ -5151,7 +5202,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.45.0.
+PDL source does not require an explicit version declaration in draft 0.46.0.
 
 The implementation SHOULD report supported language version.
 

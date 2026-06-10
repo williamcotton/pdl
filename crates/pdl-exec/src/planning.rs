@@ -143,11 +143,15 @@ pub enum NativeUnsupportedReason {
     /// Non-terminal `save` requires fan-out the native planner does not yet
     /// support (v0.48 reserve refines this further).
     NonTerminalSaveFanout,
-    /// Stdin-backed format requires a byte-backed scan adapter the native
-    /// data facade does not yet support (v0.46 reserve refines this further).
+    /// Retired in v0.46: the byte-backed scan adapters promoted stdin CSV
+    /// and Parquet, so the planner no longer produces this variant. JSON
+    /// Lines stdin reports `input-format` like path-backed JSON Lines. The
+    /// variant stays in the vocabulary until the v0.49 cleanup.
     StdinBytesBackedScan,
-    /// Host-supplied bytes for a CSV / Parquet / NDJSON path require a
-    /// byte-backed scan adapter (v0.46 reserve refines this further).
+    /// Retired in v0.46: host-supplied CSV / Parquet bytes scan natively
+    /// through the same byte-backed adapters, so the planner no longer
+    /// produces this variant. The variant stays in the vocabulary until the
+    /// v0.49 cleanup.
     HostBytesBackedScan,
     /// Sink format is not wired to `NativeDirectWriter`. Since the v0.44
     /// CSV/NDJSON writer promotions every format has a native direct writer;
@@ -773,27 +777,17 @@ fn native_load_unsupported_reason(
             }
         })
         .unwrap_or(DataFormat::Csv);
-    match input.source {
-        SourceDescriptor::Path { .. } => {
-            if matches!(
-                format,
-                DataFormat::Csv
-                    | DataFormat::Parquet
-                    | DataFormat::ArrowFile
-                    | DataFormat::ArrowStream
-            ) {
-                None
-            } else {
-                Some(NativeUnsupportedReason::InputFormat)
-            }
-        }
-        SourceDescriptor::Stdin => {
-            if matches!(format, DataFormat::ArrowFile | DataFormat::ArrowStream) {
-                None
-            } else {
-                Some(NativeUnsupportedReason::StdinBytesBackedScan)
-            }
-        }
+    // Since v0.46 the byte-backed scan adapters give stdin and host-byte
+    // CSV / Parquet inputs the same native coverage as path-backed inputs,
+    // so every source kind shares one format gate. JSON Lines stays
+    // row-only by design and reports `input-format` everywhere.
+    if matches!(
+        format,
+        DataFormat::Csv | DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::ArrowStream
+    ) {
+        None
+    } else {
+        Some(NativeUnsupportedReason::InputFormat)
     }
 }
 

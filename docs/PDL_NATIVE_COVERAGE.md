@@ -1,6 +1,6 @@
 # PDL Native Coverage Matrix
 
-Status: v0.45.0 source of truth
+Status: v0.46.0 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
 This matrix records what the native execution strategy may claim in v0.40. The
@@ -22,7 +22,7 @@ boundary changes status, update the CSV and the tests in the same change.
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| `load` | native partial | Path-backed CSV, Parquet, Arrow IPC file, and Arrow IPC stream are native. Stdin and byte-backed host Arrow IPC file/stream inputs are native; other stdin/byte formats are row-only. |
+| `load` | native partial | Path-backed, stdin, and byte-backed host CSV, Parquet, Arrow IPC file, and Arrow IPC stream inputs are native (v0.46). JSON Lines inputs are row-only by design. |
 | `filter` | native parity | Supported scalar expressions lower to native predicates. |
 | `select` | native parity | Row-preserving projection and aliasing. |
 | `drop` | native parity | Row-preserving projection. |
@@ -73,11 +73,11 @@ boundary changes status, update the CSV and the tests in the same change.
 | --- | --- | --- |
 | path-backed CSV | native parity | Polars lazy CSV scan is eligible. |
 | path-backed Parquet | native parity | Polars lazy Parquet scan is eligible. |
-| path-backed Arrow IPC file | native partial | Arrow IPC file is read into the native dataframe path, then the lazy pipeline continues. |
-| path-backed Arrow IPC stream | native partial | Stream file is read into a native dataframe, then lazy pipeline continues. |
-| JSON Lines | row-only by design | Schema inference and text semantics stay on the row runtime. |
-| stdin | native partial | Arrow IPC file/stream stdin bytes are native; CSV, JSON Lines, Parquet, and unknown stdin bytes stay row-only. |
-| byte-backed host files | native partial | Arrow IPC file/stream host bytes are native when no real filesystem path is available; other host byte formats stay row-only. |
+| path-backed Arrow IPC file | native parity | Polars lazy IPC scan is eligible (v0.46). |
+| path-backed Arrow IPC stream | native parity | Stream file is read into a native dataframe, then the lazy pipeline continues; output bytes match the row engine (v0.46). |
+| JSON Lines | row-only by design | Schema inference and text semantics stay on the row runtime. v0.46 considered and declined the promotion for path, stdin, and host bytes; the planner reports `input-format` for every JSON Lines source. |
+| stdin | native parity | CSV, Parquet, and Arrow IPC file/stream stdin bytes scan natively through byte-backed adapters (v0.46); JSON Lines and unknown stdin bytes stay row-only by design. |
+| byte-backed host files | native parity | CSV, Parquet, and Arrow IPC file/stream host bytes scan natively through the byte-backed adapters when no real filesystem path is available (v0.46); JSON Lines host bytes stay row-only by design. |
 | named bindings | native partial | Binding-backed inputs are native for supported join/union right sides; binding starts and named outputs remain row-only. |
 
 ## Sink Coverage

@@ -55,7 +55,9 @@ offset, value, and distribution workloads, and a writer-dominated
 emission row-vs-native. v0.45 adds a reshape-dominated
 `million_row_pivot_longer` workload and a key-expansion-dominated
 `million_row_complete_buckets` workload that measure the native
-`pivot_longer` and `complete` lowerings row-vs-native.
+`pivot_longer` and `complete` lowerings row-vs-native. v0.46 adds a
+`million_row_mutate_csv_stdin` workload that feeds the million-row CSV
+through stdin to measure the byte-backed stdin scan path row-vs-native.
 
 ## PDL-to-Algraf Arrow Smoke
 
