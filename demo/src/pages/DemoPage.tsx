@@ -182,32 +182,39 @@ cleaned
     source: `load "sales.csv"
   | filter status == "completed"
   | mutate
-      customer_sale_number =
-        row_number() over (
-          partition_by customer_id
-          order_by amount desc
-        ),
-      customer_revenue =
-        sum(amount) over (
-          partition_by customer_id
-        ),
-      region_revenue =
+      trailing_revenue =
         sum(amount) over (
           partition_by region
-        )
-  | mutate
-      region_revenue_rank =
-        dense_rank() over (
-          order_by region_revenue desc
+          order_by amount, customer_id
+          frame trailing 1
+        ),
+      leading_revenue =
+        sum(amount) over (
+          partition_by region
+          order_by amount, customer_id
+          frame leading 1
+        ),
+      centered_revenue =
+        sum(amount) over (
+          partition_by region
+          order_by amount, customer_id
+          frame centered 1
+        ),
+      remaining_revenue =
+        sum(amount) over (
+          partition_by region
+          order_by amount, customer_id
+          frame remaining
         )
   | select
       region,
       customer_id,
       amount,
-      customer_sale_number,
-      customer_revenue,
-      region_revenue_rank
-  | sort region_revenue_rank, customer_id, amount desc
+      trailing_revenue,
+      leading_revenue,
+      centered_revenue,
+      remaining_revenue
+  | sort region, amount, customer_id
 `,
   },
   {

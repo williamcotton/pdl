@@ -1,0 +1,16 @@
+load "sales.csv"
+  | filter status == "completed"
+  | mutate
+      region_revenue =
+        sum(amount) over (
+          partition_by region
+          frame whole_partition
+        ),
+      running_revenue =
+        sum(amount) over (
+          partition_by region
+          order_by amount, customer_id
+          frame running
+        )
+  | select region, customer_id, amount, region_revenue, running_revenue
+  | sort region, amount, customer_id

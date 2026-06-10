@@ -6,7 +6,7 @@ load "../../data/generated/million-row.csv"
       segment_low_row = last_value(row) over (
         partition_by segment
         order_by score desc
-        rows between unbounded_preceding and unbounded_following
+        frame whole_partition
       ),
       score_percent_rank = percent_rank() over (partition_by segment order_by score desc),
       score_cume_dist = cume_dist() over (partition_by segment order_by score desc)

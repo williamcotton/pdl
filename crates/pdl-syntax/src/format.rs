@@ -2,9 +2,9 @@ use pdl_core::Severity;
 
 use crate::{
     decode_context_column_ref, parse, AggItem, BinaryOp, CompleteFillItem, ContextDecl,
-    ContextKind, Expr, FrameBound, JoinOn, MutateItem, NullsOrder, Pipeline, PipelineStart,
-    SinkRef, SortDirection, SortItem, SourceRef, Spanned, Stage, UnaryOp, UnionOptionKind,
-    WindowFrame, WindowSpec,
+    ContextKind, Expr, JoinOn, MutateItem, NullsOrder, Pipeline, PipelineStart, SinkRef,
+    SortDirection, SortItem, SourceRef, Spanned, Stage, UnaryOp, UnionOptionKind, WindowFrame,
+    WindowSpec,
 };
 
 pub type FormatResult = Option<String>;
@@ -604,20 +604,9 @@ fn format_window_sort_item(item: &SortItem) -> String {
 }
 
 fn format_window_frame(frame: &WindowFrame) -> String {
-    format!(
-        "rows between {} and {}",
-        format_frame_bound(&frame.start),
-        format_frame_bound(&frame.end)
-    )
-}
-
-fn format_frame_bound(bound: &FrameBound) -> String {
-    match bound {
-        FrameBound::UnboundedPreceding { .. } => "unbounded_preceding".to_string(),
-        FrameBound::Preceding { rows, .. } => format!("{rows} preceding"),
-        FrameBound::CurrentRow { .. } => "current_row".to_string(),
-        FrameBound::Following { rows, .. } => format!("{rows} following"),
-        FrameBound::UnboundedFollowing { .. } => "unbounded_following".to_string(),
+    match frame.kind.rows() {
+        Some(rows) => format!("frame {} {rows}", frame.kind.name()),
+        None => format!("frame {}", frame.kind.name()),
     }
 }
 
@@ -696,13 +685,13 @@ fn is_reserved_keyword(value: &str) -> bool {
             | "over"
             | "partition_by"
             | "order_by"
-            | "rows"
-            | "between"
-            | "unbounded_preceding"
-            | "current_row"
-            | "unbounded_following"
-            | "preceding"
-            | "following"
+            | "frame"
+            | "whole_partition"
+            | "running"
+            | "remaining"
+            | "trailing"
+            | "leading"
+            | "centered"
             | "stdin"
             | "stdout"
             | "true"
@@ -799,6 +788,53 @@ mod tests {
       customer_revenue,
       region_revenue_rank
   | sort region_revenue_rank, customer_id, amount desc"#;
+
+        assert_eq!(format_source(source).expect("formatted"), expected);
+        assert_eq!(format_source(expected).expect("formatted"), expected);
+    }
+
+    #[test]
+    fn formats_window_frame_named_forms_stably() {
+        let source = r#"load "sales.csv"
+  | mutate whole_total = sum(amount) over (partition_by region frame whole_partition), running_total = sum(amount) over (partition_by region order_by amount frame running), remaining_total = sum(amount) over (partition_by region order_by amount frame remaining), trailing_2 = sum(amount) over (partition_by region order_by amount frame trailing 2), leading_2 = sum(amount) over (partition_by region order_by amount frame leading 2), centered_1 = sum(amount) over (partition_by region order_by amount frame centered 1)"#;
+
+        let expected = r#"load "sales.csv"
+  | mutate
+      whole_total =
+        sum(amount) over (
+          partition_by region
+          frame whole_partition
+        ),
+      running_total =
+        sum(amount) over (
+          partition_by region
+          order_by amount
+          frame running
+        ),
+      remaining_total =
+        sum(amount) over (
+          partition_by region
+          order_by amount
+          frame remaining
+        ),
+      trailing_2 =
+        sum(amount) over (
+          partition_by region
+          order_by amount
+          frame trailing 2
+        ),
+      leading_2 =
+        sum(amount) over (
+          partition_by region
+          order_by amount
+          frame leading 2
+        ),
+      centered_1 =
+        sum(amount) over (
+          partition_by region
+          order_by amount
+          frame centered 1
+        )"#;
 
         assert_eq!(format_source(source).expect("formatted"), expected);
         assert_eq!(format_source(expected).expect("formatted"), expected);

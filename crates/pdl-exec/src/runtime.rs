@@ -2380,16 +2380,16 @@ load "sales.csv"
                     r#"load "{input}"{format_clause}
   | mutate
       region_count = count() over (partition_by region),
-      customer_running_count = count(amount) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row),
-      customer_running_amount = sum(amount) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row),
-      customer_running_mean = mean(amount) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row),
-      customer_running_min = min(amount) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row),
-      customer_running_max = max(amount) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row),
+      customer_running_count = count(amount) over (partition_by customer_id order_by order_date frame running),
+      customer_running_amount = sum(amount) over (partition_by customer_id order_by order_date frame running),
+      customer_running_mean = mean(amount) over (partition_by customer_id order_by order_date frame running),
+      customer_running_min = min(amount) over (partition_by customer_id order_by order_date frame running),
+      customer_running_max = max(amount) over (partition_by customer_id order_by order_date frame running),
       previous_amount = lag(amount) over (partition_by customer_id order_by order_date),
       next_amount = lead(amount, 1, null) over (partition_by customer_id order_by order_date),
       region_top_order = first_value(order_id) over (partition_by region order_by amount desc),
-      region_low_order = last_value(order_id) over (partition_by region order_by amount desc rows between unbounded_preceding and unbounded_following),
-      current_customer_order = last_value(order_id) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row),
+      region_low_order = last_value(order_id) over (partition_by region order_by amount desc frame whole_partition),
+      current_customer_order = last_value(order_id) over (partition_by customer_id order_by order_date frame running),
       region_percent_rank = percent_rank() over (partition_by region order_by amount desc),
       region_cume_dist = cume_dist() over (partition_by region order_by amount desc)
   | select order_id, region_count, customer_running_count, customer_running_amount, customer_running_mean, customer_running_min, customer_running_max, previous_amount, next_amount, region_top_order, region_low_order, current_customer_order, region_percent_rank, region_cume_dist
@@ -2489,7 +2489,7 @@ load "sales.csv"
       cume = cume_dist() over (partition_by region order_by amount desc, tie asc),
       prior_amount = lag(amount, 1, 0) over (partition_by region order_by amount desc, tie asc),
       next_note = lead(note, 1, "end") over (partition_by region order_by amount desc, tie asc),
-      running_amount = sum(amount) over (partition_by region order_by amount desc, tie asc rows between unbounded_preceding and current_row)
+      running_amount = sum(amount) over (partition_by region order_by amount desc, tie asc frame running)
   | select order_id, seq, sparse_rank, dense, pct, cume, prior_amount, next_note, running_amount"#
                 ),
                 &io,
@@ -3661,7 +3661,7 @@ output dock_priority =
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "orders.csv"
-  | mutate customer_row = row_number() over (partition_by customer_id order_by order_date), customer_running_amount = sum(amount) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row), previous_amount = lag(amount) over (partition_by customer_id order_by order_date), region_amount_rank = dense_rank() over (partition_by region order_by amount desc)
+  | mutate customer_row = row_number() over (partition_by customer_id order_by order_date), customer_running_amount = sum(amount) over (partition_by customer_id order_by order_date frame running), previous_amount = lag(amount) over (partition_by customer_id order_by order_date), region_amount_rank = dense_rank() over (partition_by region order_by amount desc)
   | select order_id, customer_id, amount, customer_row, customer_running_amount, previous_amount, region_amount_rank"#,
             &io,
         );
@@ -3684,6 +3684,37 @@ output dock_priority =
     }
 
     #[test]
+    fn executes_window_bounded_named_frames_on_row_engine() {
+        let io = InMemoryDriverIo::default().with_file_bytes(
+            "memory/orders.csv",
+            "order_id,region,seq,amount\nA1,North,1,1\nA2,North,2,2\nA3,North,3,3\nA4,North,4,4\nA5,North,5,5\n",
+        );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "orders.csv"
+  | mutate trailing_sum = sum(amount) over (partition_by region order_by seq frame trailing 2), leading_sum = sum(amount) over (partition_by region order_by seq frame leading 2), centered_sum = sum(amount) over (partition_by region order_by seq frame centered 1), remaining_sum = sum(amount) over (partition_by region order_by seq frame remaining)
+  | select order_id, amount, trailing_sum, leading_sum, centered_sum, remaining_sum"#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "order_id,amount,trailing_sum,leading_sum,centered_sum,remaining_sum\nA1,1,1,6,3,15\nA2,2,3,9,6,14\nA3,3,6,12,9,12\nA4,4,9,9,12,9\nA5,5,12,5,9,5\n"
+        );
+    }
+
+    #[test]
     fn executes_window_distribution_value_and_lead_functions() {
         let io = InMemoryDriverIo::default().with_file_bytes(
             "memory/orders.csv",
@@ -3692,7 +3723,7 @@ output dock_priority =
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "orders.csv"
-  | mutate region_count = count() over (partition_by region), region_top_order = first_value(order_id) over (partition_by region order_by amount desc), region_low_order = last_value(order_id) over (partition_by region order_by amount desc rows between unbounded_preceding and unbounded_following), next_amount = lead(amount, 1, "none") over (partition_by customer_id order_by order_date), region_percent_rank = percent_rank() over (partition_by region order_by amount desc)
+  | mutate region_count = count() over (partition_by region), region_top_order = first_value(order_id) over (partition_by region order_by amount desc), region_low_order = last_value(order_id) over (partition_by region order_by amount desc frame whole_partition), next_amount = lead(amount, 1, "none") over (partition_by customer_id order_by order_date), region_percent_rank = percent_rank() over (partition_by region order_by amount desc)
   | select order_id, region_count, region_top_order, region_low_order, next_amount, region_percent_rank"#,
             &io,
         );

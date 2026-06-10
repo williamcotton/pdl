@@ -30,11 +30,14 @@ expression,conditional functions,native partial,if_else lowers natively for supp
 expression,aggregate arguments,native partial,supported scalar expressions lower for count/sum/mean/min/max/count_distinct
 expression,window ranking functions,native partial,row_number rank and dense_rank lower natively for row-preserving mutate windows; ranking requires order_by and supports one key or one compatible multi-key order group
 expression,window whole-partition aggregates,native partial,count/sum/mean/min/max lower natively for whole-partition row-preserving mutate windows over supported native expressions with zero one or one compatible multi-key order group
-expression,window running aggregates,native partial,count/sum/mean/min/max lower natively for rows between unbounded_preceding and current_row over supported native expressions with zero one or one compatible multi-key order group
+expression,window running aggregates,native partial,count/sum/mean/min/max lower natively for frame running over supported native expressions with zero one or one compatible multi-key order group
 expression,window offset functions,native partial,lag and lead lower natively with one or one compatible multi-key order group a non-negative integer literal offset and omitted null or native-compatible non-null defaults
-expression,window value functions,native partial,first_value and last_value lower natively for whole-partition and unbounded-preceding-to-current-row frames over supported native expressions with zero one or one compatible multi-key order group
+expression,window value functions,native partial,first_value and last_value lower natively for frame whole_partition and frame running frames over supported native expressions with zero one or one compatible multi-key order group
 expression,window distribution functions,native partial,percent_rank and cume_dist lower natively with one key or one compatible multi-key order group
 expression,window multi-key ordering,native partial,multi-key window order lowers natively when a mutate stage has one compatible composite order group; mixed multi-key groups remain row-only
+expression,window whole-partition frame,native parity,frame whole_partition desugars to the whole-partition bound pair the native engine already covers
+expression,window running frame,native parity,frame running desugars to the unbounded-preceding-to-current-row bound pair the native engine already covers
+expression,window bounded frames,row-only by design,frame remaining / frame trailing N / frame leading N / frame centered N execute on the row engine; native execution rejects them with the bounded-frame window-expression reason
 source,path-backed CSV,native parity,Polars lazy CSV scan is eligible
 source,path-backed Parquet,native parity,Polars lazy Parquet scan is eligible
 source,path-backed Arrow IPC file,native partial,Arrow IPC file is read into the native dataframe path then the lazy pipeline continues

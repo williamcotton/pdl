@@ -471,7 +471,7 @@ load "daily_orders_2026_02_01.csv"
                 <Code>order_by amount desc</Code> gives each customer a stable sequence.
               </li>
               <li>
-                <Code>rows between unbounded_preceding and current_row</Code> means "from the first row in
+                <Code>frame running</Code> means "from the first row in
                 this ordered customer partition through this row."
               </li>
               <li>
@@ -500,7 +500,7 @@ load "daily_orders_2026_02_01.csv"
         sum(amount) over (
           partition_by customer_id
           order_by amount desc
-          rows between unbounded_preceding and current_row
+          frame running
         ),
       previous_sale_amount =
         lag(amount) over (

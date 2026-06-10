@@ -3,7 +3,7 @@
 // cross-module layout overview.
 
 use pdl_semantics::{FormatInfo, FunctionInfo, StageInfo};
-use pdl_syntax::{ContextKind, Pipeline, PipelineStart, Program};
+use pdl_syntax::{ContextKind, Expr, Pipeline, PipelineStart, Program, Stage};
 use std::collections::BTreeSet;
 
 use crate::scope_analysis::{BindingFact, DocumentFacts};
@@ -21,6 +21,7 @@ pub(crate) struct CompletionContext {
     pub(crate) in_agg_function_context: bool,
     pub(crate) in_scalar_function_context: bool,
     pub(crate) in_mutate_context: bool,
+    pub(crate) in_window_frame_name_context: bool,
     pub(crate) in_sort_direction_context: bool,
     pub(crate) in_column_context: bool,
     pub(crate) context_reference_kind: Option<ContextKind>,
@@ -74,6 +75,9 @@ impl CompletionContext {
             && !inside_string
             && after_keyword.is_some_and(|suffix| !suffix.contains('(') || suffix.ends_with(','));
         let in_mutate_context = stage.as_deref() == Some("mutate");
+        let in_window_frame_name_context = !inside_string
+            && preceding_word(source, word_start) == Some("frame")
+            && offset_in_window_spec(program, offset);
         let in_scalar_function_context =
             matches!(stage.as_deref(), Some("filter" | "mutate" | "complete"))
                 && !inside_string
@@ -118,6 +122,7 @@ impl CompletionContext {
             in_agg_function_context,
             in_scalar_function_context,
             in_mutate_context,
+            in_window_frame_name_context,
             in_sort_direction_context,
             in_column_context,
             context_reference_kind: if inside_string {
@@ -200,6 +205,107 @@ pub(crate) fn binding_completion(name: &str, binding: &BindingFact) -> EditorCom
         insert_text: name.to_string(),
         detail,
         kind: CompletionKind::Binding,
+    }
+}
+
+/// The six v0.43.5 named window frames with the bound pair each name lowers
+/// to, for completion details and hover text.
+pub(crate) const WINDOW_FRAME_COMPLETIONS: [(&str, &str); 6] = [
+    (
+        "whole_partition",
+        "Every row in the partition (unbounded_preceding..unbounded_following)",
+    ),
+    (
+        "running",
+        "Start of the partition through the current row (unbounded_preceding..current_row)",
+    ),
+    (
+        "remaining",
+        "Current row through the end of the partition (current_row..unbounded_following)",
+    ),
+    (
+        "trailing",
+        "Last N rows plus the current row (N preceding..current_row)",
+    ),
+    (
+        "leading",
+        "Current row plus the next N rows (current_row..N following)",
+    ),
+    (
+        "centered",
+        "N rows before through N rows after the current row (N preceding..N following)",
+    ),
+];
+
+pub(crate) fn window_frame_name_completions() -> Vec<EditorCompletion> {
+    WINDOW_FRAME_COMPLETIONS
+        .iter()
+        .map(|(name, detail)| keyword_completion(name, detail))
+        .collect()
+}
+
+fn preceding_word(source: &str, word_start: usize) -> Option<&str> {
+    let trimmed = source[..word_start].trim_end();
+    let start = trimmed
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| is_ident_char(*ch))
+        .last()
+        .map(|(index, _)| index)?;
+    Some(&trimmed[start..])
+}
+
+fn offset_in_window_spec(program: &Program, offset: usize) -> bool {
+    let pipelines = program
+        .bindings
+        .iter()
+        .map(|binding| &binding.pipeline)
+        .chain(program.outputs.iter().map(|output| &output.pipeline))
+        .chain(program.main.as_ref());
+    for pipeline in pipelines {
+        for stage in &pipeline.stages {
+            let exprs: Vec<&Expr> = match stage {
+                Stage::Filter { expr, .. } => vec![expr],
+                Stage::Mutate { items, .. } => items.iter().map(|item| &item.expr).collect(),
+                Stage::Agg { items, .. } => {
+                    items.iter().flat_map(|item| item.args.iter()).collect()
+                }
+                Stage::Complete { fills, .. } => fills.iter().map(|fill| &fill.expr).collect(),
+                _ => Vec::new(),
+            };
+            if exprs
+                .into_iter()
+                .any(|expr| expr_contains_window_spec_offset(expr, offset))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn expr_contains_window_spec_offset(expr: &Expr, offset: usize) -> bool {
+    match expr {
+        Expr::Window { args, spec, .. } => {
+            contains(spec.span, offset)
+                || args
+                    .iter()
+                    .any(|arg| expr_contains_window_spec_offset(arg, offset))
+        }
+        Expr::Call { args, .. } => args
+            .iter()
+            .any(|arg| expr_contains_window_spec_offset(arg, offset)),
+        Expr::Unary { expr, .. } => expr_contains_window_spec_offset(expr, offset),
+        Expr::Binary { left, right, .. } => {
+            expr_contains_window_spec_offset(left, offset)
+                || expr_contains_window_spec_offset(right, offset)
+        }
+        Expr::Quoted(_)
+        | Expr::Number(_)
+        | Expr::Bool(_)
+        | Expr::Null(_)
+        | Expr::Ident(_)
+        | Expr::Context { .. } => false,
     }
 }
 

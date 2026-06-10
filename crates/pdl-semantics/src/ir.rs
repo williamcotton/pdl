@@ -1,7 +1,8 @@
 use pdl_core::Span;
 use pdl_syntax::{
-    AggItem, BinaryOp, CompleteFillItem, ContextKind, Expr, FrameBound, Pipeline, PipelineStart,
-    Program, SinkRef, SortItem, SourceRef, Stage, UnaryOp, UnionOptionKind, WindowSpec,
+    AggItem, BinaryOp, CompleteFillItem, ContextKind, Expr, Pipeline, PipelineStart, Program,
+    SinkRef, SortItem, SourceRef, Stage, UnaryOp, UnionOptionKind, WindowFrame, WindowFrameKind,
+    WindowSpec,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -648,29 +649,43 @@ fn lower_window_spec(spec: &WindowSpec) -> WindowSpecIr {
             .map(|column| column.value.clone())
             .collect(),
         order_by: spec.order_by.iter().map(lower_sort_item).collect(),
-        frame: spec.frame.as_ref().map(|frame| WindowFrameIr {
-            start: lower_frame_bound(&frame.start),
-            end: lower_frame_bound(&frame.end),
-            span: frame.span,
-        }),
+        frame: spec.frame.as_ref().map(lower_window_frame),
         span: spec.span,
     }
 }
 
-fn lower_frame_bound(bound: &FrameBound) -> FrameBoundIr {
-    match bound {
-        FrameBound::UnboundedPreceding { span } => FrameBoundIr::UnboundedPreceding { span: *span },
-        FrameBound::Preceding { rows, span } => FrameBoundIr::Preceding {
-            rows: *rows,
-            span: *span,
-        },
-        FrameBound::CurrentRow { span } => FrameBoundIr::CurrentRow { span: *span },
-        FrameBound::Following { rows, span } => FrameBoundIr::Following {
-            rows: *rows,
-            span: *span,
-        },
-        FrameBound::UnboundedFollowing { span } => FrameBoundIr::UnboundedFollowing { span: *span },
-    }
+/// Desugars the v0.43.5 named-frame surface into the stable bound-pair IR.
+/// The synthesized bounds carry the surface `frame` clause span so
+/// diagnostics and editor navigation point at real source.
+fn lower_window_frame(frame: &WindowFrame) -> WindowFrameIr {
+    let span = frame.span;
+    let (start, end) = match frame.kind {
+        WindowFrameKind::WholePartition => (
+            FrameBoundIr::UnboundedPreceding { span },
+            FrameBoundIr::UnboundedFollowing { span },
+        ),
+        WindowFrameKind::Running => (
+            FrameBoundIr::UnboundedPreceding { span },
+            FrameBoundIr::CurrentRow { span },
+        ),
+        WindowFrameKind::Remaining => (
+            FrameBoundIr::CurrentRow { span },
+            FrameBoundIr::UnboundedFollowing { span },
+        ),
+        WindowFrameKind::Trailing { rows } => (
+            FrameBoundIr::Preceding { rows, span },
+            FrameBoundIr::CurrentRow { span },
+        ),
+        WindowFrameKind::Leading { rows } => (
+            FrameBoundIr::CurrentRow { span },
+            FrameBoundIr::Following { rows, span },
+        ),
+        WindowFrameKind::Centered { rows } => (
+            FrameBoundIr::Preceding { rows, span },
+            FrameBoundIr::Following { rows, span },
+        ),
+    };
+    WindowFrameIr { start, end, span }
 }
 
 fn lower_unary_op(op: UnaryOp) -> UnaryOpIr {
@@ -695,5 +710,78 @@ fn lower_binary_op(op: BinaryOp) -> BinaryOpIr {
         BinaryOp::Mul => BinaryOpIr::Mul,
         BinaryOp::Div => BinaryOpIr::Div,
         BinaryOp::Rem => BinaryOpIr::Rem,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lowered_window_frame(clause: &str) -> (WindowFrameIr, Span) {
+        let source = format!(
+            "load \"orders.csv\"\n  | mutate value = sum(amount) over (partition_by region order_by amount {clause})"
+        );
+        let parse = pdl_syntax::parse(&source);
+        assert!(parse.diagnostics.is_empty(), "{:?}", parse.diagnostics);
+        let ir = lower_program(&parse.program);
+        let main = ir.main.expect("main pipeline");
+        let StageIr::Mutate { items, .. } = &main.stages[0] else {
+            panic!("mutate stage");
+        };
+        let ExprIr::Window { spec, .. } = &items[0].expr else {
+            panic!("window expression");
+        };
+        let frame = spec.frame.clone().expect("window frame");
+        let start = source.find(clause).expect("frame clause offset");
+        (frame, Span::new(start, start + clause.len()))
+    }
+
+    /// Each `frame <name> [N]` surface form must produce a `WindowFrameIr`
+    /// bit-identical to the reference bound pair from the v0.43.5 plan, with
+    /// every synthesized bound carrying the surface `frame` clause span.
+    #[test]
+    fn window_frame_named_ir_stability() {
+        type FrameCase = (&'static str, fn(Span) -> WindowFrameIr);
+        let cases: Vec<FrameCase> = vec![
+            ("frame whole_partition", |span| WindowFrameIr {
+                start: FrameBoundIr::UnboundedPreceding { span },
+                end: FrameBoundIr::UnboundedFollowing { span },
+                span,
+            }),
+            ("frame running", |span| WindowFrameIr {
+                start: FrameBoundIr::UnboundedPreceding { span },
+                end: FrameBoundIr::CurrentRow { span },
+                span,
+            }),
+            ("frame remaining", |span| WindowFrameIr {
+                start: FrameBoundIr::CurrentRow { span },
+                end: FrameBoundIr::UnboundedFollowing { span },
+                span,
+            }),
+            ("frame trailing 3", |span| WindowFrameIr {
+                start: FrameBoundIr::Preceding { rows: 3, span },
+                end: FrameBoundIr::CurrentRow { span },
+                span,
+            }),
+            ("frame leading 2", |span| WindowFrameIr {
+                start: FrameBoundIr::CurrentRow { span },
+                end: FrameBoundIr::Following { rows: 2, span },
+                span,
+            }),
+            ("frame centered 1", |span| WindowFrameIr {
+                start: FrameBoundIr::Preceding { rows: 1, span },
+                end: FrameBoundIr::Following { rows: 1, span },
+                span,
+            }),
+            ("frame trailing 0", |span| WindowFrameIr {
+                start: FrameBoundIr::Preceding { rows: 0, span },
+                end: FrameBoundIr::CurrentRow { span },
+                span,
+            }),
+        ];
+        for (clause, expected) in cases {
+            let (frame, span) = lowered_window_frame(clause);
+            assert_eq!(frame, expected(span), "clause `{clause}`");
+        }
     }
 }

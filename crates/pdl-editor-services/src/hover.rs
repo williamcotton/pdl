@@ -2,7 +2,10 @@ use pdl_core::Span;
 use pdl_data::{DataFormat, LogicalType, Table, Value};
 use pdl_driver::{resolve_input_path, DriverIo, OsDriverIo};
 use pdl_semantics::{aggregate_function, format_info, scalar_function, stage_info};
-use pdl_syntax::{Expr, LoadStage, Pipeline, PipelineStart, Program, SaveStage, SourceRef, Stage};
+use pdl_syntax::{
+    Expr, LoadStage, Pipeline, PipelineStart, Program, SaveStage, SourceRef, Stage, WindowFrame,
+    WindowFrameKind,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -249,6 +252,15 @@ fn hover_stage_detail(
                     ));
                 }
             }
+        }
+    }
+
+    for frame in window_frames(stage) {
+        if contains(frame.span, offset) {
+            return Some(EditorHover {
+                range: range_for_span(source, frame.span),
+                markdown: window_frame_hover_markdown(frame),
+            });
         }
     }
 
@@ -836,6 +848,83 @@ fn scalar_function_spans(stage: &Stage) -> Vec<(String, Span)> {
     }
 }
 
+fn window_frames(stage: &Stage) -> Vec<&WindowFrame> {
+    match stage {
+        Stage::Filter { expr, .. } => expr_window_frames(expr),
+        Stage::Mutate { items, .. } => items
+            .iter()
+            .flat_map(|item| expr_window_frames(&item.expr))
+            .collect(),
+        Stage::Agg { items, .. } => items
+            .iter()
+            .flat_map(|item| item.args.iter().flat_map(expr_window_frames))
+            .collect(),
+        Stage::Complete { fills, .. } => fills
+            .iter()
+            .flat_map(|fill| expr_window_frames(&fill.expr))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn expr_window_frames(expr: &Expr) -> Vec<&WindowFrame> {
+    match expr {
+        Expr::Window { args, spec, .. } => {
+            let mut frames: Vec<&WindowFrame> = spec.frame.iter().collect();
+            frames.extend(args.iter().flat_map(expr_window_frames));
+            frames
+        }
+        Expr::Call { args, .. } => args.iter().flat_map(expr_window_frames).collect(),
+        Expr::Unary { expr, .. } => expr_window_frames(expr),
+        Expr::Binary { left, right, .. } => {
+            let mut frames = expr_window_frames(left);
+            frames.extend(expr_window_frames(right));
+            frames
+        }
+        Expr::Quoted(_)
+        | Expr::Number(_)
+        | Expr::Bool(_)
+        | Expr::Null(_)
+        | Expr::Ident(_)
+        | Expr::Context { .. } => Vec::new(),
+    }
+}
+
+/// Hover for a named window frame surfaces the bound pair the name lowers
+/// to so the underlying frame is visible from the editor.
+fn window_frame_hover_markdown(frame: &WindowFrame) -> String {
+    let (summary, bounds) = match frame.kind {
+        WindowFrameKind::WholePartition => (
+            "Every row in the partition.".to_string(),
+            "unbounded_preceding..unbounded_following".to_string(),
+        ),
+        WindowFrameKind::Running => (
+            "Start of the partition through the current row.".to_string(),
+            "unbounded_preceding..current_row".to_string(),
+        ),
+        WindowFrameKind::Remaining => (
+            "Current row through the end of the partition.".to_string(),
+            "current_row..unbounded_following".to_string(),
+        ),
+        WindowFrameKind::Trailing { rows } => (
+            format!("Last {rows} rows plus the current row."),
+            format!("{rows} preceding..current_row"),
+        ),
+        WindowFrameKind::Leading { rows } => (
+            format!("Current row plus the next {rows} rows."),
+            format!("current_row..{rows} following"),
+        ),
+        WindowFrameKind::Centered { rows } => (
+            format!("{rows} rows before through {rows} rows after the current row."),
+            format!("{rows} preceding..{rows} following"),
+        ),
+    };
+    format!(
+        "**frame {}**\n\n{summary}\n\nLowered bounds: `{bounds}`",
+        frame.kind.name()
+    )
+}
+
 fn stage_binding_ref(stage: &Stage) -> Option<(&str, Span)> {
     match stage {
         Stage::Join { source, .. } | Stage::Union { source, .. } => {
@@ -997,6 +1086,25 @@ mod tests {
             hover_with_driver_io(source, Path::new("memory/main.pdl"), &io, position).unwrap();
 
         assert_eq!(hover.markdown, "**column `region`**\n\nType: `string`\n\nNullable: `no`\n\nSamples: North, South, West");
+    }
+
+    #[test]
+    fn window_frame_hover_surfaces_lowered_bounds() {
+        let source = r#"load "sales.csv"
+  | mutate trailing_amount = sum(amount) over (partition_by region order_by amount frame trailing 3)"#;
+        let offset = source.find("frame trailing").expect("frame clause") + 2;
+
+        let hover = hover(
+            source,
+            None,
+            crate::services::position_for_byte_offset(source, offset),
+        )
+        .expect("window frame hover");
+
+        assert_eq!(
+            hover.markdown,
+            "**frame trailing**\n\nLast 3 rows plus the current row.\n\nLowered bounds: `3 preceding..current_row`"
+        );
     }
 
     #[test]

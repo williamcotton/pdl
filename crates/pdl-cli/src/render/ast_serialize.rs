@@ -3,9 +3,9 @@
 
 use pdl_core::Span;
 use pdl_syntax::{
-    AggItem, BinaryOp, Binding, CompleteFillItem, ContextDecl, ContextKind, Expr, FrameBound,
-    JoinOn, MutateItem, OutputDecl, Pipeline, PipelineStart, Program, SaveStage, SinkRef,
-    SortDirection, SourceRef, Stage, UnaryOp, UnionOptionKind, WindowFrame, WindowSpec,
+    AggItem, BinaryOp, Binding, CompleteFillItem, ContextDecl, ContextKind, Expr, JoinOn,
+    MutateItem, OutputDecl, Pipeline, PipelineStart, Program, SaveStage, SinkRef, SortDirection,
+    SourceRef, Stage, UnaryOp, UnionOptionKind, WindowFrame, WindowSpec,
 };
 use serde::Serialize;
 
@@ -286,19 +286,10 @@ pub(crate) struct WindowSpecJson {
 
 #[derive(Serialize)]
 pub(crate) struct WindowFrameJson {
-    pub(crate) start: FrameBoundJson,
-    pub(crate) end: FrameBoundJson,
+    pub(crate) name: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rows: Option<usize>,
     pub(crate) span: Span,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum FrameBoundJson {
-    UnboundedPreceding { span: Span },
-    Preceding { rows: usize, span: Span },
-    CurrentRow { span: Span },
-    Following { rows: usize, span: Span },
-    UnboundedFollowing { span: Span },
 }
 
 pub(crate) fn program_json(program: &Program) -> ProgramJson {
@@ -623,29 +614,9 @@ fn window_spec_json(spec: &WindowSpec) -> WindowSpecJson {
 
 fn window_frame_json(frame: &WindowFrame) -> WindowFrameJson {
     WindowFrameJson {
-        start: frame_bound_json(&frame.start),
-        end: frame_bound_json(&frame.end),
+        name: frame.kind.name(),
+        rows: frame.kind.rows(),
         span: frame.span,
-    }
-}
-
-fn frame_bound_json(bound: &FrameBound) -> FrameBoundJson {
-    match bound {
-        FrameBound::UnboundedPreceding { span } => {
-            FrameBoundJson::UnboundedPreceding { span: *span }
-        }
-        FrameBound::Preceding { rows, span } => FrameBoundJson::Preceding {
-            rows: *rows,
-            span: *span,
-        },
-        FrameBound::CurrentRow { span } => FrameBoundJson::CurrentRow { span: *span },
-        FrameBound::Following { rows, span } => FrameBoundJson::Following {
-            rows: *rows,
-            span: *span,
-        },
-        FrameBound::UnboundedFollowing { span } => {
-            FrameBoundJson::UnboundedFollowing { span: *span }
-        }
     }
 }
 

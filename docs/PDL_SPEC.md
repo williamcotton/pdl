@@ -1,13 +1,23 @@
 # PDL Detailed Specification
 
-Status: Draft 0.43.0
+Status: Draft 0.43.5
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.43.0`, tracked in
-`docs/V0_43_PLAN.md`. Version 0.43.0 is a test-infrastructure and
+The current repository implementation line is `0.43.5`, tracked in
+`docs/V0_43_5_PLAN.md`. Version 0.43.5 replaces the SQL-shaped window-frame
+clause with the named-frame surface `frame <name> [N]` (`whole_partition`,
+`running`, `remaining`, `trailing N`, `leading N`, `centered N`). It is a
+breaking source change with no deprecation cycle: the former `rows`/`between`
+bound-pair clause and its seven keywords are removed, and the seven words are
+ordinary identifiers again. The named forms desugar to the unchanged
+bound-pair semantic IR; `frame whole_partition` and `frame running` hold
+native parity while the four bounded names execute on the row engine and are
+rejected by native execution. New diagnostics: `E1230`, `E1231`, `E1232`.
+
+Version 0.43.0, tracked in `docs/V0_43_PLAN.md`, is a test-infrastructure and
 observability release that lays the foundation for the v0.44–v0.49 native
 coverage expansion. It adds the row-vs-native parity harness in
 `crates/pdl-parity-tests/`, the `selected_engine` regression-guard fixtures,
@@ -37,7 +47,7 @@ use the portable row runtime in automatic mode.
 
 The native v0.39 implementation promotes row-preserving windows for
 `percent_rank`, `cume_dist`, `lag`, `lead`, `first_value`, `last_value`, and
-`rows between unbounded_preceding and current_row` aggregate frames where native
+running (`unbounded_preceding..current_row`) aggregate frames where native
 ordering, null handling, types, and frames match rows. It also promotes
 single-key and composite-key equi-joins for `inner`, `left`, `right`, `full`,
 `semi`, and `anti` at the existing native-safe binding boundary.
@@ -177,7 +187,7 @@ output evaluation in source order; the scalar functions `is_null`, `not_null`,
 `min`, and `max`. It implements window expressions with `row_number`, `rank`,
 `dense_rank`, `percent_rank`, `cume_dist`, `lag`, `lead`, `first_value`,
 `last_value`, `count`, `sum`, `mean`, `min`, and `max` over explicit
-`partition_by`, `order_by`, and `rows between ... and ...` clauses in `mutate`.
+`partition_by`, `order_by`, and `frame` clauses in `mutate`.
 It also
 implements registered lettered diagnostic codes in `pdl-core`, a `codes::*`
 registry, `related` spans and `help` diagnostic payload fields, diagnostic
@@ -981,16 +991,21 @@ Window expression syntax uses additional clause words:
 - `over`
 - `partition_by`
 - `order_by`
-- `rows`
-- `between`
-- `unbounded_preceding`
-- `current_row`
-- `unbounded_following`
-- `preceding`
-- `following`
+- `frame`
+- `whole_partition`
+- `running`
+- `remaining`
+- `trailing`
+- `leading`
+- `centered`
 
-These words are reserved by the version 0.26.0 target language. `param` and
-`state` are reserved by version 0.29.0 for reactive context declarations.
+`over`, `partition_by`, and `order_by` are reserved by the version 0.26.0
+target language. `frame` and the six frame names are reserved by version
+0.43.5, which also retires the version 0.26.0 reservations of `rows`,
+`between`, `unbounded_preceding`, `current_row`, `unbounded_following`,
+`preceding`, and `following`; those seven words are ordinary identifiers and
+need no backticks as column names. `param` and `state` are reserved by version
+0.29.0 for reactive context declarations.
 
 ### 6.5.1 Reactive Context Declarations And References
 
@@ -1369,12 +1384,14 @@ WindowExpr      ::= CallExpr "over" "(" WindowSpec ")" ;
 WindowSpec      ::= PartitionClause? OrderClause? WindowFrame? ;
 PartitionClause ::= "partition_by" ColumnRef ("," ColumnRef)* ;
 OrderClause     ::= "order_by" SortItem ("," SortItem)* ;
-WindowFrame     ::= "rows" "between" FrameBound "and" FrameBound ;
-FrameBound      ::= "unbounded_preceding"
-                  | IntLiteral "preceding"
-                  | "current_row"
-                  | IntLiteral "following"
-                  | "unbounded_following" ;
+WindowFrame     ::= "frame" FrameName FrameArg? ;
+FrameName       ::= "whole_partition"
+                  | "running"
+                  | "remaining"
+                  | "trailing"
+                  | "leading"
+                  | "centered" ;
+FrameArg        ::= IntLiteral ;
 CallExpr        ::= Ident "(" ArgList? ")" ;
 ArgList         ::= ValueExpr ("," ValueExpr)* ;
 ColumnRef       ::= Ident | EscapedColumnRef ;
@@ -2041,7 +2058,7 @@ load "sales.parquet"
   | mutate region_rank = dense_rank() over (partition_by region order_by amount desc)
 ```
 
-Running calculations use an explicit `rows between` frame:
+Running calculations use an explicit named frame:
 
 ```pdl
 load "sales.csv"
@@ -2049,7 +2066,7 @@ load "sales.csv"
       sum(amount) over (
         partition_by region
         order_by order_date
-        rows between unbounded_preceding and current_row
+        frame running
       )
 ```
 
@@ -2087,9 +2104,35 @@ Assignments in a `mutate` stage containing window expressions remain parallel:
 one assignment MUST NOT see another assignment from the same stage.
 
 The default frame for aggregate-style and value window functions is the whole
-partition. Running calculations require an explicit frame. The frame
-`rows between unbounded_preceding and current_row` MUST remain valid v0.26
-syntax and means the first row in the partition through the current row.
+partition. Running calculations require an explicit frame.
+
+The window frame clause is `frame <name> [N]`. Version 0.43.5 defines exactly
+six frame names; the named forms are the only legal frame surface. Each name
+desugars to a fixed bound pair in the semantic IR:
+
+| Surface | Meaning | Lowered bounds |
+| --- | --- | --- |
+| `frame whole_partition` | every row in the partition | `unbounded_preceding..unbounded_following` |
+| `frame running` | start of partition through the current row | `unbounded_preceding..current_row` |
+| `frame remaining` | current row through end of partition | `current_row..unbounded_following` |
+| `frame trailing N` | last `N` rows plus the current row | `N preceding..current_row` |
+| `frame leading N` | current row plus next `N` rows | `current_row..N following` |
+| `frame centered N` | `N` rows before through `N` rows after the current row | `N preceding..N following` |
+
+`whole_partition`, `running`, and `remaining` MUST NOT take an integer
+argument; a trailing integer MUST produce `E1232`. `trailing`, `leading`, and
+`centered` MUST take a single non-negative integer argument; a missing
+argument MUST produce `E1231`. A zero argument is legal and collapses the
+named frame to its degenerate case (`frame trailing 0` is the current row
+only). An unknown frame name MUST produce `E1230`; the diagnostic SHOULD
+suggest the closest legal name.
+
+The version 0.26.0 normative statement that the SQL-shaped
+`rows`-and-`between` bound-pair frame clause MUST remain valid is retracted as
+of version 0.43.5. The removed clause has no deprecation cycle, parallel
+surface, or compatibility flag; source using it produces a generic parse
+error. Asymmetric or arbitrary-bound frames are not expressible in version
+0.43.5 source.
 
 Window execution MAY require materializing the current table or partition.
 
@@ -2234,7 +2277,7 @@ load "orders.csv"
       sum(amount) over (
         partition_by customer_id
         order_by order_date asc
-        rows between unbounded_preceding and current_row
+        frame running
       )
 ```
 
@@ -2295,7 +2338,7 @@ Aggregate-style and value window functions default to the whole partition, even
 when `order_by` is present. Running calculations require an explicit frame:
 
 ```pdl
-rows between unbounded_preceding and current_row
+frame running
 ```
 
 This frame includes the current row and every preceding row in the current
@@ -2311,8 +2354,8 @@ order as the deterministic tie-breaker. Users SHOULD add explicit tie-breaker
 columns when they need durable rankings independent of input order.
 
 Invalid window specifications MUST produce a stable diagnostic such as `E1203`,
-`E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1401`, or `E1402`, depending on
-the malformed clause.
+`E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1230`, `E1231`, `E1232`,
+`E1401`, or `E1402`, depending on the malformed clause.
 
 ### 12.6 Determinism
 
@@ -2334,9 +2377,9 @@ Non-deterministic function not allowed MUST produce `E1405`.
 
 Divide by zero detected statically MUST produce `E1407`.
 
-Invalid window specifications MUST produce stable diagnostics; version 0.26.0
-uses `E1203`, `E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1401`, or
-`E1402` depending on the malformed clause.
+Invalid window specifications MUST produce stable diagnostics; version
+0.43.5 uses `E1203`, `E1204`, `E1205`, `E1206`, `E1214`, `E1226`, `E1230`,
+`E1231`, `E1232`, `E1401`, or `E1402` depending on the malformed clause.
 
 ## 13. Row Ordering And Determinism
 
@@ -2700,8 +2743,8 @@ Composite native joins preserve the row runtime's null-key non-match rule,
 right non-key suffixing, coalesced key output, and deterministic output order.
 
 Native row-preserving window coverage also includes `percent_rank`,
-`cume_dist`, `lag`, `lead`, `first_value`, `last_value`, and
-`rows between unbounded_preceding and current_row` aggregate frames when each
+`cume_dist`, `lag`, `lead`, `first_value`, `last_value`, and `frame running`
+(`unbounded_preceding..current_row`) aggregate frames when each
 argument lowers through the supported native expression subset. Native
 `lag`/`lead` require exactly one order key, a non-negative integer literal
 offset, and an omitted or `null` default. Native ranking, distribution, and
@@ -2964,7 +3007,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.43.0` LSP implementation provides diagnostics,
+The current `0.43.5` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3080,7 +3123,7 @@ The formatter SHOULD use:
 - comma plus space between items
 - one item per line for long item-list stages
 - one assignment group per line for window-heavy `mutate` stages
-- one line per `partition_by`, `order_by`, or `rows between ...` window clause
+- one line per `partition_by`, `order_by`, or `frame ...` window clause
   when a window expression is expanded
 
 Example formatted style:
@@ -3359,10 +3402,13 @@ package manifests or consumer install pins to move past the latest verified
 published `pdl-wasm@0.39.0` and `pdl-editor@0.39.0` packages unless those
 packages are explicitly prepared and published.
 
-Versions 0.42.0 and 0.43.0 are likewise native Rust/CLI releases. Browser
-package publication stays independent: local package manifests carry the
-workspace release version, while consumer dependency pins remain on the
-latest verified published `pdl-wasm@0.39.0` and `pdl-editor@0.39.0`.
+Versions 0.42.0 and 0.43.0 are likewise native Rust/CLI releases. Version
+0.43.5 changes the language surface the browser packages carry, so it
+prepares new browser package versions (`pdl-wasm@0.43.5`,
+`pdl-editor@0.43.6`). Browser package publication stays independent:
+consumer dependency pins remain on the latest verified published
+`pdl-wasm@0.39.0` and `pdl-editor@0.39.0` until the prepared versions are
+published to npm.
 
 ## 19. Rust Crate Architecture
 
@@ -3436,7 +3482,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.43.0"
+version = "0.43.5"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -4645,6 +4691,15 @@ stage-argument error.
 
 `E1226` window expression is not valid in this context.
 
+`E1230` unknown window frame name in a `frame <name>` clause; the diagnostic
+SHOULD suggest the closest legal name.
+
+`E1231` `frame trailing` / `frame leading` / `frame centered` missing the
+required integer argument.
+
+`E1232` `frame whole_partition` / `frame running` / `frame remaining`
+followed by an unexpected integer argument.
+
 ### 20.5 Type Diagnostics
 
 `E1301` unknown type.
@@ -5030,7 +5085,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.43.0.
+PDL source does not require an explicit version declaration in draft 0.43.5.
 
 The implementation SHOULD report supported language version.
 
@@ -5128,12 +5183,14 @@ WindowExpr       ::= CallExpr "over" "(" WindowSpec ")" ;
 WindowSpec       ::= PartitionClause? OrderClause? WindowFrame? ;
 PartitionClause  ::= "partition_by" ColumnRef ("," ColumnRef)* ;
 OrderClause      ::= "order_by" SortItem ("," SortItem)* ;
-WindowFrame      ::= "rows" "between" FrameBound "and" FrameBound ;
-FrameBound       ::= "unbounded_preceding"
-                   | IntLiteral "preceding"
-                   | "current_row"
-                   | IntLiteral "following"
-                   | "unbounded_following" ;
+WindowFrame      ::= "frame" FrameName FrameArg? ;
+FrameName        ::= "whole_partition"
+                   | "running"
+                   | "remaining"
+                   | "trailing"
+                   | "leading"
+                   | "centered" ;
+FrameArg         ::= IntLiteral ;
 CallExpr         ::= Ident "(" ArgList? ")" ;
 ArgList          ::= ValueExpr ("," ValueExpr)* ;
 ColumnRef        ::= Ident | EscapedColumnRef ;

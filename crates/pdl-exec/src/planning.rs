@@ -644,12 +644,16 @@ fn native_pipeline_unsupported_reason(
                     return Some(NativeUnsupportedReason::WindowExpression);
                 }
                 for item in items {
-                    native_expr_unsupported_reason(&item.expr)?;
+                    if let Some(reason) = native_expr_unsupported_reason(&item.expr) {
+                        return Some(reason);
+                    }
                 }
             }
             StageIr::Agg { items, .. } => {
                 for item in items {
-                    native_agg_unsupported_reason(item)?;
+                    if let Some(reason) = native_agg_unsupported_reason(item) {
+                        return Some(reason);
+                    }
                 }
             }
             StageIr::Save { .. } if !is_terminal => {
@@ -1322,6 +1326,58 @@ load "sales.csv"
             plan.observability.fallback_reason,
             Some(NativeUnsupportedReason::WindowExpression)
         );
+    }
+
+    #[test]
+    fn planning_window_frame_named_native_eligibility() {
+        let plan_for_frame = |clause: &str| {
+            let io = InMemoryDriverIo::default()
+                .with_schema("memory/sales.csv", ["amount", "region", "status"]);
+            let source = format!(
+                r#"load "sales.csv"
+  | mutate value = sum(amount) over (partition_by region order_by amount {clause})"#
+            );
+            let prepared = prepare_source_with_io("memory/main.pdl", &source, &io);
+            plan_prepared(
+                &prepared,
+                PlanningOptions {
+                    stdout_format: Some("csv".to_string()),
+                    dry_run: true,
+                    allow_binary_stdout: true,
+                    engine: PlannedEngine::Auto,
+                },
+            )
+            .expect("execution plan")
+        };
+
+        for clause in ["frame whole_partition", "frame running"] {
+            let plan = plan_for_frame(clause);
+            assert_eq!(
+                plan.observability.selected_engine,
+                PlannedEngine::Native,
+                "`{clause}` must stay native parity"
+            );
+            assert_eq!(plan.observability.fallback_reason, None, "`{clause}`");
+        }
+
+        for clause in [
+            "frame remaining",
+            "frame trailing 2",
+            "frame leading 2",
+            "frame centered 1",
+        ] {
+            let plan = plan_for_frame(clause);
+            assert_eq!(
+                plan.observability.selected_engine,
+                PlannedEngine::Row,
+                "`{clause}` must stay row-only by design"
+            );
+            assert_eq!(
+                plan.observability.fallback_reason,
+                Some(NativeUnsupportedReason::WindowExpression),
+                "`{clause}`"
+            );
+        }
     }
 
     #[test]

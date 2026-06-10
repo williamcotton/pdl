@@ -1421,7 +1421,7 @@ load "orders.csv"
     fn window_mutate_adds_columns_and_checks_referenced_columns() {
         let parse = pdl_syntax::parse(
             r#"load "orders.csv"
-  | mutate running_amount = sum(amount) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row), rank = dense_rank() over (partition_by region order_by amount desc)"#,
+  | mutate running_amount = sum(amount) over (partition_by customer_id order_by order_date frame running), rank = dense_rank() over (partition_by region order_by amount desc)"#,
         );
 
         let analysis = analyze_program(&parse.program, |_| {

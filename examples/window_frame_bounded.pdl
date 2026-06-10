@@ -1,0 +1,36 @@
+load "sales.csv"
+  | filter status == "completed"
+  | mutate
+      trailing_revenue =
+        sum(amount) over (
+          partition_by region
+          order_by amount, customer_id
+          frame trailing 1
+        ),
+      leading_revenue =
+        sum(amount) over (
+          partition_by region
+          order_by amount, customer_id
+          frame leading 1
+        ),
+      centered_revenue =
+        sum(amount) over (
+          partition_by region
+          order_by amount, customer_id
+          frame centered 1
+        ),
+      remaining_revenue =
+        sum(amount) over (
+          partition_by region
+          order_by amount, customer_id
+          frame remaining
+        )
+  | select
+      region,
+      customer_id,
+      amount,
+      trailing_revenue,
+      leading_revenue,
+      centered_revenue,
+      remaining_revenue
+  | sort region, amount, customer_id

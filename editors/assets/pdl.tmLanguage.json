@@ -159,7 +159,7 @@
       "patterns": [
         {
           "name": "keyword.control.pdl",
-          "match": "\\b(?:let|output|param|state|load|filter|select|drop|rename|mutate|group_by|agg|sort|limit|join|union|distinct|pivot_longer|complete|save|on|kind|by_name|names_to|values_to|fill|format|over|partition_by|order_by|rows|between|unbounded_preceding|current_row|unbounded_following|preceding|following|stdin|stdout|and|or|not|asc|desc|inner|left|right|full|semi|anti|nulls_first|nulls_last)\\b"
+          "match": "\\b(?:let|output|param|state|load|filter|select|drop|rename|mutate|group_by|agg|sort|limit|join|union|distinct|pivot_longer|complete|save|on|kind|by_name|names_to|values_to|fill|format|over|partition_by|order_by|frame|whole_partition|running|remaining|trailing|leading|centered|stdin|stdout|and|or|not|asc|desc|inner|left|right|full|semi|anti|nulls_first|nulls_last)\\b"
         },
         {
           "name": "constant.language.pdl",

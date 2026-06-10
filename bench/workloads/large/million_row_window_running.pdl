@@ -3,17 +3,17 @@ load "../../data/generated/million-row.csv"
       running_score = sum(score) over (
         partition_by segment
         order_by row
-        rows between unbounded_preceding and current_row
+        frame running
       ),
       running_latency = mean(latency_ms) over (
         partition_by segment
         order_by row
-        rows between unbounded_preceding and current_row
+        frame running
       ),
       running_count = count(score) over (
         partition_by segment
         order_by row
-        rows between unbounded_preceding and current_row
+        frame running
       )
   | filter row % 1000 == 0
   | select row, segment, running_score, running_latency, running_count

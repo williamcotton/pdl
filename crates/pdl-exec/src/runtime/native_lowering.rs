@@ -442,7 +442,8 @@ pub(crate) fn lower_data_window_frame(spec: &WindowSpecIr) -> Result<DataWindowF
         }) => Ok(DataWindowFrame::UnboundedPrecedingToCurrentRow),
         Some(_) => Err(unsupported_native_pipeline(
             NativeUnsupportedReason::WindowExpression,
-            "bounded window frames are not supported by native execution",
+            "the `frame trailing N` / `frame leading N` / `frame centered N` / `frame remaining` \
+             clauses are not supported by native execution",
         )),
     }
 }

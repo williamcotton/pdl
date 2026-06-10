@@ -1,6 +1,6 @@
 # PDL Native Coverage Matrix
 
-Status: v0.40 source of truth
+Status: v0.43.5 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
 This matrix records what the native execution strategy may claim in v0.40. The
@@ -58,11 +58,14 @@ boundary changes status, update the CSV and the tests in the same change.
 | aggregate arguments | native partial | Supported scalar expressions lower for `count`, `sum`, `mean`, `min`, `max`, and `count_distinct`. |
 | window ranking functions | native partial | `row_number`, `rank`, and `dense_rank` lower natively for row-preserving mutate windows; ranking requires `order_by` and supports one key or one compatible multi-key order group. |
 | window whole-partition aggregates | native partial | `count`, `sum`, `mean`, `min`, and `max` lower natively for whole-partition row-preserving mutate windows over supported native expressions with zero, one, or one compatible multi-key order group. |
-| window running aggregates | native partial | `count`, `sum`, `mean`, `min`, and `max` lower natively for `rows between unbounded_preceding and current_row` over supported native expressions with zero, one, or one compatible multi-key order group. |
+| window running aggregates | native partial | `count`, `sum`, `mean`, `min`, and `max` lower natively for `frame running` over supported native expressions with zero, one, or one compatible multi-key order group. |
 | window offset functions | native partial | `lag` and `lead` lower natively with one or one compatible multi-key order group, a non-negative integer literal offset, and omitted, null, or native-compatible non-null defaults. |
-| window value functions | native partial | `first_value` and `last_value` lower natively for whole-partition and unbounded-preceding-to-current-row frames over supported native expressions with zero, one, or one compatible multi-key order group. |
+| window value functions | native partial | `first_value` and `last_value` lower natively for `frame whole_partition` and `frame running` frames over supported native expressions with zero, one, or one compatible multi-key order group. |
 | window distribution functions | native partial | `percent_rank` and `cume_dist` lower natively with one key or one compatible multi-key order group. |
 | window multi-key ordering | native partial | Multi-key window order lowers natively when a mutate stage has one compatible composite order group; mixed multi-key groups remain row-only. |
+| window whole-partition frame | native parity | `frame whole_partition` desugars to the whole-partition bound pair the native engine already covers. |
+| window running frame | native parity | `frame running` desugars to the unbounded-preceding-to-current-row bound pair the native engine already covers. |
+| window bounded frames | row-only by design | `frame remaining`, `frame trailing N`, `frame leading N`, and `frame centered N` execute on the row engine; native execution rejects them with the bounded-frame `window-expression` reason. |
 
 ## Source Coverage
 

@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use crate::completion::{
     binding_completion, column_completions, context_completions, dedupe_completions,
     format_completion, function_completion, keyword_completion, stage_completion,
-    CompletionContext,
+    window_frame_name_completions, CompletionContext,
 };
 use crate::diagnostics::diagnostics_for_editor;
 use crate::scope_analysis::optimistic_columns;
@@ -249,6 +249,8 @@ pub fn completions(
         completions.push(keyword_completion("kind", "Select a join kind"));
     } else if let Some(kind) = context.context_reference_kind {
         completions.extend(context_completions(&facts, kind));
+    } else if context.in_window_frame_name_context {
+        completions.extend(window_frame_name_completions());
     } else if context.in_agg_function_context {
         completions.extend(AGGREGATE_FUNCTIONS.iter().map(function_completion));
     } else if context.in_scalar_function_context {
@@ -1152,6 +1154,29 @@ load "sales.csv"
     }
 
     #[test]
+    fn provides_window_frame_name_completions_after_frame() {
+        let source = r#"load "sales.csv"
+  | mutate running_amount = sum(amount) over (partition_by region order_by amount frame )"#;
+        let offset = source.find("frame ").expect("frame keyword") + "frame ".len();
+
+        let items = completions(source, None, position_for_byte_offset(source, offset));
+
+        for name in [
+            "whole_partition",
+            "running",
+            "remaining",
+            "trailing",
+            "leading",
+            "centered",
+        ] {
+            assert!(
+                items.iter().any(|item| item.label == name),
+                "missing frame name completion `{name}`: {items:?}"
+            );
+        }
+    }
+
+    #[test]
     fn provides_join_kind_completions_after_kind() {
         let source = r#"let customers =
   load "customers.csv"
@@ -1299,7 +1324,7 @@ cleaned
 
 load "orders.csv"
   | join customers on (customer_id, id) kind left
-  | mutate row_num = row_number() over (partition_by region order_by order_date desc rows between unbounded_preceding and current_row)
+  | mutate row_num = row_number() over (partition_by region order_by order_date desc frame running)
   | select final_region = region
   | rename customer_key = id
   | pivot_longer jan, feb names_to month values_to amount

@@ -117,6 +117,26 @@ load "sales.csv"
         )
 ```
 
+Aggregate windows take an optional named frame: `frame whole_partition`,
+`frame running`, `frame remaining`, `frame trailing N`, `frame leading N`, or
+`frame centered N`. See
+[`examples/window_frame_named.pdl`](examples/window_frame_named.pdl) for the
+native-parity frames and
+[`examples/window_frame_bounded.pdl`](examples/window_frame_bounded.pdl) for
+the bounded frames that run on the row engine.
+
+```pdl
+load "sales.csv"
+  | filter status == "completed"
+  | mutate
+      running_revenue =
+        sum(amount) over (
+          partition_by region
+          order_by amount, customer_id
+          frame running
+        )
+```
+
 ## 6. Arrow streams: hand off typed tables
 
 PDL can read and write Arrow IPC streams on stdin/stdout. That makes it useful

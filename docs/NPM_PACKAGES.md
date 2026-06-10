@@ -9,11 +9,16 @@ consumer lockfiles after npm has the new tarballs.
 ## Published Package Mode
 
 Use published packages for demo, Studio, and downstream package-surface checks.
-For the v0.40 Rust/CLI release, npm was checked on June 7, 2026:
-`pdl-wasm` publishes `0.30.0` and `0.39.0`; `pdl-editor` publishes `0.30.0`,
-`0.30.1`, and `0.39.0`. Because no `0.40.0` browser packages are published,
-ordinary demo and downstream checks should continue to use the latest verified
-published browser package versions:
+For the v0.43.5 release, npm was checked on June 9, 2026: `pdl-wasm` publishes
+`0.30.0` and `0.39.0`; `pdl-editor` publishes `0.30.0`, `0.30.1`, and
+`0.39.0`.
+
+The v0.43.5 named-frame release changes the language surface that the browser
+packages carry (the WASM parser and the editor grammar assets), so new browser
+package versions are prepared locally: `pdl-wasm@0.43.5` and
+`pdl-editor@0.43.6`. Until those tarballs are published, ordinary demo and
+downstream checks should continue to use the latest verified published browser
+package versions:
 
 1. Install the published browser packages:
 
@@ -31,10 +36,11 @@ import { loadPdlRuntime } from "pdl-wasm";
 const runtime = await loadPdlRuntime({ wasmUrl: "/wasm/pdl.wasm" });
 ```
 
-The PDL demo consumes the v0.39 browser package versions during the v0.40
-native Rust/CLI release. Do not change `pdl-wasm`, `pdl-editor`, demo consumer
-pins, or browser install commands to `0.40.0` unless a browser package release
-explicitly prepares and publishes those tarballs.
+The PDL demo consumes the v0.39 browser package versions until the prepared
+`pdl-wasm@0.43.5` / `pdl-editor@0.43.6` tarballs are published. Do not change
+demo consumer pins or browser install commands to the `0.43.x` versions until
+npm confirms those exact versions exist; after publishing, regenerate consumer
+lockfiles against the published tarballs.
 
 ## Package Validation
 

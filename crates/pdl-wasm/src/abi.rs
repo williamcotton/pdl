@@ -553,7 +553,7 @@ mod tests {
             "source": r#"load "orders.csv"
   | mutate
       customer_row = row_number() over (partition_by customer_id order_by order_date),
-      customer_running_amount = sum(amount) over (partition_by customer_id order_by order_date rows between unbounded_preceding and current_row),
+      customer_running_amount = sum(amount) over (partition_by customer_id order_by order_date frame running),
       previous_amount = lag(amount) over (partition_by customer_id order_by order_date),
       next_amount = lead(amount, 1, null) over (partition_by customer_id order_by order_date),
       region_top_order = first_value(order_id) over (partition_by region order_by amount desc),

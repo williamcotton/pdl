@@ -464,31 +464,52 @@ pub struct WindowSpec {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowFrame {
-    pub start: FrameBound,
-    pub end: FrameBound,
+    pub kind: WindowFrameKind,
     pub span: Span,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum FrameBound {
-    UnboundedPreceding { span: Span },
-    Preceding { rows: usize, span: Span },
-    CurrentRow { span: Span },
-    Following { rows: usize, span: Span },
-    UnboundedFollowing { span: Span },
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowFrameKind {
+    WholePartition,
+    Running,
+    Remaining,
+    Trailing { rows: usize },
+    Leading { rows: usize },
+    Centered { rows: usize },
 }
 
-impl FrameBound {
-    pub fn span(&self) -> Span {
+impl WindowFrameKind {
+    pub fn name(self) -> &'static str {
         match self {
-            FrameBound::UnboundedPreceding { span }
-            | FrameBound::Preceding { span, .. }
-            | FrameBound::CurrentRow { span }
-            | FrameBound::Following { span, .. }
-            | FrameBound::UnboundedFollowing { span } => *span,
+            WindowFrameKind::WholePartition => "whole_partition",
+            WindowFrameKind::Running => "running",
+            WindowFrameKind::Remaining => "remaining",
+            WindowFrameKind::Trailing { .. } => "trailing",
+            WindowFrameKind::Leading { .. } => "leading",
+            WindowFrameKind::Centered { .. } => "centered",
+        }
+    }
+
+    pub fn rows(self) -> Option<usize> {
+        match self {
+            WindowFrameKind::WholePartition
+            | WindowFrameKind::Running
+            | WindowFrameKind::Remaining => None,
+            WindowFrameKind::Trailing { rows }
+            | WindowFrameKind::Leading { rows }
+            | WindowFrameKind::Centered { rows } => Some(rows),
         }
     }
 }
+
+pub const WINDOW_FRAME_NAMES: [&str; 6] = [
+    "whole_partition",
+    "running",
+    "remaining",
+    "trailing",
+    "leading",
+    "centered",
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
@@ -1581,17 +1602,17 @@ impl<'a> Parser<'a> {
                 }
                 seen_order = true;
                 order_by = self.parse_window_order_items()?;
-            } else if self.consume_ident("rows") {
-                let rows_span = self.previous_span();
+            } else if self.consume_ident("frame") {
+                let frame_span = self.previous_span();
                 if seen_frame {
                     self.diagnostics.push(Diagnostic::error(
                         codes::E1205,
-                        "duplicate window option `rows`",
-                        rows_span,
+                        "duplicate window option `frame`",
+                        frame_span,
                     ));
                 }
                 seen_frame = true;
-                frame = self.parse_window_frame(rows_span);
+                frame = self.parse_window_frame(frame_span);
             } else {
                 self.diagnostics.push(Diagnostic::error(
                     codes::E1204,
@@ -1670,9 +1691,7 @@ impl<'a> Parser<'a> {
                 *item_end = token.span.end;
                 SortDirection::Asc
             }
-            TokenKind::Ident(value)
-                if value.starts_with("nulls") || value == "rows" || value == "between" =>
-            {
+            TokenKind::Ident(value) if value.starts_with("nulls") || value == "frame" => {
                 SortDirection::Asc
             }
             _ => SortDirection::Asc,
@@ -1708,84 +1727,93 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_window_frame(&mut self, rows_span: Span) -> Option<WindowFrame> {
-        if !self.consume_ident("between") {
+    fn parse_window_frame(&mut self, frame_span: Span) -> Option<WindowFrame> {
+        let token = self.current().clone();
+        let TokenKind::Ident(name) = token.kind else {
             self.diagnostics.push(Diagnostic::error(
-                codes::E1203,
-                "window frame requires `between`",
-                self.current().span,
+                codes::E1230,
+                format!(
+                    "window frame requires a frame name; expected one of {}",
+                    window_frame_name_list()
+                ),
+                token.span,
             ));
+            return None;
+        };
+        if !WINDOW_FRAME_NAMES.contains(&name.as_str()) {
+            let mut message = format!(
+                "unknown window frame name `{name}`; expected one of {}",
+                window_frame_name_list()
+            );
+            if let Some(suggestion) = closest_window_frame_name(&name) {
+                message.push_str(&format!("; did you mean `{suggestion}`?"));
+            }
+            self.diagnostics
+                .push(Diagnostic::error(codes::E1230, message, token.span));
+            return None;
         }
-        let start = self.parse_frame_bound()?;
-        if !self.consume_ident("and") {
-            self.diagnostics.push(Diagnostic::error(
-                codes::E1203,
-                "window frame requires `and`",
-                self.current().span,
-            ));
-        }
-        let end = self.parse_frame_bound()?;
-        let span = rows_span.join(end.span());
-        Some(WindowFrame { start, end, span })
+        self.advance();
+        let mut end_span = token.span;
+        let rows = self.parse_window_frame_rows(&name, token.span, &mut end_span);
+        let kind = match name.as_str() {
+            "whole_partition" => WindowFrameKind::WholePartition,
+            "running" => WindowFrameKind::Running,
+            "remaining" => WindowFrameKind::Remaining,
+            "trailing" => WindowFrameKind::Trailing { rows: rows? },
+            "leading" => WindowFrameKind::Leading { rows: rows? },
+            _ => WindowFrameKind::Centered { rows: rows? },
+        };
+        Some(WindowFrame {
+            kind,
+            span: frame_span.join(end_span),
+        })
     }
 
-    fn parse_frame_bound(&mut self) -> Option<FrameBound> {
-        let token = self.advance().clone();
-        match token.kind {
-            TokenKind::Ident(value) if value == "unbounded_preceding" => {
-                Some(FrameBound::UnboundedPreceding { span: token.span })
-            }
-            TokenKind::Ident(value) if value == "current_row" => {
-                Some(FrameBound::CurrentRow { span: token.span })
-            }
-            TokenKind::Ident(value) if value == "unbounded_following" => {
-                Some(FrameBound::UnboundedFollowing { span: token.span })
-            }
-            TokenKind::Number(raw) => {
-                let rows = match raw.parse::<usize>() {
-                    Ok(rows) => rows,
-                    Err(_) => {
-                        self.diagnostics.push(Diagnostic::error(
-                            codes::E1206,
-                            "window frame offset requires a non-negative integer",
-                            token.span,
-                        ));
-                        0
-                    }
-                };
-                let direction = self.advance().clone();
-                match direction.kind {
-                    TokenKind::Ident(value) if value == "preceding" => {
-                        Some(FrameBound::Preceding {
-                            rows,
-                            span: token.span.join(direction.span),
-                        })
-                    }
-                    TokenKind::Ident(value) if value == "following" => {
-                        Some(FrameBound::Following {
-                            rows,
-                            span: token.span.join(direction.span),
-                        })
-                    }
-                    _ => {
-                        self.diagnostics.push(Diagnostic::error(
-                            codes::E1210,
-                            "window frame offset requires `preceding` or `following`",
-                            direction.span,
-                        ));
-                        Some(FrameBound::CurrentRow {
-                            span: token.span.join(direction.span),
-                        })
-                    }
-                }
-            }
-            _ => {
+    /// Parses the optional integer argument after a frame name and enforces
+    /// arity: `trailing` / `leading` / `centered` require it (`E1231`),
+    /// `whole_partition` / `running` / `remaining` reject it (`E1232`).
+    fn parse_window_frame_rows(
+        &mut self,
+        name: &str,
+        name_span: Span,
+        end_span: &mut Span,
+    ) -> Option<usize> {
+        let takes_rows = matches!(name, "trailing" | "leading" | "centered");
+        let token = self.current().clone();
+        let TokenKind::Number(raw) = token.kind else {
+            if takes_rows {
                 self.diagnostics.push(Diagnostic::error(
-                    codes::E1203,
-                    "window frame requires a frame bound",
+                    codes::E1231,
+                    format!(
+                        "window frame `{name}` requires an integer row count (`frame {name} N`)"
+                    ),
+                    name_span,
+                ));
+                return None;
+            }
+            return Some(0);
+        };
+        if !takes_rows {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E1232,
+                format!("window frame `{name}` does not take an argument"),
+                token.span,
+            ));
+            self.advance();
+            *end_span = token.span;
+            return Some(0);
+        }
+        self.advance();
+        *end_span = token.span;
+        match raw.parse::<usize>() {
+            Ok(rows) => Some(rows),
+            Err(_) => {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E1206,
+                    "window frame row count requires a non-negative integer",
                     token.span,
                 ));
-                None
+                Some(0)
             }
         }
     }
@@ -2268,7 +2296,7 @@ impl<'a> Parser<'a> {
         matches!(
             self.current().kind,
             TokenKind::Comma | TokenKind::RParen | TokenKind::Pipe | TokenKind::Eof
-        ) || self.at_ident("rows")
+        ) || self.at_ident("frame")
     }
 
     fn at_recoverable_stage_start(&self) -> bool {
@@ -2395,13 +2423,13 @@ fn is_reserved_keyword(value: &str) -> bool {
             | "over"
             | "partition_by"
             | "order_by"
-            | "rows"
-            | "between"
-            | "unbounded_preceding"
-            | "current_row"
-            | "unbounded_following"
-            | "preceding"
-            | "following"
+            | "frame"
+            | "whole_partition"
+            | "running"
+            | "remaining"
+            | "trailing"
+            | "leading"
+            | "centered"
             | "stdin"
             | "stdout"
             | "true"
@@ -2421,6 +2449,41 @@ fn format_column_reference(value: &str) -> String {
     }
     let escaped = value.replace('\\', "\\\\").replace('`', "\\`");
     format!("`{escaped}`")
+}
+
+fn window_frame_name_list() -> String {
+    WINDOW_FRAME_NAMES
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn closest_window_frame_name(name: &str) -> Option<&'static str> {
+    WINDOW_FRAME_NAMES
+        .iter()
+        .map(|candidate| (levenshtein_distance(name, candidate), *candidate))
+        .min()
+        .filter(|(distance, _)| *distance <= 3)
+        .map(|(_, candidate)| candidate)
+}
+
+fn levenshtein_distance(left: &str, right: &str) -> usize {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+    for (row, left_ch) in left.iter().enumerate() {
+        current[0] = row + 1;
+        for (column, right_ch) in right.iter().enumerate() {
+            let substitution = previous[column] + usize::from(left_ch != right_ch);
+            current[column + 1] = substitution
+                .min(previous[column + 1] + 1)
+                .min(current[column] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
 }
 
 fn is_simple_column_name(value: &str) -> bool {
@@ -2596,7 +2659,7 @@ cleaned
     fn parses_window_expressions() {
         let result = parse(
             r#"load "orders.csv"
-  | mutate running_amount = sum(amount) over (partition_by customer_id order_by order_date asc rows between unbounded_preceding and current_row), rank = dense_rank() over (partition_by region order_by amount desc nulls_last)"#,
+  | mutate running_amount = sum(amount) over (partition_by customer_id order_by order_date asc frame running), rank = dense_rank() over (partition_by region order_by amount desc nulls_last)"#,
         );
 
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
@@ -2610,10 +2673,110 @@ cleaned
         assert_eq!(function.value, "sum");
         assert_eq!(spec.partition_by[0].value, "customer_id");
         assert_eq!(spec.order_by[0].column.value, "order_date");
-        assert!(matches!(
-            spec.frame.as_ref().map(|frame| &frame.end),
-            Some(FrameBound::CurrentRow { .. })
-        ));
+        assert_eq!(
+            spec.frame.as_ref().map(|frame| frame.kind),
+            Some(WindowFrameKind::Running)
+        );
+    }
+
+    fn parse_window_frame_kind(frame: &str) -> WindowFrameKind {
+        let source = format!(
+            r#"load "orders.csv"
+  | mutate value = sum(amount) over (partition_by region order_by amount {frame})"#
+        );
+        let result = parse(&source);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let main = result.program.main.expect("main pipeline");
+        let Stage::Mutate { items, .. } = &main.stages[0] else {
+            panic!("mutate stage");
+        };
+        let Expr::Window { spec, .. } = &items[0].expr else {
+            panic!("window expression");
+        };
+        spec.frame.as_ref().expect("window frame").kind
+    }
+
+    fn parse_window_frame_diagnostics(frame: &str) -> Vec<Diagnostic> {
+        let source = format!(
+            r#"load "orders.csv"
+  | mutate value = sum(amount) over (partition_by region order_by amount {frame})"#
+        );
+        parse(&source).diagnostics
+    }
+
+    #[test]
+    fn parses_window_frame_named_forms() {
+        assert_eq!(
+            parse_window_frame_kind("frame whole_partition"),
+            WindowFrameKind::WholePartition
+        );
+        assert_eq!(
+            parse_window_frame_kind("frame running"),
+            WindowFrameKind::Running
+        );
+        assert_eq!(
+            parse_window_frame_kind("frame remaining"),
+            WindowFrameKind::Remaining
+        );
+        assert_eq!(
+            parse_window_frame_kind("frame trailing 3"),
+            WindowFrameKind::Trailing { rows: 3 }
+        );
+        assert_eq!(
+            parse_window_frame_kind("frame leading 2"),
+            WindowFrameKind::Leading { rows: 2 }
+        );
+        assert_eq!(
+            parse_window_frame_kind("frame centered 1"),
+            WindowFrameKind::Centered { rows: 1 }
+        );
+        assert_eq!(
+            parse_window_frame_kind("frame trailing 0"),
+            WindowFrameKind::Trailing { rows: 0 }
+        );
+    }
+
+    #[test]
+    fn window_frame_named_unknown_name_suggests_closest() {
+        let diagnostics = parse_window_frame_diagnostics("frame trialing 3");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == codes::E1230
+                    && diagnostic.message.contains("did you mean `trailing`?")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn window_frame_named_missing_argument_is_rejected() {
+        let diagnostics = parse_window_frame_diagnostics("frame trailing");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == codes::E1231),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn window_frame_named_unexpected_argument_is_rejected() {
+        let diagnostics = parse_window_frame_diagnostics("frame running 3");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == codes::E1232),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn window_frame_named_legacy_syntax_is_a_parse_error() {
+        // Composed at runtime so the repository-wide legacy-syntax grep
+        // guard does not match this deliberate negative fixture.
+        let legacy = ["rows", "between unbounded_preceding and current_row"].join(" ");
+        let diagnostics = parse_window_frame_diagnostics(&legacy);
+        assert!(!diagnostics.is_empty());
     }
 
     #[test]
