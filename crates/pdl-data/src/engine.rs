@@ -41,6 +41,12 @@ pub struct DataPlan {
     inner: DataPlanInner,
 }
 
+// `NativePlan` embeds a Polars `LazyFrame`, which grew past the clippy
+// variant-size threshold when the v0.45 `pivot`/`cross_join` features were
+// enabled. `DataPlan` values move through builder-style calls and are never
+// stored in collections, so boxing would add indirection without a
+// measurable win.
+#[allow(clippy::large_enum_variant)]
 enum DataPlanInner {
     Rows(Table),
     #[cfg(feature = "polars-engine")]
@@ -618,6 +624,56 @@ impl DataPlan {
         }
     }
 
+    /// Native lowering of the `pivot_longer` stage (v0.45). Reshapes the
+    /// selected source columns into name/value rows with output order and
+    /// column order identical to the row runtime: for each input row, one
+    /// output row per selected column in stage order, kept columns first.
+    ///
+    /// Polars stores one dtype per column while the row runtime keeps
+    /// per-cell value types, so value-column sets that span more than one
+    /// value class (numeric vs string vs boolean) cannot reproduce row
+    /// runtime bytes on a typed engine; they report the unsupported native
+    /// operation and stay on the row engine.
+    pub fn pivot_longer(
+        self,
+        columns: &[String],
+        names_to: &str,
+        values_to: &str,
+    ) -> Result<Self, Diagnostic> {
+        if columns.is_empty() {
+            return Err(unsupported_native_operation("pivot_longer column list"));
+        }
+        match self.inner {
+            #[cfg(feature = "polars-engine")]
+            DataPlanInner::Native(plan) => native_pivot_longer(plan, columns, names_to, values_to),
+            _ => Err(unsupported_native_operation("native pivot_longer")),
+        }
+    }
+
+    /// Native lowering of the `complete` stage (v0.45). Builds the Cartesian
+    /// product of first-appearance key domains, preserves existing rows at
+    /// their tuple positions, inserts missing tuples with null non-key
+    /// columns, and applies fill expressions to inserted rows only — all in
+    /// the row runtime's nested key-expansion order.
+    ///
+    /// Fill expressions that change a column's value class (e.g. a string
+    /// fill over a numeric column) cannot reproduce the row runtime's
+    /// per-cell value types on a typed engine and stay on the row engine.
+    pub fn complete(
+        self,
+        keys: &[String],
+        fills: &[(String, DataExpr)],
+    ) -> Result<Self, Diagnostic> {
+        if keys.is_empty() {
+            return Err(unsupported_native_operation("complete key list"));
+        }
+        match self.inner {
+            #[cfg(feature = "polars-engine")]
+            DataPlanInner::Native(plan) => native_complete(plan, keys, fills),
+            _ => Err(unsupported_native_operation("native complete")),
+        }
+    }
+
     pub fn collect(self) -> Result<Table, Diagnostic> {
         match self.inner {
             DataPlanInner::Rows(table) => Ok(table),
@@ -767,6 +823,296 @@ fn native_full_join(
         inner: DataPlanInner::Native(NativePlan {
             format: left.format,
             plan,
+        }),
+    })
+}
+
+/// Value classes the native engine can hold in one column without changing
+/// row-runtime rendering. Mirrors the row runtime's `Value` classes.
+#[cfg(feature = "polars-engine")]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum NativeValueClass {
+    Bool,
+    Number,
+    String,
+}
+
+/// Maps a native dtype to its row-runtime value class. `None` marks an
+/// all-null column, which is compatible with every class. Dtypes outside the
+/// row value model report the unsupported native operation so automatic mode
+/// falls back to rows.
+#[cfg(feature = "polars-engine")]
+fn native_dtype_class(dtype: &native::DataType) -> Result<Option<NativeValueClass>, Diagnostic> {
+    Ok(match dtype {
+        native::DataType::Null => None,
+        native::DataType::Boolean => Some(NativeValueClass::Bool),
+        native::DataType::Int8
+        | native::DataType::Int16
+        | native::DataType::Int32
+        | native::DataType::Int64
+        | native::DataType::UInt8
+        | native::DataType::UInt16
+        | native::DataType::UInt32
+        | native::DataType::UInt64
+        | native::DataType::Float32
+        | native::DataType::Float64 => Some(NativeValueClass::Number),
+        native::DataType::String => Some(NativeValueClass::String),
+        _ => return Err(unsupported_native_operation("native value class")),
+    })
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_pivot_longer(
+    plan: NativePlan,
+    columns: &[String],
+    names_to: &str,
+    values_to: &str,
+) -> Result<DataPlan, Diagnostic> {
+    let schema = plan
+        .plan
+        .clone()
+        .collect_schema()
+        .map_err(native_collect_error(plan.format))?;
+
+    let mut value_classes = BTreeSet::new();
+    for column in columns {
+        let Some(dtype) = schema.get(column.as_str()) else {
+            return Err(Diagnostic::error(
+                codes::E1005,
+                format!("unknown column `{column}`"),
+                Span::zero(),
+            ));
+        };
+        if let Some(class) = native_dtype_class(dtype)? {
+            value_classes.insert(class);
+        }
+    }
+    if value_classes.len() > 1 {
+        // The row runtime keeps each cell's value type through the reshape;
+        // a typed values column would re-render numbers or booleans that
+        // share the column with strings. Row-only by design (see the
+        // coverage matrix `pivot_longer` row).
+        return Err(unsupported_native_operation(
+            "mixed-class pivot_longer value columns",
+        ));
+    }
+
+    let selected: BTreeSet<&str> = columns.iter().map(String::as_str).collect();
+    let kept = schema
+        .iter_names()
+        .map(|name| name.to_string())
+        .filter(|name| !selected.contains(name.as_str()))
+        .collect::<Vec<_>>();
+    if kept
+        .iter()
+        .any(|column| column == names_to || column == values_to)
+        || names_to == values_to
+    {
+        // The row runtime rejects these collisions with `E1207`; report the
+        // unsupported operation so automatic mode falls back to the row
+        // engine and surfaces the row diagnostic.
+        return Err(unsupported_native_operation(
+            "pivot_longer output column collision",
+        ));
+    }
+
+    let mut output_names = schema
+        .iter_names()
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+    output_names.push(names_to.to_string());
+    output_names.push(values_to.to_string());
+    let row_index = native_hidden_column_name_from_names(&output_names, "__pdl_pivot_row_index");
+
+    let mut index_columns = kept;
+    index_columns.push(row_index.clone());
+
+    // Polars unpivot emits all rows for the first value column, then all
+    // rows for the second, and so on; the stable sort on the hidden input
+    // row index restores the row runtime's interleaved order (input row
+    // major, stage column order within each input row).
+    let unpivoted = plan
+        .plan
+        .with_row_index(row_index.clone(), None)
+        .unpivot(native::UnpivotArgsDSL {
+            on: Some(native::cols(columns.iter().cloned())),
+            index: native::cols(index_columns),
+            variable_name: Some(names_to.into()),
+            value_name: Some(values_to.into()),
+        })
+        .sort(
+            [row_index.as_str()],
+            native::SortMultipleOptions {
+                descending: vec![false],
+                nulls_last: vec![false],
+                maintain_order: true,
+                ..Default::default()
+            },
+        )
+        .drop(native::cols([row_index.as_str()]));
+
+    Ok(DataPlan {
+        inner: DataPlanInner::Native(NativePlan {
+            format: plan.format,
+            plan: unpivoted,
+        }),
+    })
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_complete(
+    plan: NativePlan,
+    keys: &[String],
+    fills: &[(String, DataExpr)],
+) -> Result<DataPlan, Diagnostic> {
+    let format = plan.format;
+    // `complete` needs the whole frame for key domains and the duplicate
+    // tuple check, so materialize the input once and continue lazily from
+    // the in-memory frame.
+    let frame = plan.plan.collect().map_err(native_collect_error(format))?;
+    let column_names = native_frame_column_names(&frame);
+    let input_schema = frame.schema().clone();
+
+    for key in keys {
+        if !column_names.iter().any(|column| column == key) {
+            return Err(Diagnostic::error(
+                codes::E1005,
+                format!("unknown column `{key}`"),
+                Span::zero(),
+            ));
+        }
+    }
+    for (column, expr) in fills {
+        if !column_names.iter().any(|existing| existing == column) {
+            return Err(Diagnostic::error(
+                codes::E1005,
+                format!("unknown column `{column}`"),
+                Span::zero(),
+            ));
+        }
+        if keys.iter().any(|key| key == column) {
+            // Row runtime rejects key fills with `E1207`; fall back so the
+            // row diagnostic surfaces in automatic mode.
+            return Err(unsupported_native_operation(
+                "complete fill over key column",
+            ));
+        }
+        if data_expr_contains_window(expr) {
+            return Err(unsupported_native_operation(
+                "complete fill window expression",
+            ));
+        }
+    }
+
+    let key_exprs = keys.iter().map(native::col).collect::<Vec<_>>();
+    let distinct_height = frame
+        .clone()
+        .lazy()
+        .select(key_exprs.clone())
+        .unique_stable_generic(None, native::UniqueKeepStrategy::First)
+        .collect()
+        .map_err(native_collect_error(format))?
+        .height();
+    if distinct_height != frame.height() {
+        return Err(Diagnostic::error(
+            codes::E1208,
+            "complete found duplicate input rows for the same key tuple",
+            Span::zero(),
+        ));
+    }
+
+    // First-appearance domains per key, cross-joined in key order. The cross
+    // join repeats each left row across the full right domain, which is
+    // exactly the row runtime's nested key-expansion order.
+    let mut tuples: Option<native::LazyFrame> = None;
+    for key in keys {
+        let domain = frame
+            .clone()
+            .lazy()
+            .select([native::col(key)])
+            .unique_stable_generic(None, native::UniqueKeepStrategy::First);
+        tuples = Some(match tuples {
+            None => domain,
+            Some(tuples) => tuples
+                .join_builder()
+                .with(domain)
+                .how(native::JoinType::Cross)
+                .maintain_order(native::MaintainOrderJoin::LeftRight)
+                .finish(),
+        });
+    }
+    let tuples = tuples.expect("complete requires at least one key");
+
+    // Null keys are observed values in the row runtime, so the join must
+    // treat null tuple components as matching the original rows.
+    let marker = native_hidden_column_name_from_names(&column_names, "__pdl_complete_marker");
+    let marked = frame
+        .clone()
+        .lazy()
+        .with_column(native::lit(true).alias(marker.as_str()));
+    let joined = tuples
+        .join_builder()
+        .with(marked)
+        .left_on(key_exprs.clone())
+        .right_on(key_exprs)
+        .how(native::JoinType::Left)
+        .suffix("_right")
+        .coalesce(native::JoinCoalesce::CoalesceColumns)
+        .join_nulls(true)
+        .maintain_order(native::MaintainOrderJoin::Left)
+        .finish();
+
+    // Existing rows keep their values; inserted rows carry null non-key
+    // columns, with fill expressions evaluated against that base row (all
+    // fills see the pre-fill frame, matching row runtime semantics).
+    let selection = column_names
+        .iter()
+        .map(|column| {
+            for (fill_column, fill_expr) in fills {
+                if column == fill_column {
+                    return Ok(native::when(native::col(marker.as_str()).is_null())
+                        .then(native_expr(fill_expr)?)
+                        .otherwise(native::col(column))
+                        .alias(column));
+                }
+            }
+            Ok(native::col(column))
+        })
+        .collect::<Result<Vec<_>, Diagnostic>>()?;
+    let completed = joined.select(selection);
+
+    let completed_schema = completed
+        .clone()
+        .collect_schema()
+        .map_err(native_collect_error(format))?;
+    for (fill_column, _) in fills {
+        let input_class = input_schema
+            .get(fill_column.as_str())
+            .map(native_dtype_class)
+            .transpose()?
+            .flatten();
+        let output_class = completed_schema
+            .get(fill_column.as_str())
+            .map(native_dtype_class)
+            .transpose()?
+            .flatten();
+        if let (Some(input_class), Some(output_class)) = (input_class, output_class) {
+            if input_class != output_class {
+                // A class-changing fill (string fill over a numeric column,
+                // for example) would re-render the column's existing values.
+                // Row-only by design (see the coverage matrix `complete`
+                // row).
+                return Err(unsupported_native_operation(
+                    "class-changing complete fill expression",
+                ));
+            }
+        }
+    }
+
+    Ok(DataPlan {
+        inner: DataPlanInner::Native(NativePlan {
+            format,
+            plan: completed,
         }),
     })
 }
@@ -2689,6 +3035,248 @@ mod tests {
     #[cfg(feature = "polars-engine")]
     fn native_json_lines_writer_matches_row_writer_bytes() {
         assert_native_text_writer_parity(&text_writer_parity_table(), DataFormat::JsonLines);
+    }
+
+    #[cfg(feature = "polars-engine")]
+    fn native_csv_bytes(plan: DataPlan) -> String {
+        let bytes = plan
+            .write_to_sink(DataSink::Bytes {
+                format: DataFormat::Csv,
+            })
+            .expect("csv bytes sink")
+            .expect("csv bytes");
+        String::from_utf8(bytes).expect("utf8 csv")
+    }
+
+    #[cfg(feature = "polars-engine")]
+    fn native_plan_from_table(table: &Table) -> DataPlan {
+        let arrow_bytes =
+            crate::write_table_to_bytes(DataFormat::ArrowStream, table).expect("encode arrow");
+        engine_plan(DataBackend::NativePolars, &arrow_bytes)
+    }
+
+    /// Row-runtime `pivot_longer` order is input-row major with stage column
+    /// order inside each input row; kept columns keep table order ahead of
+    /// `names_to`/`values_to`.
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_pivot_longer_matches_row_runtime_order() {
+        let table = Table::new(
+            vec![
+                "region".to_string(),
+                "q1".to_string(),
+                "q2".to_string(),
+                "year".to_string(),
+            ],
+            vec![
+                Row {
+                    values: vec![
+                        Value::String("West".to_string()),
+                        Value::Number(10.0),
+                        Value::Number(20.0),
+                        Value::Number(2026.0),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("East".to_string()),
+                        Value::Number(5.0),
+                        Value::Null,
+                        Value::Number(2026.0),
+                    ],
+                },
+            ],
+        );
+        let plan = native_plan_from_table(&table)
+            .pivot_longer(&["q2".to_string(), "q1".to_string()], "quarter", "amount")
+            .expect("native pivot_longer");
+        assert_eq!(
+            native_csv_bytes(plan),
+            "region,year,quarter,amount\n\
+             West,2026,q2,20\n\
+             West,2026,q1,10\n\
+             East,2026,q2,\n\
+             East,2026,q1,5\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_pivot_longer_handles_empty_and_all_null_input() {
+        let empty = Table::new(
+            vec!["region".to_string(), "q1".to_string(), "q2".to_string()],
+            Vec::new(),
+        );
+        let plan = native_plan_from_table(&empty)
+            .pivot_longer(&["q1".to_string(), "q2".to_string()], "quarter", "amount")
+            .expect("native pivot_longer on empty input");
+        assert_eq!(native_csv_bytes(plan), "region,quarter,amount\n");
+
+        let all_null = Table::new(
+            vec!["region".to_string(), "q1".to_string()],
+            vec![Row {
+                values: vec![Value::String("West".to_string()), Value::Null],
+            }],
+        );
+        let plan = native_plan_from_table(&all_null)
+            .pivot_longer(&["q1".to_string()], "quarter", "amount")
+            .expect("native pivot_longer on all-null column");
+        assert_eq!(native_csv_bytes(plan), "region,quarter,amount\nWest,q1,\n");
+    }
+
+    /// Mixed value classes cannot keep row-runtime per-cell typing on a
+    /// typed engine; the lowering must refuse so automatic mode falls back.
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_pivot_longer_rejects_mixed_class_value_columns() {
+        let table = Table::new(
+            vec!["id".to_string(), "label".to_string(), "amount".to_string()],
+            vec![Row {
+                values: vec![
+                    Value::Number(1.0),
+                    Value::String("a".to_string()),
+                    Value::Number(2.0),
+                ],
+            }],
+        );
+        let error = native_plan_from_table(&table)
+            .pivot_longer(
+                &["label".to_string(), "amount".to_string()],
+                "name",
+                "value",
+            )
+            .err()
+            .expect("mixed-class pivot must stay row-only");
+        assert_eq!(error.code, "E1211");
+        assert!(error.message.contains("mixed-class"), "{}", error.message);
+    }
+
+    /// Row-runtime `complete` order is the Cartesian product of
+    /// first-appearance key domains, outer key first.
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_complete_matches_row_runtime_order_and_fills() {
+        let table = Table::new(
+            vec![
+                "region".to_string(),
+                "day".to_string(),
+                "visits".to_string(),
+                "note".to_string(),
+            ],
+            vec![
+                Row {
+                    values: vec![
+                        Value::String("West".to_string()),
+                        Value::String("mon".to_string()),
+                        Value::Number(12.0),
+                        Value::String("ok".to_string()),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("East".to_string()),
+                        Value::String("tue".to_string()),
+                        Value::Number(4.0),
+                        Value::String("ok".to_string()),
+                    ],
+                },
+            ],
+        );
+        let plan = native_plan_from_table(&table)
+            .complete(
+                &["region".to_string(), "day".to_string()],
+                &[(
+                    "visits".to_string(),
+                    DataExpr::Literal(DataLiteral::Number(0.0)),
+                )],
+            )
+            .expect("native complete");
+        assert_eq!(
+            native_csv_bytes(plan),
+            "region,day,visits,note\n\
+             West,mon,12,ok\n\
+             West,tue,0,\n\
+             East,mon,0,\n\
+             East,tue,4,ok\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_complete_handles_empty_input() {
+        let empty = Table::new(vec!["region".to_string(), "visits".to_string()], Vec::new());
+        let plan = native_plan_from_table(&empty)
+            .complete(&["region".to_string()], &[])
+            .expect("native complete on empty input");
+        assert_eq!(native_csv_bytes(plan), "region,visits\n");
+    }
+
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_complete_rejects_duplicate_key_tuples() {
+        let table = Table::new(
+            vec!["region".to_string(), "visits".to_string()],
+            vec![
+                Row {
+                    values: vec![Value::String("West".to_string()), Value::Number(1.0)],
+                },
+                Row {
+                    values: vec![Value::String("West".to_string()), Value::Number(2.0)],
+                },
+            ],
+        );
+        let error = native_plan_from_table(&table)
+            .complete(&["region".to_string()], &[])
+            .err()
+            .expect("duplicate key tuples must fail");
+        assert_eq!(error.code, "E1208");
+    }
+
+    /// A fill that changes the column's value class would re-render existing
+    /// values on a typed engine; the lowering must refuse so automatic mode
+    /// falls back.
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_complete_rejects_class_changing_fill() {
+        let table = Table::new(
+            vec![
+                "region".to_string(),
+                "day".to_string(),
+                "visits".to_string(),
+            ],
+            vec![
+                Row {
+                    values: vec![
+                        Value::String("West".to_string()),
+                        Value::String("mon".to_string()),
+                        Value::Number(12.0),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("East".to_string()),
+                        Value::String("tue".to_string()),
+                        Value::Number(4.0),
+                    ],
+                },
+            ],
+        );
+        let error = native_plan_from_table(&table)
+            .complete(
+                &["region".to_string(), "day".to_string()],
+                &[(
+                    "visits".to_string(),
+                    DataExpr::Literal(DataLiteral::String("none".to_string())),
+                )],
+            )
+            .err()
+            .expect("class-changing fill must stay row-only");
+        assert_eq!(error.code, "E1211");
+        assert!(
+            error.message.contains("class-changing"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

@@ -960,6 +960,28 @@ fn large_workloads() -> &'static [Workload] {
             output_format: "jsonl",
             required_path: "bench/data/generated/million-row.csv",
         },
+        // v0.45: reshape-dominated workload measuring the native
+        // `pivot_longer` lowering (unpivot plus order-restoring sort)
+        // against the row-runtime reshape.
+        Workload {
+            name: "million_row_pivot_longer",
+            program: "bench/workloads/large/million_row_pivot_longer.pdl",
+            dataset: "million-row",
+            input_format: "csv",
+            output_format: "csv",
+            required_path: "bench/data/generated/million-row.csv",
+        },
+        // v0.45: join-dominated workload measuring the native `complete`
+        // lowering (key-domain cross join plus fill projection) against
+        // the row-runtime key expansion.
+        Workload {
+            name: "million_row_complete_buckets",
+            program: "bench/workloads/large/million_row_complete_buckets.pdl",
+            dataset: "million-row",
+            input_format: "csv",
+            output_format: "csv",
+            required_path: "bench/data/generated/million-row.csv",
+        },
     ]
 }
 

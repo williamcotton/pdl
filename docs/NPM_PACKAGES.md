@@ -45,6 +45,12 @@ browser-visible behavior change. Browser package versions and consumer pins
 stay at the published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`; no `0.44.x`
 browser packages are prepared.
 
+The v0.45.0 `pivot_longer`/`complete` native promotion release is likewise a
+native Rust/CLI release with no browser-visible behavior change (npm
+re-checked June 10, 2026: latest published packages remain `pdl-wasm@0.43.5`
+and `pdl-editor@0.43.6`). Browser package versions and consumer pins stay
+there; no `0.45.x` browser packages are prepared.
+
 ## Package Validation
 
 Use packed mode for package-surface validation before publishing:

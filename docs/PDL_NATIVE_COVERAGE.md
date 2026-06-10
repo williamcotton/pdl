@@ -1,6 +1,6 @@
 # PDL Native Coverage Matrix
 
-Status: v0.44.0 source of truth
+Status: v0.45.0 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
 This matrix records what the native execution strategy may claim in v0.40. The
@@ -35,8 +35,8 @@ boundary changes status, update the CSV and the tests in the same change.
 | `distinct` | native parity | Stable first-row distinct. |
 | `join` | native partial | Native covers path-backed main inputs joined to native-safe binding inputs for `inner`/`left`/`right`/`full`/`semi`/`anti` single-key and composite-key equi-joins; non-equi joins stay row-only by design. |
 | `union` | native partial | Native covers compatible-schema binding inputs by name or position with optional `distinct`; incompatible schemas, language-level null padding, and browser byte boundaries stay row-only. |
-| `pivot_longer` | row-only by design | Row runtime preserves deterministic long output and mixed value behavior. |
-| `complete` | row-only by design | Row runtime preserves key expansion and fill expression semantics. |
+| `pivot_longer` | native partial | Class-homogeneous value columns lower to native unpivot with row-identical interleaved output order (v0.45). Mixed-class value column sets stay row-only by design: the typed engine cannot keep the row runtime's per-cell value types, so automatic mode demotes at lowering time with byte-identical row output. |
+| `complete` | native partial | First-appearance key expansion lowers to a native cross join, null-matching left join, and fill projection with row-identical order (v0.45). Class-changing fills and window-bearing fills stay row-only by design; duplicate key tuples report `E1208` on both engines. |
 | `save` | native partial | Terminal saves use native direct writers for every format since v0.44; non-terminal save fan-out stays row-only (v0.48). |
 
 ## Expression Coverage

@@ -1094,7 +1094,12 @@ mod tests {
     }
 
     #[test]
-    fn auto_engine_falls_back_to_rows_for_unsupported_native_stage() {
+    fn auto_engine_falls_back_to_rows_for_mixed_class_pivot_longer() {
+        // `pivot_longer` is natively eligible since v0.45, but mixed-class
+        // value columns (string `region` plus numeric `amount`) cannot keep
+        // row-runtime per-cell typing on the typed native engine, so the
+        // lowering refuses at execution time and automatic mode demotes to
+        // rows with byte-identical output.
         let workspace = temp_workspace("native-fallback");
         fs::write(
             workspace.join("sales.csv"),
@@ -1106,9 +1111,7 @@ mod tests {
         let prepared = prepare_source_with_io(
             &program_path,
             r#"load "sales.csv"
-  | pivot_longer amount names_to metric values_to value
-  | select region, metric, value
-  | sort region"#,
+  | pivot_longer region, amount names_to metric values_to value"#,
             &io,
         );
 
@@ -1127,7 +1130,7 @@ mod tests {
         assert_eq!(auto.backend, DataBackend::PortableRows);
         assert_eq!(
             String::from_utf8(auto.stdout.expect("csv stdout")).expect("utf8 csv"),
-            "region,metric,value\nEast,amount,10\nWest,amount,30\n"
+            "metric,value\nregion,West\namount,30\nregion,East\namount,10\n"
         );
 
         let forced = run_prepared_with_io_and_context_and_engine(
@@ -1156,10 +1159,12 @@ mod tests {
         fs::write(workspace.join("sales.csv"), "amount\n10\n").expect("write csv");
         let program_path = workspace.join("main.pdl");
         let io = OsDriverIo;
+        // Bounded window frames stay row-only by design; the eligibility
+        // check must reject them before any native scan opens.
         let prepared = prepare_source_with_io(
             &program_path,
             r#"load "sales.csv"
-  | pivot_longer amount names_to metric values_to value"#,
+  | mutate trailing_total = sum(amount) over (order_by amount frame trailing 1)"#,
             &io,
         );
         let plan = plan_prepared(
@@ -1178,7 +1183,11 @@ mod tests {
             .expect_err("unsupported native pipeline");
 
         assert_eq!(diagnostic.code, "E1211");
-        assert!(diagnostic.message.contains("pipeline stage"));
+        assert!(
+            diagnostic.message.contains("frame trailing"),
+            "{}",
+            diagnostic.message
+        );
         fs::remove_dir_all(workspace).expect("clean temp workspace");
     }
 
@@ -1279,6 +1288,291 @@ mod tests {
                 row_csv,
                 "region,score,label\nEast,11,standard\nNorth,,\nWest,60,West:high\n"
             );
+        }
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    /// v0.45 `pivot_longer` promotion: single-id, multi-id, and empty-input
+    /// pivots run natively across path-backed formats with bytes identical
+    /// to the row engine. All-null value columns are asserted via automatic
+    /// mode because scan inference may type them as string on some formats,
+    /// in which case the mixed-class guard demotes to rows with identical
+    /// bytes.
+    #[test]
+    fn native_engine_pivot_longer_matches_rows_for_path_formats() {
+        let workspace = temp_workspace("native-pivot-longer");
+        let table = Table::new(
+            vec![
+                "region".to_string(),
+                "segment".to_string(),
+                "q1".to_string(),
+                "q2".to_string(),
+                "q3".to_string(),
+            ],
+            vec![
+                Row {
+                    values: vec![
+                        Value::String("West".to_string()),
+                        Value::String("retail".to_string()),
+                        Value::Number(10.0),
+                        Value::Number(20.5),
+                        Value::Null,
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("East".to_string()),
+                        Value::String("b2b".to_string()),
+                        Value::Number(5.0),
+                        Value::Null,
+                        Value::Null,
+                    ],
+                },
+            ],
+        );
+        for (path, format) in [
+            ("sales.csv", DataFormat::Csv),
+            ("sales.parquet", DataFormat::Parquet),
+            ("sales.arrow", DataFormat::ArrowStream),
+        ] {
+            pdl_data::write_table_to_path(&workspace.join(path), format, &table)
+                .expect("write fixture");
+        }
+
+        let multi_id = "pivot_longer q1, q2 names_to quarter values_to amount";
+        let single_id =
+            "drop segment, q3\n  | pivot_longer q2, q1 names_to quarter values_to amount";
+        let empty_input =
+            "filter region == \"nope\"\n  | pivot_longer q1, q2 names_to quarter values_to amount";
+        let all_null = "pivot_longer q3 names_to quarter values_to amount";
+
+        for (input, format_clause) in [
+            ("sales.csv", ""),
+            ("sales.parquet", ""),
+            ("sales.arrow", r#" format "arrow-stream""#),
+        ] {
+            for (label, stages, forced_native) in [
+                ("multi-id", multi_id, true),
+                ("single-id", single_id, true),
+                ("empty-input", empty_input, true),
+                ("all-null", all_null, false),
+            ] {
+                let io = OsDriverIo;
+                let prepared = prepare_source_with_io(
+                    workspace.join(format!("{input}.pdl")),
+                    format!("load \"{input}\"{format_clause}\n  | {stages}"),
+                    &io,
+                );
+                let options = RunOptions {
+                    stdout_format: Some("csv".to_string()),
+                    dry_run: false,
+                    allow_binary_stdout: true,
+                };
+                let row = run_prepared_with_io_and_context_and_engine(
+                    &prepared,
+                    options.clone(),
+                    &io,
+                    BTreeMap::new(),
+                    ExecutionEngine::Row,
+                );
+                let auto = run_prepared_with_io_and_context_and_engine(
+                    &prepared,
+                    options.clone(),
+                    &io,
+                    BTreeMap::new(),
+                    ExecutionEngine::Auto,
+                );
+                assert!(
+                    row.diagnostics.is_empty(),
+                    "{input} {label}: {:?}",
+                    row.diagnostics
+                );
+                assert!(
+                    auto.diagnostics.is_empty(),
+                    "{input} {label}: {:?}",
+                    auto.diagnostics
+                );
+                let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+                assert_eq!(
+                    String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+                    row_csv,
+                    "{input} {label}"
+                );
+                if forced_native {
+                    let native = run_prepared_with_io_and_context_and_engine(
+                        &prepared,
+                        options,
+                        &io,
+                        BTreeMap::new(),
+                        ExecutionEngine::Native,
+                    );
+                    assert!(
+                        native.diagnostics.is_empty(),
+                        "{input} {label}: {:?}",
+                        native.diagnostics
+                    );
+                    assert_eq!(auto.backend, DataBackend::NativePolars, "{input} {label}");
+                    assert_eq!(native.backend, DataBackend::NativePolars, "{input} {label}");
+                    assert_eq!(
+                        String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+                        row_csv,
+                        "{input} {label}"
+                    );
+                }
+                if label == "multi-id" {
+                    assert_eq!(
+                        row_csv,
+                        "region,segment,q3,quarter,amount\n\
+                         West,retail,,q1,10\n\
+                         West,retail,,q2,20.5\n\
+                         East,b2b,,q1,5\n\
+                         East,b2b,,q2,\n",
+                        "{input}"
+                    );
+                }
+                if label == "single-id" {
+                    assert_eq!(
+                        row_csv,
+                        "region,quarter,amount\n\
+                         West,q2,20.5\n\
+                         West,q1,10\n\
+                         East,q2,\n\
+                         East,q1,5\n",
+                        "{input}"
+                    );
+                }
+            }
+        }
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    /// v0.45 `complete` promotion: single-key, composite-key, explicit-fill,
+    /// and empty-input completions run natively across path-backed formats
+    /// with bytes identical to the row engine.
+    #[test]
+    fn native_engine_complete_matches_rows_for_path_formats() {
+        let workspace = temp_workspace("native-complete");
+        let table = Table::new(
+            vec![
+                "region".to_string(),
+                "day".to_string(),
+                "visits".to_string(),
+                "note".to_string(),
+            ],
+            vec![
+                Row {
+                    values: vec![
+                        Value::String("West".to_string()),
+                        Value::String("mon".to_string()),
+                        Value::Number(12.0),
+                        Value::String("ok".to_string()),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value::String("East".to_string()),
+                        Value::String("tue".to_string()),
+                        Value::Number(4.0),
+                        Value::Null,
+                    ],
+                },
+            ],
+        );
+        for (path, format) in [
+            ("visits.csv", DataFormat::Csv),
+            ("visits.parquet", DataFormat::Parquet),
+            ("visits.arrow", DataFormat::ArrowStream),
+        ] {
+            pdl_data::write_table_to_path(&workspace.join(path), format, &table)
+                .expect("write fixture");
+        }
+
+        let single_key = "complete region fill visits = 99";
+        let composite_key = "complete region, day fill visits = 0, note = \"missing\"";
+        let empty_input = "filter region == \"nope\"\n  | complete region, day fill visits = 0";
+
+        for (input, format_clause) in [
+            ("visits.csv", ""),
+            ("visits.parquet", ""),
+            ("visits.arrow", r#" format "arrow-stream""#),
+        ] {
+            for (label, stages) in [
+                ("single-key", single_key),
+                ("composite-key", composite_key),
+                ("empty-input", empty_input),
+            ] {
+                let io = OsDriverIo;
+                let prepared = prepare_source_with_io(
+                    workspace.join(format!("{input}.pdl")),
+                    format!("load \"{input}\"{format_clause}\n  | {stages}"),
+                    &io,
+                );
+                let options = RunOptions {
+                    stdout_format: Some("csv".to_string()),
+                    dry_run: false,
+                    allow_binary_stdout: true,
+                };
+                let row = run_prepared_with_io_and_context_and_engine(
+                    &prepared,
+                    options.clone(),
+                    &io,
+                    BTreeMap::new(),
+                    ExecutionEngine::Row,
+                );
+                let auto = run_prepared_with_io_and_context_and_engine(
+                    &prepared,
+                    options.clone(),
+                    &io,
+                    BTreeMap::new(),
+                    ExecutionEngine::Auto,
+                );
+                let native = run_prepared_with_io_and_context_and_engine(
+                    &prepared,
+                    options,
+                    &io,
+                    BTreeMap::new(),
+                    ExecutionEngine::Native,
+                );
+                assert!(
+                    row.diagnostics.is_empty(),
+                    "{input} {label}: {:?}",
+                    row.diagnostics
+                );
+                assert!(
+                    auto.diagnostics.is_empty(),
+                    "{input} {label}: {:?}",
+                    auto.diagnostics
+                );
+                assert!(
+                    native.diagnostics.is_empty(),
+                    "{input} {label}: {:?}",
+                    native.diagnostics
+                );
+                assert_eq!(auto.backend, DataBackend::NativePolars, "{input} {label}");
+                assert_eq!(native.backend, DataBackend::NativePolars, "{input} {label}");
+                let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+                assert_eq!(
+                    String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+                    row_csv,
+                    "{input} {label}"
+                );
+                assert_eq!(
+                    String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+                    row_csv,
+                    "{input} {label}"
+                );
+                if label == "composite-key" {
+                    assert_eq!(
+                        row_csv,
+                        "region,day,visits,note\n\
+                         West,mon,12,ok\n\
+                         West,tue,0,missing\n\
+                         East,mon,0,missing\n\
+                         East,tue,4,\n",
+                        "{input}"
+                    );
+                }
+            }
         }
         fs::remove_dir_all(workspace).expect("clean temp workspace");
     }

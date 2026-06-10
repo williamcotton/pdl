@@ -1,13 +1,27 @@
 # PDL Detailed Specification
 
-Status: Draft 0.44.0
+Status: Draft 0.45.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.44.0`, tracked in
-`docs/V0_44_PLAN.md`. Version 0.44.0 promotes the CSV and JSON Lines sink
+The current repository implementation line is `0.45.0`, tracked in
+`docs/V0_45_PLAN.md`. Version 0.45.0 promotes the `pivot_longer` and
+`complete` stages to native execution. Both stages are purely local
+lowerings: `pivot_longer` lowers to a native unpivot with a hidden
+row-index sort that reproduces the row runtime's interleaved output order,
+and `complete` lowers to first-appearance key domains, a cross join, a
+null-matching left join, and a fill projection in the row runtime's nested
+key-expansion order. Output bytes are byte-identical to the row runtime
+over the parity corpus. Subcases a typed engine cannot reproduce
+byte-for-byte stay row-only by design and demote automatically with
+row-identical output: mixed-class `pivot_longer` value column sets and
+class-changing `complete` fill expressions. The release adds no language
+surface, stages, functions, diagnostic codes, or formats.
+
+Version 0.44.0, tracked in
+`docs/V0_44_PLAN.md`, promotes the CSV and JSON Lines sink
 writers to native parity. Native execution writes CSV and NDJSON output
 through native direct writers that stream dataframe rows through the row
 writers' cell encoders, so emitted bytes stay byte-identical to the row
@@ -2801,9 +2815,28 @@ materialization on the native engine, and the planner reports
 `native-direct-writer` (saves) or `bytes-sink` (stdout payloads) for every
 format when the native engine is selected.
 
+Since version 0.45.0, the native engine executes the `pivot_longer` and
+`complete` stages. Native `pivot_longer` lowers to an unpivot guarded by a
+hidden input row index and a stable sort, so the output order is the row
+runtime's order: for each input row, one output row per selected column in
+stage order, with kept columns ahead of `names_to` and `values_to`. Native
+`complete` materializes the input once, rejects duplicate key tuples with
+`E1208`, builds first-appearance key domains with a stable distinct, expands
+them with an order-preserving cross join, attaches existing rows through a
+null-matching left join, and applies fill expressions to inserted rows only,
+evaluated against the pre-fill frame. Output bytes MUST be byte-identical to
+the row runtime for the promoted subset. Two subcases stay row-only by
+design because a typed column engine cannot keep the row runtime's per-cell
+value types: `pivot_longer` over value columns whose observed classes mix
+numbers, strings, or booleans, and `complete` fill expressions whose result
+class differs from the filled column's class. Both demote to rows at
+lowering time in automatic mode (with byte-identical output) and report
+`E1211` in forced native mode. Window-bearing `complete` fill expressions
+are also row-only; the row runtime rejects them at evaluation time.
+
 Unsupported aggregate functions, non-Arrow byte-backed input, non-Arrow stdin,
 binding starts, named outputs, multi-output execution, non-equi joins,
-incompatible-schema union extensions, `pivot_longer`, `complete`, JSON Lines
+incompatible-schema union extensions, JSON Lines
 input, unsupported bounded-frame windows,
 incompatible multi-key window order groups, data-dependent dynamic `col(...)`,
 uncertain coercions, and other unsupported expressions fall back to
@@ -3031,7 +3064,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.44.0` LSP implementation provides diagnostics,
+The current `0.45.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3438,6 +3471,11 @@ promotion changes no parser, runtime, editor-service, or WASM-visible
 behavior, so browser package versions and consumer pins stay at the
 published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`.
 
+Version 0.45.0 is likewise a native Rust/CLI release: the `pivot_longer`
+and `complete` stage promotions change no parser, editor-service, or
+WASM-visible behavior, so browser package versions and consumer pins stay
+at the published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3510,7 +3548,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.44.0"
+version = "0.45.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -5113,7 +5151,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.44.0.
+PDL source does not require an explicit version declaration in draft 0.45.0.
 
 The implementation SHOULD report supported language version.
 

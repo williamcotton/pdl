@@ -1,0 +1,2 @@
+load "daily_visits.csv"
+  | complete region, day fill visits = 0

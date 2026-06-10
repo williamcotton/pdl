@@ -177,9 +177,50 @@ pub(crate) fn check_native_pipeline_eligibility(
                     context,
                 )?;
             }
-            StageIr::PivotLonger { .. }
-            | StageIr::Complete { .. }
-            | StageIr::Unsupported { .. } => {
+            StageIr::PivotLonger {
+                columns,
+                names_to,
+                values_to,
+                span,
+            } => {
+                if columns.is_empty() {
+                    // The row runtime rejects the empty column list with
+                    // `E1203`; keep the pipeline on the row engine so the
+                    // row diagnostic surfaces.
+                    return Err(unsupported_native_pipeline(
+                        NativeUnsupportedReason::RowOnlyStage,
+                        "pivot_longer requires at least one source column",
+                    ));
+                }
+                resolve_native_column_names(columns, *span, context)?;
+                resolve_native_column_name(names_to, *span, context)?;
+                resolve_native_column_name(values_to, *span, context)?;
+            }
+            StageIr::Complete { keys, fills, span } => {
+                if keys.is_empty() {
+                    // Same as `pivot_longer`: the row runtime owns the
+                    // `E1203` diagnostic for an empty key list.
+                    return Err(unsupported_native_pipeline(
+                        NativeUnsupportedReason::RowOnlyStage,
+                        "complete requires at least one key column",
+                    ));
+                }
+                resolve_native_column_names(keys, *span, context)?;
+                for fill in fills {
+                    resolve_native_column_name(&fill.column, fill.span, context)?;
+                    if crate::planning::expr_ir_contains_window(&fill.expr) {
+                        // Fill expressions evaluate against the inserted base
+                        // row; window semantics over the completed frame have
+                        // no row-runtime counterpart.
+                        return Err(unsupported_native_pipeline(
+                            NativeUnsupportedReason::RowOnlyStage,
+                            "complete fill window expressions are row-only",
+                        ));
+                    }
+                    lower_data_expr(&fill.expr, context)?;
+                }
+            }
+            StageIr::Unsupported { .. } => {
                 return Err(unsupported_native_pipeline(
                     NativeUnsupportedReason::RowOnlyStage,
                     "pipeline stage is not supported by native execution",
@@ -256,6 +297,11 @@ pub(crate) fn check_native_save_eligibility(
     Ok(())
 }
 
+// `DataPlan` embeds the native engine's lazy plan, which grew past the
+// clippy variant-size threshold when the v0.45 reshape lowerings enabled
+// additional native engine features. These results are short-lived, moved
+// values; boxing would add indirection without a measurable win.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum NativePipelineResult {
     Plan(DataPlan),
     Completed { stdout: Option<Vec<u8>> },
@@ -440,9 +486,33 @@ pub(crate) fn execute_native_pipeline(
                 )?;
                 plan.union(right, *by_name, *distinct)?
             }
-            StageIr::PivotLonger { .. }
-            | StageIr::Complete { .. }
-            | StageIr::Unsupported { .. } => {
+            StageIr::PivotLonger {
+                columns,
+                names_to,
+                values_to,
+                span,
+            } => {
+                grouping = None;
+                let columns = resolve_native_column_names(columns, *span, context)?;
+                let names_to = resolve_native_column_name(names_to, *span, context)?;
+                let values_to = resolve_native_column_name(values_to, *span, context)?;
+                plan.pivot_longer(&columns, &names_to, &values_to)?
+            }
+            StageIr::Complete { keys, fills, span } => {
+                grouping = None;
+                let keys = resolve_native_column_names(keys, *span, context)?;
+                let fills = fills
+                    .iter()
+                    .map(|fill| {
+                        Ok((
+                            resolve_native_column_name(&fill.column, fill.span, context)?,
+                            lower_data_expr(&fill.expr, context)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
+                plan.complete(&keys, &fills)?
+            }
+            StageIr::Unsupported { .. } => {
                 return Err(unsupported_native_pipeline(
                     NativeUnsupportedReason::RowOnlyStage,
                     "pipeline stage is not supported by native execution",

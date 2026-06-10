@@ -12,8 +12,8 @@ stage,limit,native parity,row-preserving limit
 stage,distinct,native parity,stable first-row distinct
 stage,join,native partial,native covers path-backed main inputs joined to native-safe binding inputs for inner/left/right/full/semi/anti single-key and composite-key equi-joins; non-equi joins stay row-only by design
 stage,union,native partial,native covers compatible-schema binding inputs by name or position with optional distinct; incompatible schemas language-level null padding and browser byte boundaries stay row-only
-stage,pivot_longer,row-only by design,row runtime preserves deterministic long output and mixed value behavior
-stage,complete,row-only by design,row runtime preserves key expansion/fill expression semantics
+stage,pivot_longer,native partial,class-homogeneous value columns lower to native unpivot with row-identical interleaved output order (v0.45); mixed-class value column sets stay row-only by design because the typed engine cannot keep per-cell value types
+stage,complete,native partial,first-appearance key expansion lowers to native cross join + null-matching left join + fill projection with row-identical order (v0.45); class-changing fills and window-bearing fills stay row-only by design
 stage,save,native partial,terminal saves use native direct writers for every format since v0.44; non-terminal save fan-out stays row-only (v0.48)
 expression,literals,native parity,string numeric boolean and null literals lower natively
 expression,column references,native parity,static column references lower natively

@@ -696,12 +696,49 @@ fn native_pipeline_unsupported_reason(
                     return Some(reason);
                 }
             }
-            StageIr::PivotLonger { .. }
-            | StageIr::Complete { .. }
-            | StageIr::Unsupported { .. } => return Some(NativeUnsupportedReason::RowOnlyStage),
+            StageIr::PivotLonger { columns, .. } => {
+                // Promoted in v0.45. The empty column list stays on the row
+                // engine so the row runtime's `E1203` diagnostic surfaces.
+                if columns.is_empty() {
+                    return Some(NativeUnsupportedReason::RowOnlyStage);
+                }
+            }
+            StageIr::Complete { keys, fills, .. } => {
+                // Promoted in v0.45. Empty key lists and window-bearing fill
+                // expressions stay on the row engine by design.
+                if keys.is_empty() {
+                    return Some(NativeUnsupportedReason::RowOnlyStage);
+                }
+                for fill in fills {
+                    if expr_ir_contains_window(&fill.expr) {
+                        return Some(NativeUnsupportedReason::RowOnlyStage);
+                    }
+                    if let Some(reason) = native_expr_unsupported_reason(&fill.expr) {
+                        return Some(reason);
+                    }
+                }
+            }
+            StageIr::Unsupported { .. } => return Some(NativeUnsupportedReason::RowOnlyStage),
         }
     }
     None
+}
+
+pub(crate) fn expr_ir_contains_window(expr: &ExprIr) -> bool {
+    match expr {
+        ExprIr::Window { .. } => true,
+        ExprIr::Unary { expr, .. } => expr_ir_contains_window(expr),
+        ExprIr::Binary { left, right, .. } => {
+            expr_ir_contains_window(left) || expr_ir_contains_window(right)
+        }
+        ExprIr::Call { args, .. } => args.iter().any(expr_ir_contains_window),
+        ExprIr::Quoted { .. }
+        | ExprIr::Number { .. }
+        | ExprIr::Bool { .. }
+        | ExprIr::Null { .. }
+        | ExprIr::Ident { .. }
+        | ExprIr::Context { .. } => false,
+    }
 }
 
 fn native_load_unsupported_reason(
@@ -1492,10 +1529,13 @@ load "sales.csv"
     #[test]
     fn forced_native_plan_reports_unsupported_reason_without_selecting_rows() {
         let io = InMemoryDriverIo::default().with_schema("memory/sales.csv", ["region", "amount"]);
+        // Bounded window frames stay row-only by design (v0.45 promoted
+        // `pivot_longer`/`complete`, so they no longer serve as the
+        // row-only specimen here).
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "sales.csv"
-  | pivot_longer amount names_to metric values_to value"#,
+  | mutate trailing_total = sum(amount) over (order_by amount frame trailing 1)"#,
             &io,
         );
 
@@ -1515,7 +1555,7 @@ load "sales.csv"
         assert_eq!(plan.observability.eligible_engine, PlannedEngine::Row);
         assert_eq!(
             plan.observability.fallback_reason,
-            Some(NativeUnsupportedReason::RowOnlyStage)
+            Some(NativeUnsupportedReason::WindowExpression)
         );
     }
 

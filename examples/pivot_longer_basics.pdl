@@ -1,0 +1,2 @@
+load "monthly_sales.csv"
+  | pivot_longer jan, feb, mar names_to month values_to amount

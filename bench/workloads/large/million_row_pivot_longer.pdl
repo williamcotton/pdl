@@ -1,0 +1,5 @@
+load "../../data/generated/million-row.csv"
+  | pivot_longer score, latency_ms names_to metric values_to value
+  | group_by segment, metric
+  | agg row_count = count(), max_value = max(value)
+  | sort segment, metric

@@ -1,0 +1,5 @@
+load "../../data/generated/million-row.csv"
+  | complete row, segment fill score = 0
+  | group_by segment
+  | agg row_count = count()
+  | sort segment

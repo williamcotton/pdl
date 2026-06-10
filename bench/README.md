@@ -52,7 +52,10 @@ IPC stream form. The large suite also includes CSV partition files, a segment
 dimension table, composite-key join workloads, window-heavy rank, running,
 offset, value, and distribution workloads, and a writer-dominated
 `million_row_text_emission` workload (v0.44) that measures CSV and NDJSON
-emission row-vs-native.
+emission row-vs-native. v0.45 adds a reshape-dominated
+`million_row_pivot_longer` workload and a key-expansion-dominated
+`million_row_complete_buckets` workload that measure the native
+`pivot_longer` and `complete` lowerings row-vs-native.
 
 ## PDL-to-Algraf Arrow Smoke
 

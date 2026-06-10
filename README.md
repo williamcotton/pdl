@@ -19,7 +19,7 @@ Runnable examples live in [`examples/`](examples/).
 Live site: [`https://williamcotton.github.io/pdl/`](https://williamcotton.github.io/pdl/)
 Full demos: [`https://williamcotton.github.io/pdl/demos`](https://williamcotton.github.io/pdl/demos)
 
-## A tour in six pipelines
+## A tour in seven pipelines
 
 Each example below is a runnable file under [`examples/`](examples/). The tour
 starts with one table and one aggregation, then adds cleanup, joins, unions,
@@ -137,7 +137,24 @@ load "sales.csv"
         )
 ```
 
-## 6. Arrow streams: hand off typed tables
+## 6. Reshape: pivot_longer and complete
+
+`pivot_longer` reshapes wide value columns into name/value rows, and
+`complete` inserts missing key combinations with explicit fills. See
+[`examples/pivot_longer_basics.pdl`](examples/pivot_longer_basics.pdl) and
+[`examples/complete_keys.pdl`](examples/complete_keys.pdl).
+
+```pdl
+load "monthly_sales.csv"
+  | pivot_longer jan, feb, mar names_to month values_to amount
+```
+
+```pdl
+load "daily_visits.csv"
+  | complete region, day fill visits = 0
+```
+
+## 7. Arrow streams: hand off typed tables
 
 PDL can read and write Arrow IPC streams on stdin/stdout. That makes it useful
 as a preparation step before a renderer or another tabular tool.
@@ -224,8 +241,8 @@ pdl plan examples/top_regions.pdl --stdout-format csv
 so the cost of running natively (or not) is visible before you execute. Native
 coverage includes path-backed CSV/Parquet/Arrow IPC loads, single and
 composite-key equi-joins, grouped aggregates, window functions (`row_number`,
-`rank`, `lag`/`lead`, aggregate windows), and binary Parquet/Arrow output
-without a text round-trip.
+`rank`, `lag`/`lead`, aggregate windows), `pivot_longer` and `complete`
+reshapes, and binary Parquet/Arrow output without a text round-trip.
 
 ## Editor and browser support
 
