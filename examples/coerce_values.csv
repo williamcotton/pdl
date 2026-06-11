@@ -1,0 +1,5 @@
+id,raw,flag
+a, 42.5 , true 
+b,bad,false
+c,,maybe
+d,1.5e3,true

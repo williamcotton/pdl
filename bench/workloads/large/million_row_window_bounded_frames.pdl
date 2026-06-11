@@ -1,0 +1,25 @@
+load "../../data/generated/million-row.csv"
+  | mutate
+      trailing_score = sum(score) over (
+        partition_by segment
+        order_by row
+        frame trailing 12
+      ),
+      leading_latency = mean(latency_ms) over (
+        partition_by segment
+        order_by row
+        frame leading 12
+      ),
+      centered_count = count(score) over (
+        partition_by segment
+        order_by row
+        frame centered 6
+      ),
+      remaining_score = sum(score) over (
+        partition_by segment
+        order_by row
+        frame remaining
+      )
+  | filter row % 1000 == 0
+  | select row, segment, trailing_score, leading_latency, centered_count, remaining_score
+  | sort segment, row

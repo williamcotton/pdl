@@ -197,19 +197,34 @@ async function instantiateWasm(response: Response): Promise<WebAssembly.Instance
 }
 
 function wasmImports(): WebAssembly.Imports {
-  return {
-    __wbindgen_placeholder__: {
+  // wasm-bindgen hashes helper import names, so the suffix changes across
+  // builds even though every throw helper has the same callable shape.
+  const bindgenPlaceholder = new Proxy<WebAssembly.ModuleImports>(
+    {
       __wbindgen_object_drop_ref: () => undefined,
       __wbindgen_describe: () => undefined,
-      __wbg___wbindgen_throw_9c31b086c2b26051: (ptr: number, len: number) => {
-        throw new Error(`wasm-bindgen throw at ${ptr}:${len}`);
+    },
+    {
+      get(target, property, receiver) {
+        if (typeof property === "string" && property.startsWith("__wbg___wbindgen_throw_")) {
+          return wasmBindgenThrow;
+        }
+        return Reflect.get(target, property, receiver);
       },
     },
+  );
+
+  return {
+    __wbindgen_placeholder__: bindgenPlaceholder,
     __wbindgen_externref_xform__: {
       __wbindgen_externref_table_set_null: () => undefined,
       __wbindgen_externref_table_grow: () => -1,
     },
   };
+}
+
+function wasmBindgenThrow(ptr: number, len: number): never {
+  throw new Error(`wasm-bindgen throw at ${ptr}:${len}`);
 }
 
 function runWithExports(

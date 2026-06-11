@@ -1,0 +1,7 @@
+load "coerce_values.csv"
+  | mutate
+      parsed = to_number(raw),
+      flag_bool = to_boolean(flag),
+      parsed_text = to_string(to_number(raw))
+  | select id, parsed, flag_bool, parsed_text
+  | sort id

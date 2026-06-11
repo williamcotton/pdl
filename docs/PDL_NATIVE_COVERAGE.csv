@@ -24,21 +24,24 @@ expression,comparisons,native parity,== != < <= > >= lower natively
 expression,booleans,native parity,and or not lower natively
 expression,null checks,native parity,is_null and not_null lower natively
 expression,string functions,native partial,concat lower upper trim contains starts_with and literal-pattern replace lower natively; dynamic replace patterns are row-only
-expression,numeric functions,native partial,abs and round lower natively; uncertain coercions are row-only
-expression,cast-style functions,native partial,to_number to_string and to_boolean lower natively with row-identical null parse and formatting behavior for the promoted subset
+expression,numeric functions,native parity,abs round and the contracted to_number/to_string/to_boolean coercion subset lower natively with row-identical null parse and formatting behavior
+expression,out-of-contract numeric coercions,row-only by design,future coercion modes outside the v0.47 contract remain row-only under unsupported-numeric-coercion if introduced
+expression,cast-style functions,native parity,to_number to_string and to_boolean lower natively for supported native arguments under the v0.47 contract
 expression,temporal functions,row-only by design,date / datetime / year / month / day / date_floor / date_format evaluate on the row runtime (v0.46.5); the planner reports temporal-function; native lowering is deferred to a later native-coverage release
 expression,conditional functions,native partial,if_else lowers natively for supported native condition and branch expressions; typed native branch output must remain compatible
-expression,aggregate arguments,native partial,supported scalar expressions lower for count/sum/mean/min/max/count_distinct
-expression,window ranking functions,native partial,row_number rank and dense_rank lower natively for row-preserving mutate windows; ranking requires order_by and supports one key or one compatible multi-key order group
-expression,window whole-partition aggregates,native partial,count/sum/mean/min/max lower natively for whole-partition row-preserving mutate windows over supported native expressions with zero one or one compatible multi-key order group
-expression,window running aggregates,native partial,count/sum/mean/min/max lower natively for frame running over supported native expressions with zero one or one compatible multi-key order group
-expression,window offset functions,native partial,lag and lead lower natively with one or one compatible multi-key order group a non-negative integer literal offset and omitted null or native-compatible non-null defaults
-expression,window value functions,native partial,first_value and last_value lower natively for frame whole_partition and frame running frames over supported native expressions with zero one or one compatible multi-key order group
-expression,window distribution functions,native partial,percent_rank and cume_dist lower natively with one key or one compatible multi-key order group
-expression,window multi-key ordering,native partial,multi-key window order lowers natively when a mutate stage has one compatible composite order group; mixed multi-key groups remain row-only
+expression,aggregate arguments,native parity,count/sum/mean/min/max/count_distinct walk their argument expression and lower natively whenever every reachable expression family is native-parity
+expression,aggregate arguments over row-only expressions,row-only by design,aggregate arguments using temporal functions data-dependent col dynamic replace or another row-only expression inherit that expression fallback reason
+expression,window ranking functions,native parity,row_number rank and dense_rank lower natively for row-preserving mutate windows; ranking requires order_by and supports single-key and compatible multi-key order groups
+expression,window whole-partition aggregates,native parity,count/sum/mean/min/max lower natively for whole-partition row-preserving mutate windows over native expression arguments with single-key or compatible multi-key order groups
+expression,window running aggregates,native parity,count/sum/mean/min/max lower natively for frame running over native expression arguments with single-key or compatible multi-key order groups
+expression,window offset functions,native partial,lag and lead lower natively with single-key or compatible multi-key order groups a non-negative integer literal offset and omitted null or native-compatible non-null defaults
+expression,window value functions,native parity,first_value and last_value lower natively for all six named frames over native expression arguments with single-key or compatible multi-key order groups
+expression,window distribution functions,native parity,percent_rank and cume_dist lower natively with single-key or compatible multi-key order groups
+expression,window multi-key ordering,native parity,a mutate stage may contain multiple distinct composite order groups; each assignment may contain at most one composite group
 expression,window whole-partition frame,native parity,frame whole_partition desugars to the whole-partition bound pair the native engine already covers
 expression,window running frame,native parity,frame running desugars to the unbounded-preceding-to-current-row bound pair the native engine already covers
-expression,window bounded frames,row-only by design,frame remaining / frame trailing N / frame leading N / frame centered N execute on the row engine; native execution rejects them with the bounded-frame window-expression reason
+expression,window bounded frames,native parity,frame remaining / frame trailing N / frame leading N / frame centered N lower natively with row-identical edge truncation tie handling all-null order-key behavior and N = 0 handling
+expression,single expression with incompatible multi-key window order groups,row-only by design,a single assignment combining windows from different composite order groups remains row-only under window-expression; split into separate assignments to run natively
 source,path-backed CSV,native parity,Polars lazy CSV scan is eligible
 source,path-backed Parquet,native parity,Polars lazy Parquet scan is eligible
 source,path-backed Arrow IPC file,native parity,Polars lazy IPC scan is eligible (v0.46)

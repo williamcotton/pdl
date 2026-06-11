@@ -65,6 +65,14 @@ publication remains independent of the Rust/CLI release line: consumer
 pins stay at the published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`, and no
 `0.46.5` browser packages are prepared.
 
+The v0.47.0 bounded-frame native promotion release is a native Rust/CLI
+release with no browser-visible behavior change. Npm was re-checked on
+June 11, 2026: `pdl-wasm` publishes `0.30.0`, `0.39.0`, and `0.43.5`;
+`pdl-editor` publishes `0.30.0`, `0.30.1`, `0.39.0`, `0.43.5`, and
+`0.43.6`. Browser package versions and consumer pins stay at the
+published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`; no `0.47.0` browser
+packages are prepared.
+
 ## Package Validation
 
 Use packed mode for package-surface validation before publishing:

@@ -1,13 +1,27 @@
 # PDL Detailed Specification
 
-Status: Draft 0.46.5
+Status: Draft 0.47.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.46.5`, tracked in
-`docs/V0_46_5_PLAN.md`. Version 0.46.5 adds the first deterministic
+The current repository implementation line is `0.47.0`, tracked in
+`docs/V0_47_PLAN.md`. Version 0.47.0 completes the v0.43-v0.49
+expression-level native coverage tranche for bounded named window frames,
+mixed multi-key window order groups, aggregate arguments over native
+expression families, and the contracted `to_number` / `to_string` /
+`to_boolean` coercion subset. `frame remaining`, `frame trailing N`,
+`frame leading N`, and `frame centered N` now execute natively with
+row-identical partition-edge truncation, tie handling, and `N = 0`
+degenerate behavior. A `mutate` stage may contain multiple distinct
+composite window order groups; each assignment still contains at most one
+composite group so lowering can preserve row semantics. The release adds no
+new PDL syntax, stages, functions, primitive value classes, or diagnostic
+codes.
+
+Version 0.46.5, tracked in
+`docs/V0_46_5_PLAN.md`, adds the first deterministic
 temporal scalar functions: `date`, `datetime`, `year`, `month`, `day`,
 `date_floor`, and `date_format`. The functions parse `YYYY-MM-DD` dates
 and RFC3339 datetimes — with `Z` as a first-class UTC designator and
@@ -2250,11 +2264,20 @@ expressions:
   replaces every non-overlapping literal `pattern` occurrence in `value` with
   `replacement`. This is not a regex function. If any argument is null, the
   result is null.
-- `to_string(value)`: renders a non-null value as text. Null returns null.
-- `to_number(value)`: passes through numbers and parses text as a number.
-  Empty, null, or unparseable values return null.
-- `to_boolean(value)`: passes through booleans and parses trimmed text `true`
-  or `false`. Null and unparseable values return null.
+- `to_string(value)`: renders a non-null value as a CSV cell string using the
+  same null, boolean, numeric, and string cell renderer as CSV output. Null
+  returns null.
+- `to_number(value)`: passes through numbers, returns null for null, and
+  otherwise renders the value as a CSV cell string, trims leading and trailing
+  Unicode whitespace, and parses the result as an `f64` decimal/scientific
+  literal. `1e6`, `1.5E-3`, signs, and leading/trailing whitespace are
+  accepted. Empty strings, locale-specific thousands separators, comma decimal
+  separators, mixed text, and overflow or other parse failures return null.
+- `to_boolean(value)`: passes through booleans, returns null for null, and
+  otherwise renders the value as a CSV cell string, trims leading and trailing
+  Unicode whitespace, and accepts exactly lowercase `true` or lowercase
+  `false`. Other spellings, numeric booleans, empty strings, and mixed text
+  return null.
 - `abs(value)`: returns the numeric absolute value.
 - `round(value)`: rounds a numeric value to the nearest integer.
 - `round(value, digits)`: rounds a numeric value to `digits` decimal places.
@@ -2348,6 +2371,12 @@ Invalid scalar function arity MUST produce `E1402`.
 Function calls MUST be pure. Temporal functions perform no wall-clock
 reads, local time-zone lookup, locale access, filesystem metadata reads,
 or environment-variable access.
+
+Since version 0.47.0, the native engine MUST match the row runtime for
+the contracted `to_string`, `to_number`, and `to_boolean` behavior above
+whenever the argument expression itself is native-eligible. The coercions
+are locale-neutral and data-level parse failures return null rather than
+diagnostics.
 
 ### 12.4 Aggregate Functions
 
@@ -2879,10 +2908,11 @@ Since version 0.40.0, the native subset also supports compatible multi-key
 window ordering for row-preserving mutate windows. The native executor adds a
 hidden row index, physically pre-sorts by partition keys and the composite
 window order, evaluates windows over that ordered partition, restores original
-row order, then drops the hidden index. The promoted multi-key subset requires a
-single compatible composite order group per mutate stage; mixed multi-key order
-groups remain row-only in automatic mode or report `E1211` in forced native
-mode. Multi-key peer rows for `rank`, `dense_rank`, `percent_rank`, and
+row order, then drops the hidden index. Since version 0.47.0, a mutate stage
+may contain multiple distinct composite order groups when each assignment
+contains at most one composite group; lowering evaluates each group with its
+own hidden temporary columns and restores assignment outputs by the original
+row index. Multi-key peer rows for `rank`, `dense_rank`, `percent_rank`, and
 `cume_dist` compare every `order_by` key with null-aware equality.
 
 Since version 0.40.0, native `lag` and `lead` support non-null default
@@ -2963,12 +2993,24 @@ In automatic mode pipelines using them demote to the row engine and the
 planner reports the typed `temporal-function` reason; forced native mode
 reports `E1211`.
 
+Since version 0.47.0, the native engine supports all six named window
+frames. `frame whole_partition` and `frame running` keep their existing
+whole-partition and running cumulative lowerings. `frame remaining` lowers
+to reverse-running cumulative aggregates for current-row-through-end
+semantics. `frame trailing N`, `frame leading N`, and `frame centered N`
+lower to fixed-size rolling windows with row-identical truncation at
+partition edges, including `N = 0` current-row frames and `N` larger than
+the partition. `count()` bounded frames use native row-position arithmetic;
+`count(value)` counts non-null values; `first_value` and `last_value`
+select the clamped frame boundary row. The native implementation MUST
+preserve the row runtime's stable ordering for ties and all-null order keys.
+
 Unsupported aggregate functions,
 binding starts, named outputs, multi-output execution, non-equi joins,
 incompatible-schema union extensions, JSON Lines
-input, unsupported bounded-frame windows,
-incompatible multi-key window order groups, data-dependent dynamic `col(...)`,
-uncertain coercions, and other unsupported expressions fall back to
+input, a single assignment containing incompatible multi-key window order
+groups, data-dependent dynamic `col(...)`, dynamic `replace` patterns, and
+other unsupported expressions fall back to
 rows in automatic mode before native scans are opened when they are known to be
 unsupported. Forced native mode reports an `E1211` diagnostic with a stable
 unsupported native reason category instead of silently falling back.
@@ -3196,7 +3238,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.46.5` LSP implementation provides diagnostics,
+The current `0.47.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3620,6 +3662,12 @@ package publication remains independent of the Rust/CLI release line:
 consumer pins stay at the published `pdl-wasm@0.43.5` /
 `pdl-editor@0.43.6` until a browser package release is cut.
 
+Version 0.47.0 is a native Rust/CLI release: bounded-frame and mixed
+multi-key window promotions change no parser, editor-service, or
+WASM-visible behavior. Browser package versions and consumer pins stay at
+the published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6` until a browser
+package release is cut.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3692,7 +3740,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.46.5"
+version = "0.47.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -5298,7 +5346,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.46.5.
+PDL source does not require an explicit version declaration in draft 0.47.0.
 
 The implementation SHOULD report supported language version.
 

@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.46.5"
+version = "0.47.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -45,7 +45,7 @@ insta = "1"
 logos = "0.14"
 lsp-types = "0.94.1"
 parquet = "53"
-polars = { version = "0.53", default-features = false, features = ["abs", "concat_str", "cross_join", "csv", "cum_agg", "fmt", "ipc_streaming", "lazy", "parquet", "pivot", "rank", "regex", "round_series", "semi_anti_join", "strings", "temporal", "timezones"] }
+polars = { version = "0.53", default-features = false, features = ["abs", "concat_str", "cross_join", "csv", "cum_agg", "fmt", "ipc_streaming", "lazy", "parquet", "pivot", "rank", "regex", "rolling_window", "round_series", "semi_anti_join", "strings", "temporal", "timezones"] }
 # Version-locked to `polars`: `ScanSources::Buffers` takes `polars-buffer`
 # buffers for the byte-backed native scans.
 polars-buffer = "0.53"

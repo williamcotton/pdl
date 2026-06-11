@@ -657,10 +657,10 @@ fn native_pipeline_unsupported_reason(
             | StageIr::Limit { .. }
             | StageIr::Distinct { .. } => {}
             StageIr::Mutate { items, .. } => {
-                if native_multi_key_window_order_reason(items).is_some() {
-                    return Some(NativeUnsupportedReason::WindowExpression);
-                }
                 for item in items {
+                    if native_multi_key_window_order_reason(item).is_some() {
+                        return Some(NativeUnsupportedReason::WindowExpression);
+                    }
                     if let Some(reason) = native_expr_unsupported_reason(&item.expr) {
                         return Some(reason);
                     }
@@ -924,13 +924,11 @@ struct NativeWindowSortGroupIr {
 }
 
 fn native_multi_key_window_order_reason(
-    items: &[pdl_semantics::MutateItemIr],
+    item: &pdl_semantics::MutateItemIr,
 ) -> Option<NativeUnsupportedReason> {
     let mut group = None;
-    for item in items {
-        if native_expr_multi_key_window_order_incompatible(&item.expr, &mut group) {
-            return Some(NativeUnsupportedReason::WindowExpression);
-        }
+    if native_expr_multi_key_window_order_incompatible(&item.expr, &mut group) {
+        return Some(NativeUnsupportedReason::WindowExpression);
     }
     None
 }
@@ -987,6 +985,26 @@ fn native_supported_window_frame_reason(spec: &WindowSpecIr) -> Option<NativeUns
         Some(WindowFrameIr {
             start: FrameBoundIr::UnboundedPreceding { .. },
             end: FrameBoundIr::CurrentRow { .. },
+            ..
+        }) => None,
+        Some(WindowFrameIr {
+            start: FrameBoundIr::CurrentRow { .. },
+            end: FrameBoundIr::UnboundedFollowing { .. },
+            ..
+        }) => None,
+        Some(WindowFrameIr {
+            start: FrameBoundIr::Preceding { .. },
+            end: FrameBoundIr::CurrentRow { .. },
+            ..
+        }) => None,
+        Some(WindowFrameIr {
+            start: FrameBoundIr::CurrentRow { .. },
+            end: FrameBoundIr::Following { .. },
+            ..
+        }) => None,
+        Some(WindowFrameIr {
+            start: FrameBoundIr::Preceding { .. },
+            end: FrameBoundIr::Following { .. },
             ..
         }) => None,
         Some(_) => Some(NativeUnsupportedReason::WindowExpression),
@@ -1395,7 +1413,7 @@ load "sales.csv"
     }
 
     #[test]
-    fn planning_rejects_mixed_multi_key_window_order_groups() {
+    fn planning_accepts_mixed_multi_key_window_order_groups() {
         let io = InMemoryDriverIo::default()
             .with_schema("memory/sales.csv", ["amount", "region", "status"]);
         let prepared = prepare_source_with_io(
@@ -1418,11 +1436,8 @@ load "sales.csv"
         )
         .expect("execution plan");
 
-        assert_eq!(plan.observability.selected_engine, PlannedEngine::Row);
-        assert_eq!(
-            plan.observability.fallback_reason,
-            Some(NativeUnsupportedReason::WindowExpression)
-        );
+        assert_eq!(plan.observability.selected_engine, PlannedEngine::Native);
+        assert_eq!(plan.observability.fallback_reason, None);
     }
 
     #[test]
@@ -1447,17 +1462,9 @@ load "sales.csv"
             .expect("execution plan")
         };
 
-        for clause in ["frame whole_partition", "frame running"] {
-            let plan = plan_for_frame(clause);
-            assert_eq!(
-                plan.observability.selected_engine,
-                PlannedEngine::Native,
-                "`{clause}` must stay native parity"
-            );
-            assert_eq!(plan.observability.fallback_reason, None, "`{clause}`");
-        }
-
         for clause in [
+            "frame whole_partition",
+            "frame running",
             "frame remaining",
             "frame trailing 2",
             "frame leading 2",
@@ -1466,14 +1473,10 @@ load "sales.csv"
             let plan = plan_for_frame(clause);
             assert_eq!(
                 plan.observability.selected_engine,
-                PlannedEngine::Row,
-                "`{clause}` must stay row-only by design"
+                PlannedEngine::Native,
+                "`{clause}` must stay native parity"
             );
-            assert_eq!(
-                plan.observability.fallback_reason,
-                Some(NativeUnsupportedReason::WindowExpression),
-                "`{clause}`"
-            );
+            assert_eq!(plan.observability.fallback_reason, None, "`{clause}`");
         }
     }
 
@@ -1536,13 +1539,13 @@ load "sales.csv"
     #[test]
     fn forced_native_plan_reports_unsupported_reason_without_selecting_rows() {
         let io = InMemoryDriverIo::default().with_schema("memory/sales.csv", ["region", "amount"]);
-        // Bounded window frames stay row-only by design (v0.45 promoted
-        // `pivot_longer`/`complete`, so they no longer serve as the
-        // row-only specimen here).
+        // Temporal scalar functions stay row-only by design, so they serve as
+        // the forced-native unsupported specimen after v0.47 promotes bounded
+        // named frames.
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "sales.csv"
-  | mutate trailing_total = sum(amount) over (order_by amount frame trailing 1)"#,
+  | mutate author_day = date(amount)"#,
             &io,
         );
 
@@ -1562,7 +1565,7 @@ load "sales.csv"
         assert_eq!(plan.observability.eligible_engine, PlannedEngine::Row);
         assert_eq!(
             plan.observability.fallback_reason,
-            Some(NativeUnsupportedReason::WindowExpression)
+            Some(NativeUnsupportedReason::TemporalFunction)
         );
     }
 

@@ -1,6 +1,6 @@
 # PDL v0.47 Plan
 
-Status: Proposed
+Status: Shipped
 Target version: 0.47.0
 Owner: PDL maintainers
 Related spec: [`PDL_SPEC.md`](PDL_SPEC.md)
@@ -120,7 +120,7 @@ through row-runtime errors with different messages.
 
 - Promote the bounded named frames to native parity.
 
-  Status: Proposed.
+  Status: Complete (v0.47.0).
 
   Lowering in `crates/pdl-exec/src/runtime/native_lowering.rs`
   (`lower_data_window_frame` grows arms for the bounded
@@ -136,7 +136,7 @@ through row-runtime errors with different messages.
 
 - Promote mixed multi-key window order groups.
 
-  Status: Proposed.
+  Status: Complete (v0.47.0).
 
   Eligibility flip in `native_planning.rs`: a `mutate` stage with
   more than one distinct composite order group becomes eligible, and
@@ -147,7 +147,7 @@ through row-runtime errors with different messages.
 
 - Finish `agg` argument coverage.
 
-  Status: Proposed.
+  Status: Complete (v0.47.0).
 
   Aggregate calls whose argument expression family is `native parity`
   (as of v0.46 and earlier) flip to native. The eligibility check in
@@ -159,7 +159,7 @@ through row-runtime errors with different messages.
 
 - Define and lower uncertain numeric coercions.
 
-  Status: Proposed.
+  Status: Complete (v0.47.0).
 
   `docs/PDL_SPEC.md` gains a new normative subsection (in the
   existing function-set section) for `to_number`, `to_string`, and
@@ -177,7 +177,7 @@ through row-runtime errors with different messages.
 
 - Update the coverage matrix in lockstep.
 
-  Status: Proposed.
+  Status: Complete (v0.47.0).
 
   `docs/PDL_NATIVE_COVERAGE.md` and `docs/PDL_NATIVE_COVERAGE.csv`
   update in the same commit as each promotion or split. The CSV is
@@ -188,7 +188,7 @@ through row-runtime errors with different messages.
 
 - Hold the WASM target graph.
 
-  Status: Proposed.
+  Status: Complete (v0.47.0).
 
   `pdl-wasm` Cargo manifest is unchanged. `cargo check -p pdl-wasm
   --target wasm32-unknown-unknown` remains green. Any new Polars
@@ -198,7 +198,7 @@ through row-runtime errors with different messages.
 
 - Update the spec, examples, and release stamps.
 
-  Status: Proposed.
+  Status: Complete (v0.47.0).
 
   `docs/PDL_SPEC.md` records the v0.47 history line, documents the
   numeric coercion contract, notes that all six named frames now
@@ -208,14 +208,14 @@ through row-runtime errors with different messages.
   the parity harness with byte-identical output. Workspace
   `Cargo.toml`, `Cargo.lock`, `editors/vscode/package.json`,
   `editors/vscode/package-lock.json`, and any demo manifests bump
-  to `0.47.0`. NPM consumer pins follow `CLAUDE.md` "NPM package
+  to `0.47.0`. NPM consumer pins follow `AGENTS.md` "NPM package
   version checks".
 
 ## Should
 
 - Land each promotion in its own commit.
 
-  Status: Proposed.
+  Status: Not applicable in single-commit implementation (v0.47.0).
 
   Suggested order: `frame remaining` first (single reverse-running
   idiom, no new Polars surface); then `frame trailing N` /
@@ -229,7 +229,7 @@ through row-runtime errors with different messages.
 
 - Add a `pdl-bench` window workload and row-vs-native benchmark.
 
-  Status: Proposed.
+  Status: Complete (v0.47.0).
 
   `bench/workloads/large/` has no window workload today. Add a
   million-row workload exercising offset functions and bounded
@@ -239,7 +239,7 @@ through row-runtime errors with different messages.
 
 - Document the post-v0.47 row-only expression families.
 
-  Status: Proposed.
+  Status: Complete (v0.47.0).
 
   After v0.47, the only row-only expression cells should be the
   documented `row-only by design` rows (dynamic `col` indirection
@@ -252,7 +252,7 @@ through row-runtime errors with different messages.
 
 - Promote v0.41 union schema extension to native parity.
 
-  Status: Conditional on v0.41 status.
+  Status: Out of scope (v0.41 remains planned).
 
   If v0.41 shipped union schema extension with row-runtime
   semantics, native lowering uses Polars `concat` with
@@ -263,7 +263,7 @@ through row-runtime errors with different messages.
 
 - Promote v0.41 non-equi joins to native parity.
 
-  Status: Conditional on v0.41 status.
+  Status: Out of scope (v0.41 remains planned).
 
   If v0.41 shipped non-equi joins, native lowering uses Polars
   range / inequality join APIs. Promotion requires the v0.41

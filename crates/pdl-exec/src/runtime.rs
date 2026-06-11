@@ -1331,12 +1331,12 @@ mod tests {
         fs::write(workspace.join("sales.csv"), "amount\n10\n").expect("write csv");
         let program_path = workspace.join("main.pdl");
         let io = OsDriverIo;
-        // Bounded window frames stay row-only by design; the eligibility
+        // Temporal scalar functions stay row-only by design; the eligibility
         // check must reject them before any native scan opens.
         let prepared = prepare_source_with_io(
             &program_path,
             r#"load "sales.csv"
-  | mutate trailing_total = sum(amount) over (order_by amount frame trailing 1)"#,
+  | mutate amount_day = date(amount)"#,
             &io,
         );
         let plan = plan_prepared(
@@ -1356,7 +1356,7 @@ mod tests {
 
         assert_eq!(diagnostic.code, "E1211");
         assert!(
-            diagnostic.message.contains("frame trailing"),
+            diagnostic.message.contains("temporal"),
             "{}",
             diagnostic.message
         );
@@ -2955,8 +2955,10 @@ load "sales.csv"
       cume = cume_dist() over (partition_by region order_by amount desc, tie asc),
       prior_amount = lag(amount, 1, 0) over (partition_by region order_by amount desc, tie asc),
       next_note = lead(note, 1, "end") over (partition_by region order_by amount desc, tie asc),
-      running_amount = sum(amount) over (partition_by region order_by amount desc, tie asc frame running)
-  | select order_id, seq, sparse_rank, dense, pct, cume, prior_amount, next_note, running_amount"#
+      running_amount = sum(amount) over (partition_by region order_by amount desc, tie asc frame running),
+      tie_seq = row_number() over (partition_by region order_by tie asc, amount desc),
+      global_seq = row_number() over (order_by tie asc, region asc)
+  | select order_id, seq, sparse_rank, dense, pct, cume, prior_amount, next_note, running_amount, tie_seq, global_seq"#
                 ),
                 &io,
             );
@@ -3013,7 +3015,7 @@ load "sales.csv"
             );
             assert_eq!(
                 row_csv,
-                "order_id,seq,sparse_rank,dense,pct,cume,prior_amount,next_note,running_amount\nA,3,3,2,0.6666666666666666,0.75,30,gamma,90\nB,1,1,1,0,0.5,0,eta,30\nC,4,4,3,1,1,30,end,100\nD,2,2,2,0.5,0.6666666666666666,20,zeta,40\nE,1,1,1,0,0.3333333333333333,0,delta,20\nF,3,3,3,1,1,20,end,45\nG,2,1,1,0,0.5,30,alpha,60\n"
+                "order_id,seq,sparse_rank,dense,pct,cume,prior_amount,next_note,running_amount,tie_seq,global_seq\nA,3,3,2,0.6666666666666666,0.75,30,gamma,90,4,7\nB,1,1,1,0,0.5,0,eta,30,1,3\nC,4,4,3,1,1,30,end,100,3,4\nD,2,2,2,0.5,0.6666666666666666,20,zeta,40,3,6\nE,1,1,1,0,0.3333333333333333,0,delta,20,1,1\nF,3,3,3,1,1,20,end,45,2,2\nG,2,1,1,0,0.5,30,alpha,60,2,5\n"
             );
         }
 
@@ -4150,7 +4152,7 @@ output dock_priority =
     }
 
     #[test]
-    fn executes_window_bounded_named_frames_on_row_engine() {
+    fn native_engine_bounded_named_frames_match_rows() {
         let io = InMemoryDriverIo::default().with_file_bytes(
             "memory/orders.csv",
             "order_id,region,seq,amount\nA1,North,1,1\nA2,North,2,2\nA3,North,3,3\nA4,North,4,4\nA5,North,5,5\n",
@@ -4162,21 +4164,126 @@ output dock_priority =
   | select order_id, amount, trailing_sum, leading_sum, centered_sum, remaining_sum"#,
             &io,
         );
-
-        let result = run_prepared_with_io(
+        let options = RunOptions {
+            stdout_format: Some("csv".to_string()),
+            dry_run: true,
+            allow_binary_stdout: true,
+        };
+        let row = run_prepared_with_io_and_context_and_engine(
             &prepared,
-            RunOptions {
+            options.clone(),
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Row,
+        );
+        let auto = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options.clone(),
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Auto,
+        );
+        let native = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            options,
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Native,
+        );
+
+        assert!(row.diagnostics.is_empty(), "{:?}", row.diagnostics);
+        assert!(auto.diagnostics.is_empty(), "{:?}", auto.diagnostics);
+        assert!(native.diagnostics.is_empty(), "{:?}", native.diagnostics);
+        assert_eq!(auto.backend, DataBackend::NativePolars);
+        assert_eq!(native.backend, DataBackend::NativePolars);
+        let expected =
+            "order_id,amount,trailing_sum,leading_sum,centered_sum,remaining_sum\nA1,1,1,6,3,15\nA2,2,3,9,6,14\nA3,3,6,12,9,12\nA4,4,9,9,12,9\nA5,5,12,5,9,5\n";
+        assert_eq!(
+            String::from_utf8(row.stdout.expect("row csv stdout")).expect("utf8 csv"),
+            expected
+        );
+        assert_eq!(
+            String::from_utf8(auto.stdout.expect("auto csv stdout")).expect("utf8 csv"),
+            expected
+        );
+        assert_eq!(
+            String::from_utf8(native.stdout.expect("native csv stdout")).expect("utf8 csv"),
+            expected
+        );
+    }
+
+    #[test]
+    fn native_engine_bounded_named_frames_match_rows_for_edge_cases() {
+        let assert_native_parity = |source: &str, files: &[(&str, &str)]| {
+            let mut io = InMemoryDriverIo::default();
+            for (path, bytes) in files {
+                io = io.with_file_bytes(*path, *bytes);
+            }
+            let prepared = prepare_source_with_io("memory/main.pdl", source, &io);
+            let options = RunOptions {
                 stdout_format: Some("csv".to_string()),
                 dry_run: true,
                 allow_binary_stdout: true,
-            },
-            &io,
+            };
+            let row = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Row,
+            );
+            let auto = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options.clone(),
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Auto,
+            );
+            let native = run_prepared_with_io_and_context_and_engine(
+                &prepared,
+                options,
+                &io,
+                BTreeMap::new(),
+                ExecutionEngine::Native,
+            );
+
+            assert!(row.diagnostics.is_empty(), "{:?}", row.diagnostics);
+            assert!(auto.diagnostics.is_empty(), "{:?}", auto.diagnostics);
+            assert!(native.diagnostics.is_empty(), "{:?}", native.diagnostics);
+            assert_eq!(auto.backend, DataBackend::NativePolars);
+            assert_eq!(native.backend, DataBackend::NativePolars);
+            let row_csv = String::from_utf8(row.stdout.expect("row csv")).expect("utf8");
+            assert_eq!(
+                String::from_utf8(auto.stdout.expect("auto csv")).expect("utf8"),
+                row_csv
+            );
+            assert_eq!(
+                String::from_utf8(native.stdout.expect("native csv")).expect("utf8"),
+                row_csv
+            );
+        };
+
+        assert_native_parity(
+            r#"load "empty.csv"
+  | mutate trailing_count = count() over (order_by amount frame trailing 0)
+  | select amount, trailing_count"#,
+            &[("memory/empty.csv", "amount\n")],
         );
 
-        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
-        assert_eq!(
-            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
-            "order_id,amount,trailing_sum,leading_sum,centered_sum,remaining_sum\nA1,1,1,6,3,15\nA2,2,3,9,6,14\nA3,3,6,12,9,12\nA4,4,9,9,12,9\nA5,5,12,5,9,5\n"
+        assert_native_parity(
+            r#"load "orders.csv"
+  | mutate
+      current_count = count() over (partition_by region order_by order_key frame trailing 0),
+      large_leading_sum = sum(amount) over (partition_by region order_by order_key frame leading 99),
+      large_centered_count = count(amount) over (partition_by region order_by order_key frame centered 99),
+      remaining_first = first_value(order_id) over (partition_by region order_by order_key frame remaining),
+      trailing_first = first_value(order_id) over (partition_by region order_by order_key frame trailing 99),
+      leading_last = last_value(order_id) over (partition_by region order_by order_key frame leading 99)
+  | select order_id, current_count, large_leading_sum, large_centered_count, remaining_first, trailing_first, leading_last"#,
+            &[(
+                "memory/orders.csv",
+                "order_id,region,order_key,amount\nN1,North,,1\nN2,North,,2\nS1,Solo,,10\nB1,Big,,5\nB2,Big,,7\nB3,Big,,11\n",
+            )],
         );
     }
 

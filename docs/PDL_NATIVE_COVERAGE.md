@@ -1,6 +1,6 @@
 # PDL Native Coverage Matrix
 
-Status: v0.46.5 source of truth
+Status: v0.47.0 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
 This matrix records what the native execution strategy may claim in v0.40. The
@@ -52,21 +52,24 @@ boundary changes status, update the CSV and the tests in the same change.
 | booleans | native parity | `and`, `or`, and `not` lower natively. |
 | null checks | native parity | `is_null` and `not_null` lower natively. |
 | string functions | native partial | `concat`, `lower`, `upper`, `trim`, `contains`, `starts_with`, and literal-pattern `replace` lower natively; dynamic replace patterns remain row-only. |
-| numeric functions | native partial | `abs` and `round` lower natively; uncertain coercions are row-only. |
-| cast-style functions | native partial | `to_number`, `to_string`, and `to_boolean` lower natively with row-identical null, parse, and formatting behavior for the promoted subset. |
+| numeric functions | native parity | `abs`, `round`, and the contracted `to_number`, `to_string`, and `to_boolean` coercion subset lower natively with row-identical null, parse, and formatting behavior. |
+| out-of-contract numeric coercions | row-only by design | Future coercion modes outside the v0.47 contract remain row-only under the `unsupported-numeric-coercion` reserve reason if introduced. |
+| cast-style functions | native parity | `to_number`, `to_string`, and `to_boolean` lower natively for supported native arguments under the v0.47 contract. |
 | temporal functions | row-only by design | `date`, `datetime`, `year`, `month`, `day`, `date_floor`, and `date_format` evaluate on the row runtime (v0.46.5). The planner reports the `temporal-function` reason; native lowering is deferred to a later native-coverage release. |
 | conditional functions | native partial | `if_else` lowers natively for supported native condition and branch expressions; typed native branch output must remain compatible. |
-| aggregate arguments | native partial | Supported scalar expressions lower for `count`, `sum`, `mean`, `min`, `max`, and `count_distinct`. |
-| window ranking functions | native partial | `row_number`, `rank`, and `dense_rank` lower natively for row-preserving mutate windows; ranking requires `order_by` and supports one key or one compatible multi-key order group. |
-| window whole-partition aggregates | native partial | `count`, `sum`, `mean`, `min`, and `max` lower natively for whole-partition row-preserving mutate windows over supported native expressions with zero, one, or one compatible multi-key order group. |
-| window running aggregates | native partial | `count`, `sum`, `mean`, `min`, and `max` lower natively for `frame running` over supported native expressions with zero, one, or one compatible multi-key order group. |
-| window offset functions | native partial | `lag` and `lead` lower natively with one or one compatible multi-key order group, a non-negative integer literal offset, and omitted, null, or native-compatible non-null defaults. |
-| window value functions | native partial | `first_value` and `last_value` lower natively for `frame whole_partition` and `frame running` frames over supported native expressions with zero, one, or one compatible multi-key order group. |
-| window distribution functions | native partial | `percent_rank` and `cume_dist` lower natively with one key or one compatible multi-key order group. |
-| window multi-key ordering | native partial | Multi-key window order lowers natively when a mutate stage has one compatible composite order group; mixed multi-key groups remain row-only. |
+| aggregate arguments | native parity | `count`, `sum`, `mean`, `min`, `max`, and `count_distinct` walk their argument expression and lower natively whenever every reachable expression family is native-parity. |
+| aggregate arguments over row-only expressions | row-only by design | Aggregate arguments using temporal functions, data-dependent `col`, dynamic `replace`, or another row-only expression inherit that expression's fallback reason. |
+| window ranking functions | native parity | `row_number`, `rank`, and `dense_rank` lower natively for row-preserving mutate windows; ranking requires `order_by` and supports single-key and compatible multi-key order groups. |
+| window whole-partition aggregates | native parity | `count`, `sum`, `mean`, `min`, and `max` lower natively for whole-partition row-preserving mutate windows over native expression arguments with single-key or compatible multi-key order groups. |
+| window running aggregates | native parity | `count`, `sum`, `mean`, `min`, and `max` lower natively for `frame running` over native expression arguments with single-key or compatible multi-key order groups. |
+| window offset functions | native partial | `lag` and `lead` lower natively with single-key or compatible multi-key order groups, a non-negative integer literal offset, and omitted, null, or native-compatible non-null defaults. |
+| window value functions | native parity | `first_value` and `last_value` lower natively for all six named frames over native expression arguments with single-key or compatible multi-key order groups. |
+| window distribution functions | native parity | `percent_rank` and `cume_dist` lower natively with single-key or compatible multi-key order groups. |
+| window multi-key ordering | native parity | A mutate stage may contain multiple distinct composite order groups; each assignment may contain at most one composite group. |
 | window whole-partition frame | native parity | `frame whole_partition` desugars to the whole-partition bound pair the native engine already covers. |
 | window running frame | native parity | `frame running` desugars to the unbounded-preceding-to-current-row bound pair the native engine already covers. |
-| window bounded frames | row-only by design | `frame remaining`, `frame trailing N`, `frame leading N`, and `frame centered N` execute on the row engine; native execution rejects them with the bounded-frame `window-expression` reason. |
+| window bounded frames | native parity | `frame remaining`, `frame trailing N`, `frame leading N`, and `frame centered N` lower natively with row-identical edge truncation, tie handling, all-null order-key behavior, and `N = 0` handling. |
+| single expression with incompatible multi-key window order groups | row-only by design | A single assignment combining windows from different composite order groups remains row-only under `window-expression`; split into separate assignments to run natively. |
 
 ## Source Coverage
 

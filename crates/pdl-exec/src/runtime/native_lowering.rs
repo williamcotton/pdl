@@ -115,73 +115,10 @@ pub(crate) fn lower_data_mutate_items(
     items: &[MutateItemIr],
     context: &BTreeMap<String, Value>,
 ) -> Result<Vec<(String, DataExpr)>, Diagnostic> {
-    check_native_mutate_multi_key_window_order_groups(items)?;
     items
         .iter()
         .map(|item| Ok((item.column.clone(), lower_data_expr(&item.expr, context)?)))
         .collect()
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct NativeWindowSortGroupIr {
-    partition_by: Vec<String>,
-    order_by: Vec<(String, SortDirectionIr, Option<NullsOrderIr>)>,
-}
-
-pub(crate) fn check_native_mutate_multi_key_window_order_groups(
-    items: &[MutateItemIr],
-) -> Result<(), Diagnostic> {
-    let mut group = None;
-    for item in items {
-        if expr_multi_key_window_order_incompatible(&item.expr, &mut group) {
-            return Err(unsupported_native_pipeline(
-                NativeUnsupportedReason::WindowExpression,
-                "multiple multi-key window order groups",
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn expr_multi_key_window_order_incompatible(
-    expr: &ExprIr,
-    group: &mut Option<NativeWindowSortGroupIr>,
-) -> bool {
-    match expr {
-        ExprIr::Window { args, spec, .. } => {
-            if spec.order_by.len() > 1 {
-                let next = NativeWindowSortGroupIr {
-                    partition_by: spec.partition_by.clone(),
-                    order_by: spec
-                        .order_by
-                        .iter()
-                        .map(|item| (item.column.clone(), item.direction, item.nulls))
-                        .collect(),
-                };
-                match group {
-                    Some(current) if current != &next => return true,
-                    Some(_) => {}
-                    None => *group = Some(next),
-                }
-            }
-            args.iter()
-                .any(|arg| expr_multi_key_window_order_incompatible(arg, group))
-        }
-        ExprIr::Call { args, .. } => args
-            .iter()
-            .any(|arg| expr_multi_key_window_order_incompatible(arg, group)),
-        ExprIr::Unary { expr, .. } => expr_multi_key_window_order_incompatible(expr, group),
-        ExprIr::Binary { left, right, .. } => {
-            expr_multi_key_window_order_incompatible(left, group)
-                || expr_multi_key_window_order_incompatible(right, group)
-        }
-        ExprIr::Quoted { .. }
-        | ExprIr::Number { .. }
-        | ExprIr::Bool { .. }
-        | ExprIr::Null { .. }
-        | ExprIr::Ident { .. }
-        | ExprIr::Context { .. } => false,
-    }
 }
 
 pub(crate) fn lower_data_agg_arg(
@@ -448,10 +385,36 @@ pub(crate) fn lower_data_window_frame(spec: &WindowSpecIr) -> Result<DataWindowF
             end: FrameBoundIr::CurrentRow { .. },
             ..
         }) => Ok(DataWindowFrame::UnboundedPrecedingToCurrentRow),
+        Some(WindowFrameIr {
+            start: FrameBoundIr::CurrentRow { .. },
+            end: FrameBoundIr::UnboundedFollowing { .. },
+            ..
+        }) => Ok(DataWindowFrame::CurrentRowToUnboundedFollowing),
+        Some(WindowFrameIr {
+            start: FrameBoundIr::Preceding { rows, .. },
+            end: FrameBoundIr::CurrentRow { .. },
+            ..
+        }) => Ok(DataWindowFrame::PrecedingToCurrentRow { rows: *rows }),
+        Some(WindowFrameIr {
+            start: FrameBoundIr::CurrentRow { .. },
+            end: FrameBoundIr::Following { rows, .. },
+            ..
+        }) => Ok(DataWindowFrame::CurrentRowToFollowing { rows: *rows }),
+        Some(WindowFrameIr {
+            start: FrameBoundIr::Preceding {
+                rows: preceding, ..
+            },
+            end: FrameBoundIr::Following {
+                rows: following, ..
+            },
+            ..
+        }) => Ok(DataWindowFrame::PrecedingToFollowing {
+            preceding: *preceding,
+            following: *following,
+        }),
         Some(_) => Err(unsupported_native_pipeline(
             NativeUnsupportedReason::WindowExpression,
-            "the `frame trailing N` / `frame leading N` / `frame centered N` / `frame remaining` \
-             clauses are not supported by native execution",
+            "window frame is not supported by native execution",
         )),
     }
 }

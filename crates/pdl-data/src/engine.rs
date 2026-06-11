@@ -181,6 +181,10 @@ pub struct DataWindowSpec {
 pub enum DataWindowFrame {
     WholePartition,
     UnboundedPrecedingToCurrentRow,
+    CurrentRowToUnboundedFollowing,
+    PrecedingToCurrentRow { rows: usize },
+    CurrentRowToFollowing { rows: usize },
+    PrecedingToFollowing { preceding: usize, following: usize },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -321,56 +325,98 @@ impl DataPlan {
                     .any(|(_, expr)| data_expr_contains_window(expr))
                     .then(|| native_hidden_column_name(&plan.plan, plan.format))
                     .transpose()?;
-                let window_presort = native_window_presort_specs(items)?;
+                let (direct_items, grouped_items) = native_window_partition_mutate_items(items)?;
                 let native_plan = if let Some(name) = &row_index_name {
                     plan.plan.with_row_index(name.clone(), None)
                 } else {
                     plan.plan
                 };
-                let native_plan = if let Some(specs) = &window_presort {
-                    native_plan.sort(
-                        specs
+                let mut output_plan = native_plan.clone();
+                if !direct_items.is_empty() {
+                    let expressions = direct_items
+                        .iter()
+                        .map(|(column, expr)| {
+                            let expr = row_index_name
+                                .as_deref()
+                                .map(|name| data_expr_with_window_row_index(expr, name))
+                                .unwrap_or_else(|| expr.clone());
+                            Ok(native_expr(&expr)?.alias(column))
+                        })
+                        .collect::<Result<Vec<_>, Diagnostic>>()?;
+                    output_plan = output_plan.with_columns(expressions);
+                }
+                for (group, group_items) in grouped_items {
+                    let Some(row_index) = &row_index_name else {
+                        return Err(unsupported_native_operation("window row index"));
+                    };
+                    let mut reserved_names = native_plan
+                        .clone()
+                        .collect_schema()
+                        .map_err(native_collect_error(plan.format))?
+                        .iter_names()
+                        .map(|name| name.to_string())
+                        .collect::<Vec<_>>();
+                    reserved_names.push(row_index.clone());
+                    let temp_items = group_items
+                        .iter()
+                        .map(|(column, expr)| {
+                            let temp = native_hidden_column_name_from_names(
+                                &reserved_names,
+                                "__pdl_window_value",
+                            );
+                            reserved_names.push(temp.clone());
+                            (column.clone(), temp, expr.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    let sorted_plan = native_plan.clone().sort(
+                        group
+                            .sort_specs()
                             .iter()
                             .map(|spec| spec.column.clone())
                             .collect::<Vec<_>>(),
-                        native_sort_multiple_options(specs),
-                    )
-                } else {
-                    native_plan
-                };
-                let expressions = items
-                    .iter()
-                    .map(|(column, expr)| {
-                        let expr = row_index_name
-                            .as_deref()
-                            .map(|name| data_expr_with_window_row_index(expr, name))
-                            .unwrap_or_else(|| expr.clone());
-                        let expr = if window_presort.is_some() {
-                            data_expr_with_presorted_multi_key_windows(&expr)
-                        } else {
-                            expr
-                        };
-                        Ok(native_expr(&expr)?.alias(column))
-                    })
-                    .collect::<Result<Vec<_>, Diagnostic>>()?;
-                let native_plan = native_plan.with_columns(expressions);
-                let native_plan = if let Some(name) = &row_index_name {
-                    let native_plan = if window_presort.is_some() {
-                        native_plan.sort(
-                            [name.as_str()],
-                            native::SortMultipleOptions {
-                                descending: vec![false],
-                                nulls_last: vec![false],
-                                maintain_order: true,
-                                ..Default::default()
-                            },
+                        native_sort_multiple_options(&group.sort_specs()),
+                    );
+                    let expressions = temp_items
+                        .iter()
+                        .map(|(_, temp, expr)| {
+                            let expr = data_expr_with_window_row_index(expr, row_index);
+                            let expr = data_expr_with_presorted_multi_key_windows(&expr);
+                            Ok(native_expr(&expr)?.alias(temp))
+                        })
+                        .collect::<Result<Vec<_>, Diagnostic>>()?;
+                    let right = sorted_plan.with_columns(expressions).select(
+                        std::iter::once(native::col(row_index))
+                            .chain(temp_items.iter().map(|(_, temp, _)| native::col(temp)))
+                            .collect::<Vec<_>>(),
+                    );
+                    output_plan = output_plan
+                        .join_builder()
+                        .with(right)
+                        .left_on([native::col(row_index)])
+                        .right_on([native::col(row_index)])
+                        .how(native::JoinType::Left)
+                        .suffix("_right")
+                        .coalesce(native::JoinCoalesce::CoalesceColumns)
+                        .join_nulls(false)
+                        .maintain_order(native::MaintainOrderJoin::Left)
+                        .finish()
+                        .with_columns(
+                            temp_items
+                                .iter()
+                                .map(|(column, temp, _)| native::col(temp).alias(column))
+                                .collect::<Vec<_>>(),
                         )
-                    } else {
-                        native_plan
-                    };
-                    native_plan.drop(native::cols([name.as_str()]))
+                        .drop(native::cols(
+                            temp_items
+                                .iter()
+                                .map(|(_, temp, _)| temp.clone())
+                                .collect::<Vec<_>>(),
+                        ));
+                }
+                let native_plan = if let Some(name) = &row_index_name {
+                    output_plan.drop(native::cols([name.as_str()]))
                 } else {
-                    native_plan
+                    output_plan
                 };
                 Ok(Self {
                     inner: DataPlanInner::Native(NativePlan {
@@ -650,6 +696,8 @@ impl DataPlan {
         if columns.is_empty() {
             return Err(unsupported_native_operation("pivot_longer column list"));
         }
+        #[cfg(not(feature = "polars-engine"))]
+        let _ = (names_to, values_to);
         match self.inner {
             #[cfg(feature = "polars-engine")]
             DataPlanInner::Native(plan) => native_pivot_longer(plan, columns, names_to, values_to),
@@ -674,6 +722,8 @@ impl DataPlan {
         if keys.is_empty() {
             return Err(unsupported_native_operation("complete key list"));
         }
+        #[cfg(not(feature = "polars-engine"))]
+        let _ = fills;
         match self.inner {
             #[cfg(feature = "polars-engine")]
             DataPlanInner::Native(plan) => native_complete(plan, keys, fills),
@@ -1258,27 +1308,52 @@ struct NativeWindowSortGroup {
 }
 
 #[cfg(feature = "polars-engine")]
-fn native_window_presort_specs(
-    items: &[(String, DataExpr)],
-) -> Result<Option<Vec<SortSpec>>, Diagnostic> {
-    let mut group = None;
-    for (_, expr) in items {
-        data_expr_collect_multi_key_window_sort(expr, &mut group)?;
+impl NativeWindowSortGroup {
+    fn sort_specs(&self) -> Vec<SortSpec> {
+        let mut specs = self
+            .partition_by
+            .iter()
+            .map(|column| SortSpec {
+                column: column.clone(),
+                direction: SortDirection::Asc,
+                nulls: NullsOrder::Last,
+            })
+            .collect::<Vec<_>>();
+        specs.extend(self.order_by.clone());
+        specs
     }
-    let Some(group) = group else {
-        return Ok(None);
-    };
-    let mut specs = group
-        .partition_by
-        .iter()
-        .map(|column| SortSpec {
-            column: column.clone(),
-            direction: SortDirection::Asc,
-            nulls: NullsOrder::Last,
-        })
-        .collect::<Vec<_>>();
-    specs.extend(group.order_by);
-    Ok(Some(specs))
+}
+
+#[cfg(feature = "polars-engine")]
+type NativeMutateItem = (String, DataExpr);
+
+#[cfg(feature = "polars-engine")]
+type NativeGroupedMutateItems = Vec<(NativeWindowSortGroup, Vec<NativeMutateItem>)>;
+
+#[cfg(feature = "polars-engine")]
+type NativePartitionedMutateItems = (Vec<NativeMutateItem>, NativeGroupedMutateItems);
+
+#[cfg(feature = "polars-engine")]
+fn native_window_partition_mutate_items(
+    items: &[(String, DataExpr)],
+) -> Result<NativePartitionedMutateItems, Diagnostic> {
+    let mut direct = Vec::new();
+    let mut grouped = NativeGroupedMutateItems::new();
+    for (column, expr) in items {
+        let mut group = None;
+        data_expr_collect_multi_key_window_sort(expr, &mut group)?;
+        let item = (column.clone(), expr.clone());
+        if let Some(group) = group {
+            if let Some((_, items)) = grouped.iter_mut().find(|(current, _)| current == &group) {
+                items.push(item);
+            } else {
+                grouped.push((group, vec![item]));
+            }
+        } else {
+            direct.push(item);
+        }
+    }
+    Ok((direct, grouped))
 }
 
 #[cfg(feature = "polars-engine")]
@@ -2347,10 +2422,10 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
             | DataScalarFunction::ToBoolean
             | DataScalarFunction::Abs
             | DataScalarFunction::Round { .. } => {
-                let [arg] = args.as_slice() else {
+                let [arg_expr] = args.as_slice() else {
                     return Err(unsupported_native_operation("scalar function arity"));
                 };
-                let arg = native_expr(arg)?;
+                let arg = native_expr(arg_expr)?;
                 match function {
                     DataScalarFunction::IsNull => arg.is_null(),
                     DataScalarFunction::NotNull => arg.is_not_null(),
@@ -2364,7 +2439,7 @@ fn native_expr(expr: &DataExpr) -> Result<native::Expr, Diagnostic> {
                         .cast(native::DataType::String)
                         .str()
                         .strip_chars(native::lit(native::NULL)),
-                    DataScalarFunction::ToString => arg.cast(native::DataType::String),
+                    DataScalarFunction::ToString => native_to_string_expr(arg_expr, arg)?,
                     DataScalarFunction::ToNumber => arg
                         .cast(native::DataType::String)
                         .str()
@@ -2431,6 +2506,100 @@ fn native_static_text_literal(expr: &DataExpr, reason: &'static str) -> Result<S
 }
 
 #[cfg(feature = "polars-engine")]
+fn native_to_string_expr(
+    source: &DataExpr,
+    expr: native::Expr,
+) -> Result<native::Expr, Diagnostic> {
+    if data_expr_native_numeric_result(source) {
+        Ok(native_numeric_to_string_expr(expr))
+    } else {
+        Ok(expr.cast(native::DataType::String))
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_numeric_to_string_expr(expr: native::Expr) -> native::Expr {
+    expr.cast(native::DataType::Float64)
+        .cast(native::DataType::String)
+        .str()
+        .strip_suffix(native::lit(".0"))
+}
+
+#[cfg(feature = "polars-engine")]
+fn data_expr_native_numeric_result(expr: &DataExpr) -> bool {
+    match expr {
+        DataExpr::Literal(DataLiteral::Number(_)) => true,
+        DataExpr::Literal(DataLiteral::Null | DataLiteral::Bool(_) | DataLiteral::String(_)) => {
+            false
+        }
+        DataExpr::Column(_) => false,
+        DataExpr::Unary {
+            op: DataUnaryOp::Neg,
+            ..
+        } => true,
+        DataExpr::Unary {
+            op: DataUnaryOp::Not,
+            ..
+        } => false,
+        DataExpr::Binary { op, .. } => matches!(
+            op,
+            DataBinaryOp::Add
+                | DataBinaryOp::Sub
+                | DataBinaryOp::Mul
+                | DataBinaryOp::Div
+                | DataBinaryOp::Rem
+        ),
+        DataExpr::Call { function, args } => match function {
+            DataScalarFunction::ToNumber
+            | DataScalarFunction::Abs
+            | DataScalarFunction::Round { .. } => true,
+            DataScalarFunction::Coalesce => args.iter().all(data_expr_native_numeric_result),
+            DataScalarFunction::IfElse => {
+                let [_, when_true, when_false] = args.as_slice() else {
+                    return false;
+                };
+                data_expr_native_numeric_result(when_true)
+                    && data_expr_native_numeric_result(when_false)
+            }
+            DataScalarFunction::IsNull
+            | DataScalarFunction::NotNull
+            | DataScalarFunction::Concat
+            | DataScalarFunction::Lower
+            | DataScalarFunction::Upper
+            | DataScalarFunction::Trim
+            | DataScalarFunction::Contains
+            | DataScalarFunction::StartsWith
+            | DataScalarFunction::Replace
+            | DataScalarFunction::ToString
+            | DataScalarFunction::ToBoolean
+            | DataScalarFunction::Date
+            | DataScalarFunction::Datetime
+            | DataScalarFunction::Year
+            | DataScalarFunction::Month
+            | DataScalarFunction::Day
+            | DataScalarFunction::DateFloor
+            | DataScalarFunction::DateFormat => false,
+        },
+        DataExpr::Window { function, args, .. } => match function {
+            DataWindowFunction::RowNumber
+            | DataWindowFunction::Rank
+            | DataWindowFunction::DenseRank
+            | DataWindowFunction::PercentRank
+            | DataWindowFunction::CumeDist
+            | DataWindowFunction::Count
+            | DataWindowFunction::Sum
+            | DataWindowFunction::Mean => true,
+            DataWindowFunction::Lag
+            | DataWindowFunction::Lead
+            | DataWindowFunction::FirstValue
+            | DataWindowFunction::LastValue
+            | DataWindowFunction::Min
+            | DataWindowFunction::Max => args.first().is_some_and(data_expr_native_numeric_result),
+        },
+    }
+}
+
+#[cfg(feature = "polars-engine")]
 fn native_window_expr(
     function: DataWindowFunction,
     args: &[DataExpr],
@@ -2456,6 +2625,10 @@ fn native_window_expr(
         DataWindowFunction::Count if args.is_empty() => match spec.frame {
             DataWindowFrame::WholePartition => native_window_over(native::len(), spec, false),
             DataWindowFrame::UnboundedPrecedingToCurrentRow => native_window_row_position(spec),
+            DataWindowFrame::CurrentRowToUnboundedFollowing
+            | DataWindowFrame::PrecedingToCurrentRow { .. }
+            | DataWindowFrame::CurrentRowToFollowing { .. }
+            | DataWindowFrame::PrecedingToFollowing { .. } => native_frame_row_count_expr(spec),
         },
         DataWindowFunction::Count => {
             let [arg] = args else {
@@ -2468,6 +2641,12 @@ fn native_window_expr(
                 DataWindowFrame::UnboundedPrecedingToCurrentRow => {
                     let count = native_expr(arg)?.cum_count(false);
                     native_window_over(count, spec, true)
+                }
+                DataWindowFrame::CurrentRowToUnboundedFollowing
+                | DataWindowFrame::PrecedingToCurrentRow { .. }
+                | DataWindowFrame::CurrentRowToFollowing { .. }
+                | DataWindowFrame::PrecedingToFollowing { .. } => {
+                    native_count_window_expr(native_expr(arg)?, spec)
                 }
             }
         }
@@ -2501,6 +2680,12 @@ fn native_window_expr(
                 }
                 DataWindowFrame::UnboundedPrecedingToCurrentRow => {
                     native_running_aggregate_window_expr(function, expr, spec)
+                }
+                DataWindowFrame::CurrentRowToUnboundedFollowing
+                | DataWindowFrame::PrecedingToCurrentRow { .. }
+                | DataWindowFrame::CurrentRowToFollowing { .. }
+                | DataWindowFrame::PrecedingToFollowing { .. } => {
+                    native_framed_aggregate_window_expr(function, expr, spec)
                 }
             }
         }
@@ -2558,15 +2743,252 @@ fn native_value_window_expr(
     let [arg] = args else {
         return Err(unsupported_native_operation("value window arity"));
     };
-    if !first && spec.frame == DataWindowFrame::UnboundedPrecedingToCurrentRow {
-        return native_expr(arg);
+    let value = native_expr(arg)?;
+    match (first, spec.frame) {
+        (true, DataWindowFrame::CurrentRowToUnboundedFollowing)
+        | (true, DataWindowFrame::CurrentRowToFollowing { .. })
+        | (false, DataWindowFrame::UnboundedPrecedingToCurrentRow)
+        | (false, DataWindowFrame::PrecedingToCurrentRow { .. }) => Ok(value),
+        (true, DataWindowFrame::WholePartition)
+        | (true, DataWindowFrame::UnboundedPrecedingToCurrentRow) => {
+            native_window_over(value.first(), spec, true)
+        }
+        (false, DataWindowFrame::WholePartition)
+        | (false, DataWindowFrame::CurrentRowToUnboundedFollowing) => {
+            native_window_over(value.last(), spec, true)
+        }
+        (true, DataWindowFrame::PrecedingToCurrentRow { rows }) => {
+            native_shifted_frame_value(value, spec, rows as i64)
+        }
+        (false, DataWindowFrame::CurrentRowToFollowing { rows }) => {
+            native_shifted_frame_value(value, spec, -(rows as i64))
+        }
+        (
+            true,
+            DataWindowFrame::PrecedingToFollowing {
+                preceding,
+                following: _,
+            },
+        ) => native_shifted_frame_value(value, spec, preceding as i64),
+        (
+            false,
+            DataWindowFrame::PrecedingToFollowing {
+                preceding: _,
+                following,
+            },
+        ) => native_shifted_frame_value(value, spec, -(following as i64)),
     }
-    let expr = if first {
-        native_expr(arg)?.first()
-    } else {
-        native_expr(arg)?.last()
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_frame_row_count_expr(spec: &DataWindowSpec) -> Result<native::Expr, Diagnostic> {
+    let position = native_window_row_position(spec)?;
+    let partition_len = native_window_over(native::len(), spec, false)?;
+    let expr = match spec.frame {
+        DataWindowFrame::WholePartition => partition_len,
+        DataWindowFrame::UnboundedPrecedingToCurrentRow => position,
+        DataWindowFrame::CurrentRowToUnboundedFollowing => {
+            partition_len - position + native::lit(1u32)
+        }
+        DataWindowFrame::PrecedingToCurrentRow { rows } => {
+            native_min_u32_expr(position, native::lit((rows + 1) as u32))
+        }
+        DataWindowFrame::CurrentRowToFollowing { rows } => {
+            let available = partition_len - position + native::lit(1u32);
+            native_min_u32_expr(available, native::lit((rows + 1) as u32))
+        }
+        DataWindowFrame::PrecedingToFollowing {
+            preceding,
+            following,
+        } => {
+            let start = native::when(position.clone().gt(native::lit(preceding as u32)))
+                .then(position.clone() - native::lit(preceding as u32))
+                .otherwise(native::lit(1u32));
+            let unclamped_end = position + native::lit(following as u32);
+            let end = native_min_u32_expr(unclamped_end, partition_len);
+            native::when(start.clone().lt_eq(end.clone()))
+                .then(end - start + native::lit(1u32))
+                .otherwise(native::lit(0u32))
+        }
+    };
+    Ok(expr)
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_count_window_expr(
+    expr: native::Expr,
+    spec: &DataWindowSpec,
+) -> Result<native::Expr, Diagnostic> {
+    let present = expr.is_not_null().cast(native::DataType::UInt32);
+    let expr = match spec.frame {
+        DataWindowFrame::WholePartition => present.sum(),
+        DataWindowFrame::UnboundedPrecedingToCurrentRow => present.cum_sum(false),
+        DataWindowFrame::CurrentRowToUnboundedFollowing => {
+            native_reverse_running_count_expr(present)
+        }
+        DataWindowFrame::PrecedingToCurrentRow { rows } => {
+            present.rolling_sum(native_fixed_window_options(rows + 1, false))
+        }
+        DataWindowFrame::CurrentRowToFollowing { rows } => present
+            .reverse()
+            .rolling_sum(native_fixed_window_options(rows + 1, false))
+            .reverse(),
+        DataWindowFrame::PrecedingToFollowing {
+            preceding,
+            following,
+        } if preceding == following => {
+            present.rolling_sum(native_fixed_window_options(preceding + following + 1, true))
+        }
+        DataWindowFrame::PrecedingToFollowing { .. } => {
+            return Err(unsupported_native_operation(
+                "asymmetric bounded window frame",
+            ));
+        }
     };
     native_window_over(expr, spec, true)
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_framed_aggregate_window_expr(
+    function: DataWindowFunction,
+    expr: native::Expr,
+    spec: &DataWindowSpec,
+) -> Result<native::Expr, Diagnostic> {
+    let expr = match spec.frame {
+        DataWindowFrame::WholePartition => match function {
+            DataWindowFunction::Sum => expr.sum(),
+            DataWindowFunction::Mean => expr.mean(),
+            DataWindowFunction::Min => expr.min(),
+            DataWindowFunction::Max => expr.max(),
+            _ => return Err(unsupported_native_operation("aggregate window function")),
+        },
+        DataWindowFrame::UnboundedPrecedingToCurrentRow => {
+            return native_running_aggregate_window_expr(function, expr, spec);
+        }
+        DataWindowFrame::CurrentRowToUnboundedFollowing => {
+            native_reverse_running_aggregate_expr(function, expr)?
+        }
+        DataWindowFrame::PrecedingToCurrentRow { rows } => native_rolling_aggregate_expr(
+            function,
+            expr,
+            native_fixed_window_options(rows + 1, false),
+        )?,
+        DataWindowFrame::CurrentRowToFollowing { rows } => native_rolling_aggregate_expr(
+            function,
+            expr.reverse(),
+            native_fixed_window_options(rows + 1, false),
+        )?
+        .reverse(),
+        DataWindowFrame::PrecedingToFollowing {
+            preceding,
+            following,
+        } if preceding == following => native_rolling_aggregate_expr(
+            function,
+            expr,
+            native_fixed_window_options(preceding + following + 1, true),
+        )?,
+        DataWindowFrame::PrecedingToFollowing { .. } => {
+            return Err(unsupported_native_operation(
+                "asymmetric bounded window frame",
+            ));
+        }
+    };
+    native_window_over(expr, spec, true)
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_reverse_running_count_expr(expr: native::Expr) -> native::Expr {
+    expr.reverse().cum_sum(false).reverse()
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_reverse_running_aggregate_expr(
+    function: DataWindowFunction,
+    expr: native::Expr,
+) -> Result<native::Expr, Diagnostic> {
+    Ok(match function {
+        DataWindowFunction::Sum => {
+            native_running_fill_nulls(expr.reverse().cum_sum(false)).reverse()
+        }
+        DataWindowFunction::Min => {
+            native_running_fill_nulls(expr.reverse().cum_min(false)).reverse()
+        }
+        DataWindowFunction::Max => {
+            native_running_fill_nulls(expr.reverse().cum_max(false)).reverse()
+        }
+        DataWindowFunction::Mean => {
+            let reversed = expr.reverse();
+            let sum = native_running_fill_nulls(reversed.clone().cum_sum(false));
+            let count = reversed.cum_count(false);
+            native::when(count.clone().gt(native::lit(0u32)))
+                .then(sum.cast(native::DataType::Float64) / count.cast(native::DataType::Float64))
+                .otherwise(native::lit(native::NULL))
+                .reverse()
+        }
+        _ => return Err(unsupported_native_operation("aggregate window function")),
+    })
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_rolling_aggregate_expr(
+    function: DataWindowFunction,
+    expr: native::Expr,
+    options: native::RollingOptionsFixedWindow,
+) -> Result<native::Expr, Diagnostic> {
+    Ok(match function {
+        DataWindowFunction::Sum => expr.rolling_sum(options),
+        DataWindowFunction::Mean => expr.rolling_mean(options),
+        DataWindowFunction::Min => expr.rolling_min(options),
+        DataWindowFunction::Max => expr.rolling_max(options),
+        _ => return Err(unsupported_native_operation("aggregate window function")),
+    })
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_fixed_window_options(
+    window_size: usize,
+    center: bool,
+) -> native::RollingOptionsFixedWindow {
+    native::RollingOptionsFixedWindow {
+        window_size,
+        min_periods: 1,
+        center,
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_shifted_frame_value(
+    value: native::Expr,
+    spec: &DataWindowSpec,
+    offset: i64,
+) -> Result<native::Expr, Diagnostic> {
+    if offset == 0 {
+        return Ok(value);
+    }
+    let shifted = native_window_over(value.clone().shift(native::lit(offset)), spec, true)?;
+    let position = native_window_row_position(spec)?;
+    let (in_bounds, boundary) = if offset > 0 {
+        (
+            position.gt(native::lit(offset as u32)),
+            native_window_over(value.first(), spec, true)?,
+        )
+    } else {
+        let rows = (-offset) as u32;
+        let partition_len = native_window_over(native::len(), spec, false)?;
+        (
+            (position + native::lit(rows)).lt_eq(partition_len),
+            native_window_over(value.last(), spec, true)?,
+        )
+    };
+    Ok(native::when(in_bounds).then(shifted).otherwise(boundary))
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_min_u32_expr(left: native::Expr, right: native::Expr) -> native::Expr {
+    native::when(left.clone().lt_eq(right.clone()))
+        .then(left)
+        .otherwise(right)
 }
 
 #[cfg(feature = "polars-engine")]
