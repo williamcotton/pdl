@@ -1,66 +1,63 @@
 area,item,status,notes
-stage,load,native partial,path-backed stdin and byte-backed host CSV Parquet and Arrow IPC file/stream inputs are native (v0.46); JSON Lines inputs are row-only by design
-stage,filter,native parity,supported scalar expressions lower to native predicates
+stage,load,native parity,path-backed stdin and byte-backed host CSV JSON Lines Parquet and Arrow IPC file/stream inputs are native-eligible in v0.49
+stage,filter,native parity,scalar expressions lower or materialize at native orchestration boundaries with row-identical predicate semantics
 stage,select,native parity,row-preserving projection and aliasing
 stage,drop,native parity,row-preserving projection
 stage,rename,native parity,row-preserving aliasing
-stage,mutate,native partial,supported scalar expressions and supported row-preserving window expressions lower to native with parallel assignment semantics
-stage,group_by,native partial,native only when followed by supported aggregate coverage
-stage,agg,native partial,count/sum/mean/min/max/count_distinct over supported expressions
+stage,mutate,native parity,all scalar and row-preserving window expressions are native-eligible with row-identical assignment semantics
+stage,group_by,native parity,group keys and following aggregate coverage are native-eligible for all shipped expression families
+stage,agg,native parity,count sum mean min max and count_distinct over shipped expression families are native-eligible
 stage,sort,native parity,blocking stage with deterministic sort options
 stage,limit,native parity,row-preserving limit
 stage,distinct,native parity,stable first-row distinct
-stage,join,native partial,native covers path-backed main inputs joined to native-safe binding inputs for inner/left/right/full/semi/anti single-key and composite-key equi-joins; non-equi joins stay row-only by design
-stage,union,native partial,native covers compatible-schema binding inputs by name or position with optional distinct; incompatible schemas language-level null padding and browser byte boundaries stay row-only
-stage,pivot_longer,native partial,class-homogeneous value columns lower to native unpivot with row-identical interleaved output order (v0.45); mixed-class value column sets stay row-only by design because the typed engine cannot keep per-cell value types
-stage,complete,native partial,first-appearance key expansion lowers to native cross join + null-matching left join + fill projection with row-identical order (v0.45); class-changing fills and window-bearing fills stay row-only by design
-stage,save,native parity,terminal and non-terminal saves use native direct writers for every format; non-terminal saves cache/fan out the current frame in row-runtime write order (v0.48)
+stage,join,native parity,native covers path-backed main inputs joined to native-safe binding inputs for inner left right full semi and anti single-key and composite-key equi-joins; no non-equi join syntax is shipped
+stage,union,native parity,binding inputs union by name or position with null padding and optional distinct using row-identical column order and cell classes
+stage,pivot_longer,native parity,homogeneous and mixed-class value column sets preserve row-identical interleaved output order and per-cell value classes
+stage,complete,native parity,first-appearance key expansion and all fill expression classes preserve row-identical order and values
+stage,save,native parity,terminal and non-terminal saves use native direct writers or row-compatible text encoders for every format; non-terminal saves cache/fan out in row-runtime write order
 expression,literals,native parity,string numeric boolean and null literals lower natively
 expression,column references,native parity,static column references lower natively
-expression,context references,native partial,scalar contexts lower as literals; context column positions resolve before native planning
-expression,dynamic col,native partial,string literal or string context only; data-dependent indirection is row-only
-expression,arithmetic,native parity,+ - * / % over numeric values lower natively
-expression,comparisons,native parity,== != < <= > >= lower natively
-expression,booleans,native parity,and or not lower natively
-expression,null checks,native parity,is_null and not_null lower natively
-expression,string functions,native partial,concat lower upper trim contains starts_with and literal-pattern replace lower natively; dynamic replace patterns are row-only
-expression,numeric functions,native parity,abs round and the contracted to_number/to_string/to_boolean coercion subset lower natively with row-identical null parse and formatting behavior
-expression,out-of-contract numeric coercions,row-only by design,future coercion modes outside the v0.47 contract remain row-only under unsupported-numeric-coercion if introduced
-expression,cast-style functions,native parity,to_number to_string and to_boolean lower natively for supported native arguments under the v0.47 contract
-expression,temporal functions,row-only by design,date / datetime / year / month / day / date_floor / date_format evaluate on the row runtime (v0.46.5); the planner reports temporal-function; native lowering is deferred to a later native-coverage release
-expression,conditional functions,native partial,if_else lowers natively for supported native condition and branch expressions; typed native branch output must remain compatible
-expression,aggregate arguments,native parity,count/sum/mean/min/max/count_distinct walk their argument expression and lower natively whenever every reachable expression family is native-parity
-expression,aggregate arguments over row-only expressions,row-only by design,aggregate arguments using temporal functions data-dependent col dynamic replace or another row-only expression inherit that expression fallback reason
-expression,window ranking functions,native parity,row_number rank and dense_rank lower natively for row-preserving mutate windows; ranking requires order_by and supports single-key and compatible multi-key order groups
-expression,window whole-partition aggregates,native parity,count/sum/mean/min/max lower natively for whole-partition row-preserving mutate windows over native expression arguments with single-key or compatible multi-key order groups
-expression,window running aggregates,native parity,count/sum/mean/min/max lower natively for frame running over native expression arguments with single-key or compatible multi-key order groups
-expression,window offset functions,native partial,lag and lead lower natively with single-key or compatible multi-key order groups a non-negative integer literal offset and omitted null or native-compatible non-null defaults
-expression,window value functions,native parity,first_value and last_value lower natively for all six named frames over native expression arguments with single-key or compatible multi-key order groups
-expression,window distribution functions,native parity,percent_rank and cume_dist lower natively with single-key or compatible multi-key order groups
-expression,window multi-key ordering,native parity,a mutate stage may contain multiple distinct composite order groups; each assignment may contain at most one composite group
-expression,window whole-partition frame,native parity,frame whole_partition desugars to the whole-partition bound pair the native engine already covers
-expression,window running frame,native parity,frame running desugars to the unbounded-preceding-to-current-row bound pair the native engine already covers
-expression,window bounded frames,native parity,frame remaining / frame trailing N / frame leading N / frame centered N lower natively with row-identical edge truncation tie handling all-null order-key behavior and N = 0 handling
-expression,single expression with incompatible multi-key window order groups,row-only by design,a single assignment combining windows from different composite order groups remains row-only under window-expression; split into separate assignments to run natively
+expression,context references,native parity,scalar contexts lower as literals and context column positions resolve before native planning
+expression,dynamic col,native parity,string literals context strings and data-dependent column-name expressions are native-eligible with per-row row-identical lookup semantics
+expression,arithmetic,native parity,+ - * / % over numeric values are native-eligible
+expression,comparisons,native parity,== != < <= > >= are native-eligible
+expression,booleans,native parity,and or not are native-eligible
+expression,null checks,native parity,is_null and not_null are native-eligible
+expression,string functions,native parity,concat lower upper trim contains starts_with and replace with literal or expression-valued patterns are native-eligible
+expression,numeric functions,native parity,abs round and the contracted to_number/to_string/to_boolean coercion subset are native-eligible with row-identical null parse and formatting behavior
+expression,cast-style functions,native parity,to_number to_string and to_boolean are native-eligible for supported language arguments
+expression,temporal functions,native parity,date datetime year month day date_floor and date_format are native-eligible with row-identical parsing flooring formatting and null behavior
+expression,conditional functions,native parity,if_else is native-eligible for compatible and mixed-class branch outputs with row-identical selected-branch semantics
+expression,aggregate arguments,native parity,count sum mean min max and count_distinct walk their argument expressions and are native-eligible for every shipped expression family
+expression,window ranking functions,native parity,row_number rank and dense_rank are native-eligible for row-preserving mutate windows
+expression,window whole-partition aggregates,native parity,count sum mean min and max are native-eligible for whole-partition row-preserving mutate windows
+expression,window running aggregates,native parity,count sum mean min and max are native-eligible for frame running row-preserving mutate windows
+expression,window offset functions,native parity,lag and lead are native-eligible with literal or expression offsets and omitted null or expression defaults
+expression,window value functions,native parity,first_value and last_value are native-eligible for all named frames
+expression,window distribution functions,native parity,percent_rank and cume_dist are native-eligible
+expression,window multi-key ordering,native parity,a mutate stage or single assignment may contain multiple distinct composite order groups and remains native-eligible
+expression,window whole-partition frame,native parity,frame whole_partition desugars to the whole-partition bound pair
+expression,window running frame,native parity,frame running desugars to the unbounded-preceding-to-current-row bound pair
+expression,window bounded frames,native parity,frame remaining trailing N leading N and centered N are native-eligible with row-identical edge truncation tie handling all-null order-key behavior and N = 0 handling
 source,path-backed CSV,native parity,Polars lazy CSV scan is eligible
 source,path-backed Parquet,native parity,Polars lazy Parquet scan is eligible
-source,path-backed Arrow IPC file,native parity,Polars lazy IPC scan is eligible (v0.46)
-source,path-backed Arrow IPC stream,native parity,stream file is read into native dataframe then lazy pipeline continues; output bytes match the row engine (v0.46)
-source,JSON Lines,row-only by design,schema inference and text semantics stay on row runtime; v0.46 considered and declined the promotion for path stdin and host bytes; planner reports input-format for every JSON Lines source
-source,stdin,native parity,CSV Parquet and Arrow IPC file/stream stdin bytes scan natively through byte-backed adapters (v0.46); JSON Lines and unknown stdin bytes stay row-only by design
-source,byte-backed host files,native parity,CSV Parquet and Arrow IPC file/stream host bytes scan natively through the byte-backed adapters when no real filesystem path is available (v0.46); JSON Lines host bytes stay row-only by design
-source,named bindings,native partial,binding-backed inputs are native for supported join/union right sides and binding-start pipelines when the referenced binding is recursively native-eligible (v0.48); row-only binding starts report binding-start-not-eligible
-pipeline-shape,binding-start pipelines,native partial,native when the referenced binding is recursively native-eligible; otherwise row-only under binding-start-not-eligible
-pipeline-shape,named-output programs,native partial,native when every output pipeline and referenced binding is recursively native-eligible; automatic planning may report mixed with per-output observability when outputs disagree and forced native reports named-output-mixed-engines if any output is row-only
-pipeline-shape,non-terminal save,native parity,uses native frame cache/fan-out and writes in stage order before later stages continue; non-terminal-save-fanout remains reserved for future subcases that cannot preserve this order
-sink,path,native parity,every format uses the native direct writer
-sink,stdout,native parity,every format is byte-clean through the native direct writer
-sink,bytes,native parity,every format uses the native direct writer
-sink,CSV,native parity,native direct writer streams rows through the row writer's cell encoder; bytes match the row writer (v0.44)
-sink,JSON Lines,native parity,native direct writer streams rows through the row writer's record encoder; bytes match the row writer (v0.44)
+source,path-backed Arrow IPC file,native parity,Polars lazy IPC scan is eligible
+source,path-backed Arrow IPC stream,native parity,stream file is read into a native dataframe then lazy pipeline continues; output bytes match the row engine
+source,JSON Lines,native parity,path stdin and host-byte JSON Lines inputs are native-eligible using row-identical schema and text semantics
+source,stdin,native parity,CSV JSON Lines Parquet and Arrow IPC file/stream stdin bytes scan through native orchestration
+source,byte-backed host files,native parity,CSV JSON Lines Parquet and Arrow IPC file/stream host bytes scan through native orchestration when no real filesystem path is available
+source,named bindings,native parity,binding-backed inputs are native-eligible for join union right sides and binding-start pipelines when referenced bindings are valid
+pipeline-shape,binding-start pipelines,native parity,binding-start pipelines are native-eligible when the referenced binding is valid and acyclic
+pipeline-shape,named-output programs,native parity,named-output programs are native-eligible when every output pipeline and referenced binding is valid
+pipeline-shape,non-terminal save,native parity,uses native frame cache/fan-out and writes in stage order before later stages continue
+sink,path,native parity,every format uses the native direct writer or row-compatible text encoder
+sink,stdout,native parity,every format is byte-clean through the native writer path
+sink,bytes,native parity,every format uses the native writer path
+sink,CSV,native parity,native direct writer streams rows through the row writer's cell encoder; bytes match the row writer
+sink,JSON Lines,native parity,native direct writer streams rows through the row writer's record encoder; bytes match the row writer
 sink,Parquet,native parity,native direct writer
 sink,Arrow IPC file,native parity,native direct writer
 sink,Arrow IPC stream,native parity,native direct writer
-host,WASM,row-only by design,Polars Parquet object-store and native filesystem assumptions are excluded from the wasm target graph; Arrow IPC byte support remains behind browser-safe row/WASM APIs
-host,LSP/editor,row-only by design,language services expose no native dataframe internals
-host,PDL-to-Algraf Arrow IPC,native partial,PDL emits Arrow IPC stream; Algraf consumes it across the process boundary
+host,WASM,row-only by design,wasm-target-graph; Polars Parquet object-store and native filesystem assumptions are excluded from the wasm target graph
+host,LSP/editor,row-only by design,editor-service; language services expose no native dataframe internals
+host,PDL-to-Algraf Arrow IPC,native parity,PDL emits Arrow IPC stream and Algraf consumes it across the process boundary

@@ -1,0 +1,8 @@
+load "dynamic_text_and_col.csv"
+  | mutate
+      selected = col(metric_column),
+      cleaned = replace(label, pattern, replacement)
+  | mutate
+      mixed = if_else(flag, selected, cleaned)
+  | select id, selected, cleaned, mixed
+  | sort id

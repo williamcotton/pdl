@@ -1,0 +1,13 @@
+load "../../data/generated/million-row-events.csv"
+  | mutate
+      previous_amount = lag(amount, offset, 0) over (
+        partition_by segment
+        order_by row
+      ),
+      next_amount = lead(amount, offset, 0) over (
+        partition_by segment
+        order_by row
+      )
+  | filter row % 1000 == 0
+  | select row, segment, amount, offset, previous_amount, next_amount
+  | sort segment, row

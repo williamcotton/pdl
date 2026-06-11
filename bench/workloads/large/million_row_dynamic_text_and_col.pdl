@@ -1,0 +1,10 @@
+load "../../data/generated/million-row-events.csv"
+  | mutate
+      selected_amount = col(metric_column),
+      cleaned_label = replace(label, pattern, replacement)
+  | mutate
+      mixed_value = if_else(flag, selected_amount, cleaned_label)
+  | filter not_null(selected_amount)
+  | select row, segment, selected_amount, cleaned_label, mixed_value
+  | sort row
+  | limit 10000

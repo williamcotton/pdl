@@ -9,7 +9,7 @@ consumer lockfiles after npm has the new tarballs.
 ## Published Package Mode
 
 Use published packages for demo, Studio, and downstream package-surface checks.
-For the v0.48.0 release, npm was checked on June 11, 2026: `pdl-wasm`
+For the v0.49.0 release, npm was checked on June 11, 2026: `pdl-wasm`
 publishes `0.30.0`, `0.39.0`, `0.43.5`, `0.47.0`, and `0.47.1`;
 `pdl-editor` publishes `0.30.0`, `0.30.1`, `0.39.0`, `0.43.5`,
 `0.43.6`, and `0.47.0`.
@@ -77,6 +77,13 @@ re-checked on June 11, 2026: `pdl-wasm@0.48.0` and `pdl-editor@0.48.0` are
 not published. Browser package versions and consumer pins stay at the
 published `pdl-wasm@0.47.1` / `pdl-editor@0.47.0`; no `0.48.0` browser
 packages are prepared.
+
+The v0.49.0 native-coverage completion release is likewise a native Rust/CLI
+release with no new parser, editor-service, or WASM-visible language surface.
+Npm was re-checked on June 11, 2026: `pdl-wasm@0.49.0` and
+`pdl-editor@0.49.0` are not published. Browser package versions and consumer
+pins stay at the published `pdl-wasm@0.47.1` / `pdl-editor@0.47.0`; no
+`0.49.0` browser packages are prepared.
 
 ## Package Validation
 

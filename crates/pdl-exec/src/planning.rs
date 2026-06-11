@@ -43,6 +43,7 @@ pub enum PlannedEngine {
     /// engine for a row-strict request is `Row`.
     RowStrict,
     Native,
+    NativeStrict,
     /// Program-level observability for named-output programs where automatic
     /// planning selects different engines per output. Not a CLI request value.
     Mixed,
@@ -55,6 +56,7 @@ impl PlannedEngine {
             PlannedEngine::Row => "row",
             PlannedEngine::RowStrict => "row-strict",
             PlannedEngine::Native => "native",
+            PlannedEngine::NativeStrict => "native-strict",
             PlannedEngine::Mixed => "mixed",
         }
     }
@@ -113,14 +115,15 @@ impl SinkStrategy {
 /// `execution.observability.fallback_reason`.
 ///
 /// The v0.43 refinement split the coarse v0.40–v0.42 categories into
-/// coverage-boundary variants. Variants marked "reserve" are defined ahead of
-/// the v0.44–v0.49 native-coverage promotions. Retired variants stay in the
-/// vocabulary until the v0.49 cleanup.
+/// coverage-boundary variants. Since v0.49, promoted language-feature variants
+/// are retained only for stable observability vocabulary, defensive paths, and
+/// invalid-program cases.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeUnsupportedReason {
     /// No runnable main pipeline exists.
     NoRunnableMain,
-    /// Path-backed input format has no native scan (e.g. JSON Lines paths).
+    /// Input format has no native scan. JSON Lines is native-eligible since
+    /// v0.49; this is reserved for genuinely unknown formats.
     InputFormat,
     /// Scalar function is outside the native allowlist.
     ScalarFunction,
@@ -130,26 +133,23 @@ pub enum NativeUnsupportedReason {
     AggregateFunction,
     /// Aggregate arity is outside the native contract.
     AggregateArity,
-    /// Window function, frame, or order grouping is outside the native subset.
+    /// Window function, frame, or arity is outside the language/native subset.
     WindowExpression,
-    /// `col(...)` argument is not a string literal or string-typed context
-    /// default; the column reference is data-dependent.
+    /// Retired for valid v0.49 language-feature pipelines: data-dependent
+    /// `col(...)` is native-eligible.
     DataDependentColIndirection,
-    /// `replace` pattern or replacement is not a string literal or
-    /// string-typed context default; the pattern is data-dependent.
+    /// Retired for valid v0.49 language-feature pipelines: expression-valued
+    /// `replace` pattern and replacement arguments are native-eligible.
     DataDependentReplacePattern,
-    /// `to_number` / `to_string` / `to_boolean` input falls outside the v0.47
-    /// coercion contract (v0.47 reserve).
+    /// Retired for valid v0.49 language-feature pipelines.
     UnsupportedNumericCoercion,
-    /// Temporal scalar functions (`date`, `datetime`, `year`, `month`,
-    /// `day`, `date_floor`, `date_format`) are row-only by design in
-    /// v0.46.5; native lowering is deferred to a later native-coverage
-    /// release.
+    /// Retired for valid v0.49 language-feature pipelines: temporal scalar
+    /// functions are native-eligible.
     TemporalFunction,
-    /// `union` participants have heterogeneous schemas and require
-    /// null-padding alignment (v0.41 row-only reserve).
+    /// Retired for valid v0.49 language-feature pipelines: heterogeneous
+    /// `union` null-padding is native-eligible.
     UnionNullPadding,
-    /// Join predicate is not an equality on columns (v0.41 row-only reserve).
+    /// Reserved for future unshipped non-equi join syntax.
     NonEquiJoin,
     /// Pipeline-start binding references a binding the native planner cannot
     /// lower.
@@ -159,20 +159,14 @@ pub enum NativeUnsupportedReason {
     /// Non-terminal `save` requires a fan-out subcase the native planner cannot
     /// preserve in row-runtime write order.
     NonTerminalSaveFanout,
-    /// Retired in v0.46: the byte-backed scan adapters promoted stdin CSV
-    /// and Parquet, so the planner no longer produces this variant. JSON
-    /// Lines stdin reports `input-format` like path-backed JSON Lines. The
-    /// variant stays in the vocabulary until the v0.49 cleanup.
+    /// Retired in v0.46 and retained for stable observability vocabulary.
     StdinBytesBackedScan,
-    /// Retired in v0.46: host-supplied CSV / Parquet bytes scan natively
-    /// through the same byte-backed adapters, so the planner no longer
-    /// produces this variant. The variant stays in the vocabulary until the
-    /// v0.49 cleanup.
+    /// Retired in v0.46 and retained for stable observability vocabulary.
     HostBytesBackedScan,
     /// Sink format is not wired to `NativeDirectWriter`. Since the v0.44
     /// CSV/NDJSON writer promotions every format has a native direct writer;
     /// the variant survives as the defensive boundary for native sink writes
-    /// that fail to return bytes. Vocabulary cleanup is v0.49 work.
+    /// that fail to return bytes.
     NativeSinkWriter,
     /// Stage is `row-only by design` with no narrower variant. Catch-all for
     /// stages the coverage matrix declares row-only.
@@ -514,7 +508,10 @@ fn build_observability(
     let output_observability = output_observability(prepared, ir, options.engine);
     let mut native_reason = native_unsupported_reason(prepared, ir);
     if !ir.outputs.is_empty()
-        && options.engine == PlannedEngine::Native
+        && matches!(
+            options.engine,
+            PlannedEngine::Native | PlannedEngine::NativeStrict
+        )
         && output_observability
             .iter()
             .any(|output| output.fallback_reason.is_some())
@@ -532,7 +529,7 @@ fn build_observability(
     let selected_engine = match options.engine {
         PlannedEngine::Auto => eligible_engine,
         PlannedEngine::Row | PlannedEngine::RowStrict => PlannedEngine::Row,
-        PlannedEngine::Native => PlannedEngine::Native,
+        PlannedEngine::Native | PlannedEngine::NativeStrict => PlannedEngine::Native,
         PlannedEngine::Mixed => PlannedEngine::Mixed,
     };
     let output_format = plan_output_format(prepared, stdout_format, steps);
@@ -590,7 +587,7 @@ fn output_observability(
             let selected_engine = match requested_engine {
                 PlannedEngine::Auto => eligible_engine,
                 PlannedEngine::Row | PlannedEngine::RowStrict => PlannedEngine::Row,
-                PlannedEngine::Native => PlannedEngine::Native,
+                PlannedEngine::Native | PlannedEngine::NativeStrict => PlannedEngine::Native,
                 PlannedEngine::Mixed => eligible_engine,
             };
             OutputPlanObservability {
@@ -761,9 +758,6 @@ fn native_pipeline_unsupported_reason(
             | StageIr::Distinct { .. } => {}
             StageIr::Mutate { items, .. } => {
                 for item in items {
-                    if native_multi_key_window_order_reason(item).is_some() {
-                        return Some(NativeUnsupportedReason::WindowExpression);
-                    }
                     if let Some(reason) = native_expr_unsupported_reason(&item.expr) {
                         return Some(reason);
                     }
@@ -815,15 +809,10 @@ fn native_pipeline_unsupported_reason(
                 }
             }
             StageIr::Complete { keys, fills, .. } => {
-                // Promoted in v0.45. Empty key lists and window-bearing fill
-                // expressions stay on the row engine by design.
                 if keys.is_empty() {
                     return Some(NativeUnsupportedReason::RowOnlyStage);
                 }
                 for fill in fills {
-                    if expr_ir_contains_window(&fill.expr) {
-                        return Some(NativeUnsupportedReason::RowOnlyStage);
-                    }
                     if let Some(reason) = native_expr_unsupported_reason(&fill.expr) {
                         return Some(reason);
                     }
@@ -833,23 +822,6 @@ fn native_pipeline_unsupported_reason(
         }
     }
     None
-}
-
-pub(crate) fn expr_ir_contains_window(expr: &ExprIr) -> bool {
-    match expr {
-        ExprIr::Window { .. } => true,
-        ExprIr::Unary { expr, .. } => expr_ir_contains_window(expr),
-        ExprIr::Binary { left, right, .. } => {
-            expr_ir_contains_window(left) || expr_ir_contains_window(right)
-        }
-        ExprIr::Call { args, .. } => args.iter().any(expr_ir_contains_window),
-        ExprIr::Quoted { .. }
-        | ExprIr::Number { .. }
-        | ExprIr::Bool { .. }
-        | ExprIr::Null { .. }
-        | ExprIr::Ident { .. }
-        | ExprIr::Context { .. } => false,
-    }
 }
 
 fn native_load_unsupported_reason(
@@ -890,7 +862,11 @@ fn native_load_unsupported_reason(
     // row-only by design and reports `input-format` everywhere.
     if matches!(
         format,
-        DataFormat::Csv | DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::ArrowStream
+        DataFormat::Csv
+            | DataFormat::Parquet
+            | DataFormat::ArrowFile
+            | DataFormat::ArrowStream
+            | DataFormat::JsonLines
     ) {
         None
     } else {
@@ -932,8 +908,7 @@ fn native_expr_unsupported_reason(expr: &ExprIr) -> Option<NativeUnsupportedReas
         ExprIr::Call { name, args, .. } => {
             if name == "col" {
                 return match args.as_slice() {
-                    [ExprIr::Quoted { .. } | ExprIr::Context { .. }] => None,
-                    [_] => Some(NativeUnsupportedReason::DataDependentColIndirection),
+                    [arg] => native_expr_unsupported_reason(arg),
                     _ => Some(NativeUnsupportedReason::ScalarFunctionArity),
                 };
             }
@@ -950,8 +925,8 @@ fn native_expr_unsupported_reason(expr: &ExprIr) -> Option<NativeUnsupportedReas
                 },
                 "replace" => match args.as_slice() {
                     [value, pattern, replacement] => native_expr_unsupported_reason(value)
-                        .or_else(|| native_static_text_arg_reason(pattern))
-                        .or_else(|| native_static_text_arg_reason(replacement)),
+                        .or_else(|| native_expr_unsupported_reason(pattern))
+                        .or_else(|| native_expr_unsupported_reason(replacement)),
                     _ => Some(NativeUnsupportedReason::ScalarFunctionArity),
                 },
                 "coalesce" | "concat" => args.iter().find_map(native_expr_unsupported_reason),
@@ -967,11 +942,8 @@ fn native_expr_unsupported_reason(expr: &ExprIr) -> Option<NativeUnsupportedReas
                     [_, _] => Some(NativeUnsupportedReason::ScalarFunctionArity),
                     _ => Some(NativeUnsupportedReason::ScalarFunctionArity),
                 },
-                // Temporal scalar functions are row-only by design in
-                // v0.46.5 (see docs/PDL_NATIVE_COVERAGE.md, "temporal
-                // functions"); native lowering is deferred.
                 "date" | "datetime" | "year" | "month" | "day" | "date_floor" | "date_format" => {
-                    Some(NativeUnsupportedReason::TemporalFunction)
+                    args.iter().find_map(native_expr_unsupported_reason)
                 }
                 _ => Some(NativeUnsupportedReason::ScalarFunction),
             }
@@ -995,7 +967,7 @@ fn native_window_unsupported_reason(
         "lag" | "lead" if !args.is_empty() && args.len() <= 3 && !spec.order_by.is_empty() => {
             native_supported_window_frame_reason(spec)
                 .or_else(|| native_expr_unsupported_reason(&args[0]))
-                .or_else(|| native_offset_arg_reason(args.get(1)))
+                .or_else(|| args.get(1).and_then(native_expr_unsupported_reason))
                 .or_else(|| native_offset_default_reason(args.get(2)))
         }
         "first_value" | "last_value" if args.len() == 1 => {
@@ -1010,67 +982,6 @@ fn native_window_unsupported_reason(
                 .or_else(|| native_expr_unsupported_reason(&args[0]))
         }
         _ => Some(NativeUnsupportedReason::WindowExpression),
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct NativeWindowSortGroupIr {
-    partition_by: Vec<String>,
-    order_by: Vec<(
-        String,
-        pdl_semantics::SortDirectionIr,
-        Option<pdl_semantics::NullsOrderIr>,
-    )>,
-}
-
-fn native_multi_key_window_order_reason(
-    item: &pdl_semantics::MutateItemIr,
-) -> Option<NativeUnsupportedReason> {
-    let mut group = None;
-    if native_expr_multi_key_window_order_incompatible(&item.expr, &mut group) {
-        return Some(NativeUnsupportedReason::WindowExpression);
-    }
-    None
-}
-
-fn native_expr_multi_key_window_order_incompatible(
-    expr: &ExprIr,
-    group: &mut Option<NativeWindowSortGroupIr>,
-) -> bool {
-    match expr {
-        ExprIr::Window { args, spec, .. } => {
-            if spec.order_by.len() > 1 {
-                let next = NativeWindowSortGroupIr {
-                    partition_by: spec.partition_by.clone(),
-                    order_by: spec
-                        .order_by
-                        .iter()
-                        .map(|item| (item.column.clone(), item.direction, item.nulls))
-                        .collect(),
-                };
-                match group {
-                    Some(current) if current != &next => return true,
-                    Some(_) => {}
-                    None => *group = Some(next),
-                }
-            }
-            args.iter()
-                .any(|arg| native_expr_multi_key_window_order_incompatible(arg, group))
-        }
-        ExprIr::Call { args, .. } => args
-            .iter()
-            .any(|arg| native_expr_multi_key_window_order_incompatible(arg, group)),
-        ExprIr::Unary { expr, .. } => native_expr_multi_key_window_order_incompatible(expr, group),
-        ExprIr::Binary { left, right, .. } => {
-            native_expr_multi_key_window_order_incompatible(left, group)
-                || native_expr_multi_key_window_order_incompatible(right, group)
-        }
-        ExprIr::Quoted { .. }
-        | ExprIr::Number { .. }
-        | ExprIr::Bool { .. }
-        | ExprIr::Null { .. }
-        | ExprIr::Ident { .. }
-        | ExprIr::Context { .. } => false,
     }
 }
 
@@ -1108,24 +1019,6 @@ fn native_supported_window_frame_reason(spec: &WindowSpecIr) -> Option<NativeUns
             ..
         }) => None,
         Some(_) => Some(NativeUnsupportedReason::WindowExpression),
-    }
-}
-
-fn native_offset_arg_reason(offset: Option<&ExprIr>) -> Option<NativeUnsupportedReason> {
-    match offset {
-        None => None,
-        Some(ExprIr::Number { value, .. }) if *value >= 0.0 && value.fract() == 0.0 => None,
-        Some(_) => Some(NativeUnsupportedReason::WindowExpression),
-    }
-}
-
-fn native_static_text_arg_reason(arg: &ExprIr) -> Option<NativeUnsupportedReason> {
-    match arg {
-        ExprIr::Quoted { .. }
-        | ExprIr::Number { .. }
-        | ExprIr::Bool { .. }
-        | ExprIr::Context { .. } => None,
-        _ => Some(NativeUnsupportedReason::DataDependentReplacePattern),
     }
 }
 
@@ -1725,8 +1618,8 @@ output row_report =
         )
         .expect("execution plan");
 
-        assert_eq!(plan.observability.selected_engine, PlannedEngine::Mixed);
-        assert_eq!(plan.observability.eligible_engine, PlannedEngine::Mixed);
+        assert_eq!(plan.observability.selected_engine, PlannedEngine::Native);
+        assert_eq!(plan.observability.eligible_engine, PlannedEngine::Native);
         assert_eq!(plan.observability.fallback_reason, None);
         assert_eq!(
             plan.observability.outputs,
@@ -1738,8 +1631,8 @@ output row_report =
                 },
                 OutputPlanObservability {
                     name: "row_report".to_string(),
-                    selected_engine: PlannedEngine::Row,
-                    fallback_reason: Some(NativeUnsupportedReason::InputFormat),
+                    selected_engine: PlannedEngine::Native,
+                    fallback_reason: None,
                 },
             ]
         );
@@ -1754,18 +1647,12 @@ output row_report =
             },
         )
         .expect("forced native execution plan");
-        assert_eq!(
-            forced.observability.fallback_reason,
-            Some(NativeUnsupportedReason::NamedOutputMixedEngines)
-        );
+        assert_eq!(forced.observability.fallback_reason, None);
     }
 
     #[test]
-    fn forced_native_plan_reports_unsupported_reason_without_selecting_rows() {
+    fn forced_native_plan_reports_temporal_functions_as_native_eligible() {
         let io = InMemoryDriverIo::default().with_schema("memory/sales.csv", ["region", "amount"]);
-        // Temporal scalar functions stay row-only by design, so they serve as
-        // the forced-native unsupported specimen after v0.47 promotes bounded
-        // named frames.
         let prepared = prepare_source_with_io(
             "memory/main.pdl",
             r#"load "sales.csv"
@@ -1786,17 +1673,13 @@ output row_report =
 
         assert_eq!(plan.observability.requested_engine, PlannedEngine::Native);
         assert_eq!(plan.observability.selected_engine, PlannedEngine::Native);
-        assert_eq!(plan.observability.eligible_engine, PlannedEngine::Row);
-        assert_eq!(
-            plan.observability.fallback_reason,
-            Some(NativeUnsupportedReason::TemporalFunction)
-        );
+        assert_eq!(plan.observability.eligible_engine, PlannedEngine::Native);
+        assert_eq!(plan.observability.fallback_reason, None);
     }
 
-    /// v0.46.5: temporal scalar functions stay row-only by design; the
-    /// planner must demote them with the typed `temporal-function` reason.
+    /// v0.49: temporal scalar functions are native-eligible.
     #[test]
-    fn planning_demotes_temporal_functions_with_temporal_function_reason() {
+    fn planning_accepts_temporal_functions_as_native() {
         for expr in [
             "date(stamp)",
             "datetime(stamp)",
@@ -1830,22 +1713,18 @@ output row_report =
 
             assert_eq!(
                 plan.observability.selected_engine,
-                PlannedEngine::Row,
-                "`{expr}` must stay row-only"
+                PlannedEngine::Native,
+                "`{expr}` must be native-eligible"
             );
-            assert_eq!(
-                plan.observability.fallback_reason,
-                Some(NativeUnsupportedReason::TemporalFunction),
-                "`{expr}`"
-            );
+            assert_eq!(plan.observability.fallback_reason, None, "`{expr}`");
         }
     }
 
     #[test]
-    fn native_coverage_matrix_uses_known_statuses_and_tracks_stage_rows() {
+    fn native_coverage_matrix_uses_v0_49_status_vocabulary() {
         let matrix = include_str!("../../../docs/PDL_NATIVE_COVERAGE.csv");
         let mut stage_rows = BTreeSet::new();
-        let mut planned_native_rows = Vec::new();
+        let mut row_only_rows = BTreeSet::new();
         for (index, line) in matrix.lines().enumerate() {
             if index == 0 {
                 assert_eq!(line, "area,item,status,notes");
@@ -1854,27 +1733,22 @@ output row_report =
             let fields = line.splitn(4, ',').collect::<Vec<_>>();
             assert_eq!(fields.len(), 4, "{line}");
             assert!(
-                matches!(
-                    fields[2],
-                    "native parity"
-                        | "native partial"
-                        | "row-only by design"
-                        | "planned native"
-                        | "unsupported"
-                        | "deferred"
-                ),
-                "unknown status in {line}"
+                matches!(fields[2], "native parity" | "row-only by design"),
+                "v0.49 coverage matrix status must be `native parity` or \
+                 `row-only by design`: {line}"
             );
             if fields[0] == "stage" {
                 stage_rows.insert(fields[1]);
             }
-            if fields[2] == "planned native" {
-                planned_native_rows.push(line);
+            if fields[2] == "row-only by design" {
+                row_only_rows.insert((fields[0], fields[1]));
             }
         }
-        assert!(
-            planned_native_rows.is_empty(),
-            "v0.40 coverage matrix must close planned-native rows: {planned_native_rows:?}"
+        assert_eq!(
+            row_only_rows,
+            BTreeSet::from([("host", "WASM"), ("host", "LSP/editor")]),
+            "v0.49 row-only coverage is limited to the two non-execution \
+             host boundaries"
         );
         for stage in [
             "load",

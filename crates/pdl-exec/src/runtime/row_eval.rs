@@ -904,7 +904,13 @@ pub(crate) fn eval_offset_window(
             span,
         ));
     };
-    let offset = window_offset(args.get(1), span)? as isize;
+    let offset = window_offset(
+        args.get(1),
+        table,
+        partition[position],
+        span,
+        runtime_context,
+    )? as isize;
     let target = position as isize + direction * offset;
     if target < 0 || target >= partition.len() as isize {
         return match args.get(2) {
@@ -930,24 +936,32 @@ pub(crate) fn eval_offset_window(
     )
 }
 
-pub(crate) fn window_offset(offset: Option<&ExprIr>, span: Span) -> Result<usize, Diagnostic> {
-    match offset {
-        None => Ok(1),
-        Some(ExprIr::Number { value, .. }) if *value >= 0.0 && value.fract() == 0.0 => {
-            Ok(*value as usize)
-        }
-        Some(expr) => Err(Diagnostic::error(
+pub(crate) fn window_offset(
+    offset: Option<&ExprIr>,
+    table: &Table,
+    current_index: usize,
+    span: Span,
+    runtime_context: &BTreeMap<String, Value>,
+) -> Result<usize, Diagnostic> {
+    let Some(offset) = offset else {
+        return Ok(1);
+    };
+    let value = eval_row_expr(
+        offset,
+        table,
+        &table.rows[current_index],
+        ExprRole::Default,
+        None,
+        runtime_context,
+    )?;
+    match value {
+        Value::Number(value) if value >= 0.0 && value.fract() == 0.0 => Ok(value as usize),
+        _ => Err(Diagnostic::error(
             codes::E1206,
-            "lag/lead offset must be a non-negative integer literal",
-            expr.span(),
+            "lag/lead offset must be a non-negative integer",
+            offset.span().join(span),
         )),
     }
-    .map_err(|mut diagnostic| {
-        if diagnostic.span == Span::zero() {
-            diagnostic.span = span;
-        }
-        diagnostic
-    })
 }
 
 pub(crate) fn frame_indices(

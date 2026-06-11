@@ -294,15 +294,6 @@ pub(crate) fn check_native_pipeline_eligibility(
                 resolve_native_column_names(keys, *span, context)?;
                 for fill in fills {
                     resolve_native_column_name(&fill.column, fill.span, context)?;
-                    if crate::planning::expr_ir_contains_window(&fill.expr) {
-                        // Fill expressions evaluate against the inserted base
-                        // row; window semantics over the completed frame have
-                        // no row-runtime counterpart.
-                        return Err(unsupported_native_pipeline(
-                            NativeUnsupportedReason::RowOnlyStage,
-                            "complete fill window expressions are row-only",
-                        ));
-                    }
                     lower_data_expr(&fill.expr, context)?;
                 }
             }
@@ -346,7 +337,11 @@ pub(crate) fn check_native_load_eligibility(
     };
     if !matches!(
         format,
-        DataFormat::Csv | DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::ArrowStream
+        DataFormat::Csv
+            | DataFormat::Parquet
+            | DataFormat::ArrowFile
+            | DataFormat::ArrowStream
+            | DataFormat::JsonLines
     ) {
         return Err(unsupported_native_pipeline(
             NativeUnsupportedReason::InputFormat,
@@ -716,6 +711,7 @@ pub(crate) fn native_load_plan(
                     | DataFormat::Parquet
                     | DataFormat::ArrowFile
                     | DataFormat::ArrowStream
+                    | DataFormat::JsonLines
             ) {
                 return Err(unsupported_native_pipeline(
                     NativeUnsupportedReason::InputFormat,
@@ -753,6 +749,7 @@ pub(crate) fn native_load_plan(
                     | DataFormat::Parquet
                     | DataFormat::ArrowFile
                     | DataFormat::ArrowStream
+                    | DataFormat::JsonLines
             ) {
                 return Err(unsupported_native_pipeline(
                     NativeUnsupportedReason::InputFormat,

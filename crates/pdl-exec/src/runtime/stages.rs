@@ -413,24 +413,10 @@ pub(crate) fn ensure_union_compatible(
     if by_name {
         let left_names: BTreeSet<&String> = left.columns.iter().collect();
         let right_names: BTreeSet<&String> = right.columns.iter().collect();
-        if left_names != right_names {
-            return Err(Diagnostic::error(
-                codes::E1209,
-                "union schemas have different column names",
-                span,
-            ));
-        }
-        for column in &left.columns {
+        for column in left_names.intersection(&right_names) {
             ensure_union_column_compatible(left, column, right, column, span)?;
         }
     } else {
-        if left.columns.len() != right.columns.len() {
-            return Err(Diagnostic::error(
-                codes::E1209,
-                "union schemas have different column counts",
-                span,
-            ));
-        }
         for (left_column, right_column) in left.columns.iter().zip(&right.columns) {
             ensure_union_column_compatible(left, left_column, right, right_column, span)?;
         }

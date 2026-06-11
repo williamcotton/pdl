@@ -405,16 +405,7 @@ where
                 } => {
                     let right_schema = self.analyze_binding(&source.value, source.span, stack)?;
                     let by_name = union_option_value(options, UnionOptionKind::ByName);
-                    if !union_schema_compatible(&schema, &right_schema, by_name) {
-                        self.diagnostics.push(Diagnostic::error(
-                            codes::E1209,
-                            format!(
-                                "binding `{}` has an incompatible union schema",
-                                source.value
-                            ),
-                            source.span,
-                        ));
-                    }
+                    schema = union_output_schema(&schema, &right_schema, by_name);
                     grouping = None;
                 }
                 Stage::Distinct { columns, .. } => {
@@ -721,18 +712,6 @@ where
             ));
         }
 
-        if matches!(function.value.as_str(), "lag" | "lead")
-            && args
-                .get(1)
-                .is_some_and(|arg| !is_non_negative_integer_literal(arg))
-        {
-            self.diagnostics.push(Diagnostic::error(
-                codes::E1206,
-                "lag/lead offset must be a non-negative integer literal",
-                args[1].span(),
-            ));
-        }
-
         for arg in args {
             if contains_window_expr(arg) {
                 self.diagnostics.push(Diagnostic::error(
@@ -864,10 +843,7 @@ where
             Expr::Ident(value) => vec![value.clone()],
             Expr::Quoted(_) | Expr::Context { .. } => Vec::new(),
             Expr::Call { name, args, span } if name.value == "col" => match args.as_slice() {
-                [arg] => self
-                    .dynamic_column_expr_ref(arg, *span)
-                    .into_iter()
-                    .collect(),
+                [arg] => self.dynamic_column_expr_refs(arg, *span, schema),
                 _ => Vec::new(),
             },
             Expr::Call { args, .. } => args
@@ -897,10 +873,7 @@ where
             Expr::Ident(value) => vec![value.clone()],
             Expr::Quoted(_) | Expr::Context { .. } => Vec::new(),
             Expr::Call { name, args, span } if name.value == "col" => match args.as_slice() {
-                [arg] => self
-                    .dynamic_column_expr_ref(arg, *span)
-                    .into_iter()
-                    .collect(),
+                [arg] => self.dynamic_column_expr_refs(arg, *span, &[]),
                 _ => Vec::new(),
             },
             Expr::Call { args, .. } => args
@@ -941,17 +914,20 @@ where
         refs
     }
 
-    fn dynamic_column_expr_ref(
+    fn dynamic_column_expr_refs(
         &mut self,
         expr: &Expr,
-        span: Span,
-    ) -> Option<pdl_syntax::Spanned<String>> {
+        _span: Span,
+        schema: &[String],
+    ) -> Vec<pdl_syntax::Spanned<String>> {
         match expr {
-            Expr::Quoted(value) => Some(value.clone()),
+            Expr::Quoted(value) => vec![value.clone()],
             Expr::Context { kind, name, span } => {
-                let info = self.check_context_reference(*kind, &name.value, *span)?;
+                let Some(info) = self.check_context_reference(*kind, &name.value, *span) else {
+                    return Vec::new();
+                };
                 match info.default {
-                    Value::String(value) => Some(pdl_syntax::Spanned::new(value, *span)),
+                    Value::String(value) => vec![pdl_syntax::Spanned::new(value, *span)],
                     _ => {
                         self.diagnostics.push(Diagnostic::error(
                             codes::E2004,
@@ -962,18 +938,11 @@ where
                             ),
                             *span,
                         ));
-                        None
+                        Vec::new()
                     }
                 }
             }
-            _ => {
-                self.diagnostics.push(Diagnostic::error(
-                    codes::E2004,
-                    "col() requires a string literal or context reference",
-                    span,
-                ));
-                None
-            }
+            _ => self.row_expr_column_refs(expr, schema, ExprRole::Default),
         }
     }
 
@@ -1066,13 +1035,31 @@ fn union_option_value(options: &[UnionOption], kind: UnionOptionKind) -> bool {
         .is_some_and(|option| option.value.value)
 }
 
-fn union_schema_compatible(left_schema: &[String], right_schema: &[String], by_name: bool) -> bool {
+fn union_output_schema(
+    left_schema: &[String],
+    right_schema: &[String],
+    by_name: bool,
+) -> Vec<String> {
     if by_name {
-        let left: BTreeSet<&String> = left_schema.iter().collect();
-        let right: BTreeSet<&String> = right_schema.iter().collect();
-        left == right
+        let mut output = left_schema.to_vec();
+        for column in right_schema {
+            if !output.iter().any(|existing| existing == column) {
+                output.push(column.clone());
+            }
+        }
+        output
     } else {
-        left_schema.len() == right_schema.len()
+        let width = left_schema.len().max(right_schema.len());
+        let mut output = left_schema.to_vec();
+        for index in output.len()..width {
+            output.push(
+                right_schema
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("column_{}", index + 1)),
+            );
+        }
+        output
     }
 }
 
@@ -1169,10 +1156,6 @@ fn contains_window_expr(expr: &Expr) -> bool {
         | Expr::Ident(_)
         | Expr::Context { .. } => false,
     }
-}
-
-fn is_non_negative_integer_literal(expr: &Expr) -> bool {
-    matches!(expr, Expr::Number(value) if value.value >= 0.0 && value.value.fract() == 0.0)
 }
 
 fn is_round_digits_literal(expr: &Expr) -> bool {
@@ -1524,13 +1507,13 @@ load "sales.csv"
     }
 
     #[test]
-    fn union_rejects_incompatible_schema() {
+    fn union_allows_null_padding_for_incompatible_schema() {
         let parse = pdl_syntax::parse(
             r#"let extra =
   load "extra.csv"
 
 load "sales.csv"
-  | union extra"#,
+  | union extra by_name true"#,
         );
 
         let analysis = analyze_program(&parse.program, |request| match &request.load.source {
@@ -1541,11 +1524,20 @@ load "sales.csv"
             _ => panic!("unexpected load request"),
         });
 
-        assert!(analysis.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "E1209"
-                && diagnostic.message == "binding `extra` has an incompatible union schema"
-        }));
-        assert!(analysis.ir.is_none());
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
+        let union_trace = analysis
+            .traces
+            .iter()
+            .find(|trace| trace.stage_name == "union")
+            .expect("union trace");
+        assert_eq!(
+            union_trace.output_schema,
+            Some(vec!["order_id".to_string(), "amount".to_string()])
+        );
     }
 
     #[test]

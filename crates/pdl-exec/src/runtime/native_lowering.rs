@@ -144,10 +144,7 @@ pub(crate) fn lower_data_call(
         };
         return match lower_data_expr(arg, context)? {
             DataExpr::Literal(DataLiteral::String(column)) => Ok(DataExpr::Column(column)),
-            _ => Err(unsupported_native_pipeline(
-                NativeUnsupportedReason::DataDependentColIndirection,
-                "native col() requires a string literal or context string",
-            )),
+            expr => Ok(DataExpr::DynamicColumn(Box::new(expr))),
         };
     }
 
@@ -163,19 +160,13 @@ pub(crate) fn lower_data_call(
         "contains" => DataScalarFunction::Contains,
         "starts_with" => DataScalarFunction::StartsWith,
         "replace" => {
-            let [_, pattern, replacement] = args else {
+            let [_, _, _] = args else {
                 return Err(Diagnostic::error(
                     codes::E1402,
                     "replace() expects three arguments",
                     span,
                 ));
             };
-            if !native_static_text_arg(pattern) || !native_static_text_arg(replacement) {
-                return Err(unsupported_native_pipeline(
-                    NativeUnsupportedReason::DataDependentReplacePattern,
-                    "native replace() requires literal pattern and replacement",
-                ));
-            }
             DataScalarFunction::Replace
         }
         "to_string" => DataScalarFunction::ToString,
@@ -196,14 +187,13 @@ pub(crate) fn lower_data_call(
             };
             DataScalarFunction::Round { digits }
         }
-        // Row-only by design in v0.46.5; see the "temporal functions" row in
-        // docs/PDL_NATIVE_COVERAGE.md.
-        "date" | "datetime" | "year" | "month" | "day" | "date_floor" | "date_format" => {
-            return Err(unsupported_native_pipeline(
-                NativeUnsupportedReason::TemporalFunction,
-                "temporal scalar functions are row-only by design",
-            ));
-        }
+        "date" => DataScalarFunction::Date,
+        "datetime" => DataScalarFunction::Datetime,
+        "year" => DataScalarFunction::Year,
+        "month" => DataScalarFunction::Month,
+        "day" => DataScalarFunction::Day,
+        "date_floor" => DataScalarFunction::DateFloor,
+        "date_format" => DataScalarFunction::DateFormat,
         _ => {
             return Err(unsupported_native_pipeline(
                 NativeUnsupportedReason::ScalarFunction,
@@ -222,16 +212,6 @@ pub(crate) fn lower_data_call(
             .map(|arg| lower_data_expr(arg, context))
             .collect::<Result<Vec<_>, _>>()?,
     })
-}
-
-pub(crate) fn native_static_text_arg(arg: &ExprIr) -> bool {
-    matches!(
-        arg,
-        ExprIr::Quoted { .. }
-            | ExprIr::Number { .. }
-            | ExprIr::Bool { .. }
-            | ExprIr::Context { .. }
-    )
 }
 
 pub(crate) fn lower_data_window(
@@ -301,16 +281,6 @@ pub(crate) fn lower_data_window(
                     NativeUnsupportedReason::WindowExpression,
                     "native offset windows require at least one order key",
                 ));
-            }
-            match args.get(1) {
-                None => {}
-                Some(ExprIr::Number { value, .. }) if *value >= 0.0 && value.fract() == 0.0 => {}
-                Some(_) => {
-                    return Err(unsupported_native_pipeline(
-                        NativeUnsupportedReason::WindowExpression,
-                        "native offset windows require a non-negative integer literal offset",
-                    ));
-                }
             }
             if function == "lag" {
                 DataWindowFunction::Lag

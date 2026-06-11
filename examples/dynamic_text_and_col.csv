@@ -1,0 +1,4 @@
+id,metric_column,gross_amount,discount,label,pattern,replacement,flag
+a,gross_amount,120,20,North-Web,-,:,true
+b,discount,80,5,South_Store,_,:,false
+c,gross_amount,90,,East-Partner,-,/,true

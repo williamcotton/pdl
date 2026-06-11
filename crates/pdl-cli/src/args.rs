@@ -72,4 +72,5 @@ pub enum EngineArg {
     Row,
     RowStrict,
     Native,
+    NativeStrict,
 }

@@ -273,7 +273,7 @@ pub fn run_cli() -> Result<ExitCode, String> {
         }
         Command::Version => {
             println!(
-                "pdl {} (language draft 0.48.0, data engine {})",
+                "pdl {} (language draft 0.49.0, data engine {})",
                 env!("CARGO_PKG_VERSION"),
                 pdl_data::native_engine_name()
             );
@@ -348,6 +348,7 @@ impl From<crate::args::EngineArg> for ExecutionEngine {
             crate::args::EngineArg::Row => ExecutionEngine::Row,
             crate::args::EngineArg::RowStrict => ExecutionEngine::RowStrict,
             crate::args::EngineArg::Native => ExecutionEngine::Native,
+            crate::args::EngineArg::NativeStrict => ExecutionEngine::NativeStrict,
         }
     }
 }
@@ -359,6 +360,7 @@ impl From<crate::args::EngineArg> for PlannedEngine {
             crate::args::EngineArg::Row => PlannedEngine::Row,
             crate::args::EngineArg::RowStrict => PlannedEngine::RowStrict,
             crate::args::EngineArg::Native => PlannedEngine::Native,
+            crate::args::EngineArg::NativeStrict => PlannedEngine::NativeStrict,
         }
     }
 }

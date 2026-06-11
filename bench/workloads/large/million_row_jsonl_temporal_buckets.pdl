@@ -1,0 +1,8 @@
+load "../../data/generated/million-row-events.jsonl"
+  | mutate
+      order_month = date_format(ordered_at, "%Y-%m"),
+      selected_amount = col(metric_column)
+  | filter not_null(selected_amount)
+  | group_by segment, order_month
+  | agg orders = count(), revenue = sum(amount), selected_total = sum(selected_amount)
+  | sort order_month, segment

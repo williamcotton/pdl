@@ -384,6 +384,9 @@ fn run_suite(root: &Path, options: RunSuiteOptions) -> Result<(), Box<dyn std::e
         root.join("bench/data/generated/segment-dimension.csv"),
         root.join("bench/data/generated/million-row-part-a.csv"),
         root.join("bench/data/generated/million-row-part-b.csv"),
+        root.join("bench/data/generated/million-row-narrow.csv"),
+        root.join("bench/data/generated/million-row-events.csv"),
+        root.join("bench/data/generated/million-row-events.jsonl"),
     ];
     if required.iter().any(|path| !path.exists()) {
         if no_generate {
@@ -946,6 +949,17 @@ fn large_workloads() -> &'static [Workload] {
             required_path: "bench/data/generated/million-row-part-a.csv",
             stdin_path: None,
         },
+        // v0.49: heterogeneous-schema union coverage exercises null padding
+        // and downstream fill semantics after all language rows reached native parity.
+        Workload {
+            name: "million_row_union_null_padding",
+            program: "bench/workloads/large/million_row_union_null_padding.pdl",
+            dataset: "million-row",
+            input_format: "csv",
+            output_format: "csv",
+            required_path: "bench/data/generated/million-row-narrow.csv",
+            stdin_path: None,
+        },
         Workload {
             name: "windowed_sales_rank",
             program: "bench/workloads/large/windowed_sales_rank.pdl",
@@ -973,6 +987,16 @@ fn large_workloads() -> &'static [Workload] {
             required_path: "bench/data/generated/million-row.csv",
             stdin_path: None,
         },
+        // v0.49: dynamic offset windows now remain native-eligible.
+        Workload {
+            name: "million_row_dynamic_window_offsets",
+            program: "bench/workloads/large/million_row_dynamic_window_offsets.pdl",
+            dataset: "million-row-events",
+            input_format: "csv",
+            output_format: "csv",
+            required_path: "bench/data/generated/million-row-events.csv",
+            stdin_path: None,
+        },
         Workload {
             name: "pdl_to_algraf_arrow_handoff",
             program: "bench/workloads/large/pdl_to_algraf_arrow_handoff.pdl",
@@ -980,6 +1004,39 @@ fn large_workloads() -> &'static [Workload] {
             input_format: "csv",
             output_format: "arrow-stream",
             required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
+        },
+        // v0.49: temporal functions are native-eligible across mutate,
+        // grouping keys, and aggregate inputs.
+        Workload {
+            name: "million_row_temporal_buckets",
+            program: "bench/workloads/large/million_row_temporal_buckets.pdl",
+            dataset: "million-row-events",
+            input_format: "csv",
+            output_format: "csv",
+            required_path: "bench/data/generated/million-row-events.csv",
+            stdin_path: None,
+        },
+        // v0.49: JSON Lines scans use the same native orchestration coverage
+        // as other shipped input formats.
+        Workload {
+            name: "million_row_jsonl_temporal_buckets",
+            program: "bench/workloads/large/million_row_jsonl_temporal_buckets.pdl",
+            dataset: "million-row-events",
+            input_format: "jsonl",
+            output_format: "csv",
+            required_path: "bench/data/generated/million-row-events.jsonl",
+            stdin_path: None,
+        },
+        // v0.49: dynamic column indirection, dynamic replace arguments, and
+        // mixed-class `if_else` are native-eligible.
+        Workload {
+            name: "million_row_dynamic_text_and_col",
+            program: "bench/workloads/large/million_row_dynamic_text_and_col.pdl",
+            dataset: "million-row-events",
+            input_format: "csv",
+            output_format: "csv",
+            required_path: "bench/data/generated/million-row-events.csv",
             stdin_path: None,
         },
         // v0.44: writer-dominated workload measuring the native CSV and
@@ -1567,6 +1624,8 @@ fn generate_all(root: &Path, rows: usize) -> Result<(), Box<dyn std::error::Erro
 fn prepare_sources(root: &Path, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
     generate_million_row_csv(root, rows)?;
     generate_partitioned_million_row_csv(root, rows)?;
+    generate_million_row_narrow_csv(root, rows)?;
+    generate_million_row_events(root, rows)?;
     generate_segment_dimension(root)?;
     let batch = million_row_batch(rows)?;
     write_parquet(
@@ -1611,6 +1670,94 @@ fn generate_partitioned_million_row_csv(
         first,
         second,
     )
+}
+
+fn generate_million_row_narrow_csv(
+    root: &Path,
+    rows: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if rows == 0 {
+        return Err("--rows must be greater than zero".into());
+    }
+    let out = root.join("bench/data/generated/million-row-narrow.csv");
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = out.with_extension("csv.tmp");
+    let mut writer = BufWriter::new(File::create(&tmp)?);
+    writeln!(writer, "row,segment,x,score")?;
+    for row in 0..rows {
+        let segment_index = row % 4;
+        let segment = ["A", "B", "C", "D"][segment_index];
+        let x = (row % 10_000) as f64 / 100.0;
+        let cycle = (row * 37) % 1_000;
+        let drift = row / 100_000;
+        let score =
+            20.0 + (segment_index as f64 * 5.0) + (x * 0.3) + (cycle as f64 / 25.0) + drift as f64;
+        writeln!(writer, "{row},{segment},{x:.2},{score:.3}")?;
+    }
+    writer.flush()?;
+    fs::rename(&tmp, out.as_path())?;
+    println!("generated {} rows at {}", rows, relative(root, &out));
+    Ok(())
+}
+
+fn generate_million_row_events(root: &Path, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
+    if rows == 0 {
+        return Err("--rows must be greater than zero".into());
+    }
+    let csv_out = root.join("bench/data/generated/million-row-events.csv");
+    let jsonl_out = root.join("bench/data/generated/million-row-events.jsonl");
+    if let Some(parent) = csv_out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let csv_tmp = csv_out.with_extension("csv.tmp");
+    let jsonl_tmp = jsonl_out.with_extension("jsonl.tmp");
+    let mut csv_writer = BufWriter::new(File::create(&csv_tmp)?);
+    let mut jsonl_writer = BufWriter::new(File::create(&jsonl_tmp)?);
+    writeln!(
+        csv_writer,
+        "row,segment,ordered_at,amount,metric_column,gross_amount,discount,label,pattern,replacement,flag,offset"
+    )?;
+    for row in 0..rows {
+        let segment_index = row % 4;
+        let segment = ["A", "B", "C", "D"][segment_index];
+        let month = (row % 12) + 1;
+        let day = (row % 28) + 1;
+        let ordered_at = format!("2026-{month:02}-{day:02}T12:34:56Z");
+        let amount = 50.0 + ((row * 29) % 5_000) as f64 / 10.0;
+        let gross_amount = amount + 10.0;
+        let discount = if row % 5 == 0 {
+            0.0
+        } else {
+            ((row * 7) % 300) as f64 / 10.0
+        };
+        let metric_column = if row % 2 == 0 {
+            "gross_amount"
+        } else {
+            "discount"
+        };
+        let label = format!("{segment}-channel-{}", row % 10);
+        let pattern = if row % 2 == 0 { "-" } else { "channel" };
+        let replacement = if row % 2 == 0 { ":" } else { "route" };
+        let flag = row % 3 == 0;
+        let offset = (row % 3) + 1;
+        writeln!(
+            csv_writer,
+            "{row},{segment},{ordered_at},{amount:.2},{metric_column},{gross_amount:.2},{discount:.2},{label},{pattern},{replacement},{flag},{offset}"
+        )?;
+        writeln!(
+            jsonl_writer,
+            "{{\"row\":{row},\"segment\":\"{segment}\",\"ordered_at\":\"{ordered_at}\",\"amount\":{amount:.2},\"metric_column\":\"{metric_column}\",\"gross_amount\":{gross_amount:.2},\"discount\":{discount:.2},\"label\":\"{label}\",\"pattern\":\"{pattern}\",\"replacement\":\"{replacement}\",\"flag\":{flag},\"offset\":{offset}}}"
+        )?;
+    }
+    csv_writer.flush()?;
+    jsonl_writer.flush()?;
+    fs::rename(&csv_tmp, csv_out.as_path())?;
+    fs::rename(&jsonl_tmp, jsonl_out.as_path())?;
+    println!("generated {} rows at {}", rows, relative(root, &csv_out));
+    println!("generated {} rows at {}", rows, relative(root, &jsonl_out));
+    Ok(())
 }
 
 fn generate_segment_dimension(root: &Path) -> Result<(), Box<dyn std::error::Error>> {

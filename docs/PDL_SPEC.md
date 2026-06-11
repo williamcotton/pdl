@@ -1,21 +1,29 @@
 # PDL Detailed Specification
 
-Status: Draft 0.48.0
+Status: Draft 0.49.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.48.0`, tracked in
-`docs/V0_48_PLAN.md`. Version 0.48.0 promotes native pipeline-shape coverage:
-binding-start pipelines run natively when the referenced binding is recursively
-native-eligible, named-output programs run natively when every output is
-recursively native-eligible, and non-terminal `save` stages use native fan-out
-so a saved frame is emitted while the pipeline continues. Plan and manifest
-observability now include one entry per named output with `selected_engine` and
-`fallback_reason`, while preserving the existing program-level fields. The
-release adds no new PDL syntax, stages, functions, primitive value classes, or
-diagnostic codes.
+The current repository implementation line is `0.49.0`, tracked in
+`docs/V0_49_PLAN.md`. Version 0.49.0 completes the v0.43-v0.49 native coverage
+arc: every shipped language feature is native-eligible on native hosts, the
+coverage matrix uses only `native parity` and `row-only by design`, and the only
+row-only rows are the non-execution host boundaries for WASM and LSP/editor
+services. The release adds `--engine native-strict` as a CI tripwire for any
+future native fallback, while adding no new PDL syntax, stages, functions,
+primitive value classes, or diagnostic codes.
+
+Version 0.48.0, tracked in `docs/V0_48_PLAN.md`, promotes native pipeline-shape
+coverage: binding-start pipelines run natively when the referenced binding is
+recursively native-eligible, named-output programs run natively when every
+output is recursively native-eligible, and non-terminal `save` stages use native
+fan-out so a saved frame is emitted while the pipeline continues. Plan and
+manifest observability now include one entry per named output with
+`selected_engine` and `fallback_reason`, while preserving the existing
+program-level fields. The release adds no new PDL syntax, stages, functions,
+primitive value classes, or diagnostic codes.
 
 Version 0.47.0, tracked in `docs/V0_47_PLAN.md`, completes the v0.43-v0.49
 expression-level native coverage tranche for bounded named window frames,
@@ -39,9 +47,9 @@ fractional seconds accepted — at the function boundary and return existing
 PDL value classes: normalized strings, numeric calendar fields, and null
 on unparseable input. The release adds no primitive temporal value
 classes, no wall-clock or locale-dependent functions, and no
-timezone-database names. Temporal scalar functions evaluate on the row
-runtime; native lowering is deferred, and the planner demotes them with
-the typed `temporal-function` reason.
+timezone-database names. At that release, temporal scalar functions evaluated
+on the row runtime and native lowering was deferred; version 0.49.0 later
+promotes them to native parity.
 
 Version 0.46.0, tracked in
 `docs/V0_46_PLAN.md`, promotes the remaining row-only
@@ -55,12 +63,11 @@ file sources move to a lazy IPC scan and both path-backed Arrow IPC rows
 flip to native parity. Stdin format resolution and the preserved
 sniffing-bytes contract are unchanged, and the CSV-fallback path uses the
 same
-byte-backed CSV scan as explicit CSV. JSON Lines sources (path, stdin, and
-host bytes) stay row-only by design; the planner reports `input-format`
-for every JSON Lines source, retiring the v0.43 `stdin-bytes-backed-scan`
-and `host-bytes-backed-scan` reserve reasons. The release adds no language
-surface, stages, functions, diagnostic codes, or formats; it widens which
-existing source reads execute on the native engine.
+byte-backed CSV scan as explicit CSV. At that release, JSON Lines sources
+(path, stdin, and host bytes) stayed row-only and the planner reported
+`input-format`; version 0.49.0 later promotes them to native parity. The
+release adds no language surface, stages, functions, diagnostic codes, or
+formats; it widens which existing source reads execute on the native engine.
 
 Version 0.45.0, tracked in
 `docs/V0_45_PLAN.md`, promotes the `pivot_longer` and
@@ -70,11 +77,10 @@ row-index sort that reproduces the row runtime's interleaved output order,
 and `complete` lowers to first-appearance key domains, a cross join, a
 null-matching left join, and a fill projection in the row runtime's nested
 key-expansion order. Output bytes are byte-identical to the row runtime
-over the parity corpus. Subcases a typed engine cannot reproduce
-byte-for-byte stay row-only by design and demote automatically with
-row-identical output: mixed-class `pivot_longer` value column sets and
-class-changing `complete` fill expressions. The release adds no language
-surface, stages, functions, diagnostic codes, or formats.
+over the parity corpus. At that release, mixed-class `pivot_longer` value
+column sets and class-changing `complete` fill expressions stayed row-only;
+version 0.49.0 later promotes them to native parity. The release adds no
+language surface, stages, functions, diagnostic codes, or formats.
 
 Version 0.44.0, tracked in
 `docs/V0_44_PLAN.md`, promotes the CSV and JSON Lines sink
@@ -1108,7 +1114,8 @@ Context references are value expressions. In column-name positions, a context
 value MUST be a string and resolves to the active column name. In expression
 positions where a context string should be treated as a column name rather than
 a scalar value, authors MUST use `col(value)`, for example
-`col($metric_column) > 500`.
+`col($metric_column) > 500`. Since version 0.49.0, the `col(value)` argument
+MAY be any row expression whose per-row value is the source column name to read.
 
 ### 6.6 String Tokens And Escaped Column References
 
@@ -2047,10 +2054,13 @@ join key tuple. `semi` and `anti` preserve left input order.
 Default behavior aligns columns by position. `by_name true` aligns right rows to
 the left schema by column name.
 
-Schemas MUST be compatible or produce `E1209`. Position-aligned union requires
-the same number of columns. Name-aligned union requires the same column-name set.
-The CSV-backed reference implementation also checks observed non-null value
-classes at execution time.
+Since version 0.49.0, union pads missing cells with null when schemas differ.
+Position-aligned union aligns by ordinal position and extends the output schema
+with right-side column names when the right side is wider. Name-aligned union
+uses left column order followed by right-only columns in right-side order. The
+CSV-backed reference implementation checks observed non-null value classes for
+overlapping columns at execution time and produces `E1209` when those observed
+classes are incompatible.
 
 `distinct true` removes duplicate rows.
 
@@ -2493,9 +2503,10 @@ Implemented aggregate-style window functions:
 
 `lag(value)` and `lead(value)` use an offset of `1`.
 
-`offset` must be a non-negative integer literal. If `lag` or `lead` moves
-outside the partition, the function returns the `default` expression when
-provided and `null` otherwise.
+Since version 0.49.0, `offset` may be any row expression that evaluates to a
+non-negative integer for the current row. If `lag` or `lead` moves outside the
+partition, the function returns the `default` expression when provided and
+`null` otherwise.
 
 Aggregate-style and value window functions default to the whole partition, even
 when `order_by` is present. Running calculations require an explicit frame:
@@ -2613,7 +2624,7 @@ Recommended options:
 
 - `--stdin-format <format>`
 - `--stdout-format <format>`
-- `--engine <auto|row|row-strict|native>`
+- `--engine <auto|row|row-strict|native|native-strict>`
 - `--output <path>`
 - `--manifest <path>`
 - `--dry-run`
@@ -2648,6 +2659,14 @@ handles the pipeline end-to-end with no silent native lowering. The
 row-strict violation is a CLI-level error on stderr, not a new diagnostic
 code; plan observability reports `requested_engine` `row-strict` with
 `selected_engine` `row`.
+
+Since version 0.49.0, the CLI also accepts `--engine native-strict` for
+`pdl run`, `pdl plan`, and `pdl manifest`. `native-strict` plans and executes
+exactly like `native` and additionally fails if any main pipeline, binding,
+named output, or non-terminal save fan-out falls back to rows. The violation is
+a CLI-level error on stderr, not a new diagnostic code; plan observability
+reports `requested_engine` `native-strict` with `selected_engine` `native` when
+the strict run succeeds.
 
 ### 14.3 pdl check
 
@@ -2882,9 +2901,10 @@ the native column model. Native `join` coverage is limited to `inner`, `left`,
 `semi`, and `anti` single-key equi-joins. Null join keys do not match,
 duplicate right non-key output names use the row runtime's `_right` suffix rule
 where right columns are emitted, and output order must match row runtime order
-for the promoted slice. Native `union` coverage is limited to compatible schemas
-by name or by position, with optional `distinct` when the existing native
-`distinct` semantics apply. Arrow IPC file/stream byte inputs may be read into a
+for the promoted slice. The initial native `union` coverage was limited to
+compatible schemas by name or by position, with optional `distinct` when the
+existing native `distinct` semantics apply; version 0.49.0 promotes
+null-padding union for mismatched schemas. Arrow IPC file/stream byte inputs may be read into a
 native dataframe before lazy transforms continue; PDL does not expose Arrow
 reader internals.
 
@@ -2910,10 +2930,11 @@ Native row-preserving window coverage also includes `percent_rank`,
 `cume_dist`, `lag`, `lead`, `first_value`, `last_value`, and `frame running`
 (`unbounded_preceding..current_row`) aggregate frames when each
 argument lowers through the supported native expression subset. Native
-`lag`/`lead` require exactly one order key, a non-negative integer literal
-offset, and an omitted or `null` default. Native ranking, distribution, and
-offset windows currently require at most one order key so per-key direction,
-null placement, and tie behavior remain exactly aligned with the row runtime.
+`lag`/`lead` originally required exactly one order key, a non-negative integer
+literal offset, and an omitted or `null` default. Since version 0.49.0,
+expression-valued offsets, expression defaults, and multiple composite order
+groups are native-eligible with row-identical direction, null placement, and
+tie behavior.
 
 Since version 0.40.0, the native subset also supports compatible multi-key
 window ordering for row-preserving mutate windows. The native executor adds a
@@ -2929,20 +2950,21 @@ row index. Multi-key peer rows for `rank`, `dense_rank`, `percent_rank`, and
 Since version 0.40.0, native `lag` and `lead` support non-null default
 expressions when the value expression, offset, default, and window spec all
 lower through the native subset and the resulting typed native branch output is
-compatible. Incompatible native branch dtypes may still fall back to rows in
-automatic mode or fail forced native with `E1211`.
+compatible. Since version 0.49.0, incompatible typed branch outputs preserve
+row semantics through native orchestration materialization rather than falling
+back to the row engine.
 
 Since version 0.40.0, the native scalar subset also supports `contains(value,
 pattern)`, `starts_with(value, prefix)`, literal-pattern
 `replace(value, pattern, replacement)`, `to_string(value)`, and
-`to_boolean(value)` over supported native expressions. Native `replace` is
-limited to literal or context-literal pattern and replacement arguments because
-the backend does not support dynamic per-row replace patterns with the required
-row semantics.
+`to_boolean(value)` over supported native expressions. Since version 0.49.0,
+`replace` also accepts expression-valued pattern and replacement arguments with
+row-identical per-row literal-pattern semantics.
 
 Since version 0.40.0, `col(...)` with a string literal or string context default
-is eligible for native planning as a static column reference. Data-dependent
-`col(...)` remains row-only.
+is eligible for native planning as a static column reference. Since version
+0.49.0, data-dependent `col(...)` is native-eligible with per-row lookup
+semantics.
 
 Since version 0.44.0, the native engine writes every supported output format
 through a native direct writer: Parquet, Arrow IPC file, and Arrow IPC stream
@@ -2965,44 +2987,37 @@ stage order, with kept columns ahead of `names_to` and `values_to`. Native
 `E1208`, builds first-appearance key domains with a stable distinct, expands
 them with an order-preserving cross join, attaches existing rows through a
 null-matching left join, and applies fill expressions to inserted rows only,
-evaluated against the pre-fill frame. Output bytes MUST be byte-identical to
-the row runtime for the promoted subset. Two subcases stay row-only by
-design because a typed column engine cannot keep the row runtime's per-cell
-value types: `pivot_longer` over value columns whose observed classes mix
-numbers, strings, or booleans, and `complete` fill expressions whose result
-class differs from the filled column's class. Both demote to rows at
-lowering time in automatic mode (with byte-identical output) and report
-`E1211` in forced native mode. Window-bearing `complete` fill expressions
-are also row-only; the row runtime rejects them at evaluation time.
+evaluated against the pre-fill frame. Since version 0.49.0, the native engine
+also accepts mixed-class `pivot_longer` value columns, class-changing
+`complete` fill expressions, and window-bearing fill expressions by preserving
+row-runtime value classes at native orchestration boundaries. Output bytes MUST
+be byte-identical to the row runtime for all shipped `pivot_longer` and
+`complete` programs.
 
-Since version 0.46.0, the native engine scans every non-JSON-Lines source
-form. Stdin CSV and Parquet bytes and host-supplied in-memory CSV and
-Parquet file contents lower to byte-backed scan adapters in `pdl-data`:
-CSV bytes run through the same lazy CSV scan as path-backed CSV, with
-column names normalized to the row reader's header parse and empty input
+Since version 0.46.0, stdin CSV and Parquet bytes and host-supplied in-memory
+CSV and Parquet file contents lower to byte-backed scan adapters in
+`pdl-data`: CSV bytes run through the same lazy CSV scan as path-backed CSV,
+with column names normalized to the row reader's header parse and empty input
 normalized to the row reader's zero-column table, and Parquet bytes use a
-buffered footer-driven read. Byte-backed native scans MUST produce output
-bytes byte-identical to the row runtime: schema inference, type coercion
-on read, null parsing, and row order match the row engine exactly. Stdin
-format resolution keeps the spec order (explicit format, CLI override,
-extension, magic-byte sniffing, text sniffing, CSV fallback), the
-byte-backed adapter receives the full stream including any bytes the
-sniffer consumed, and the CSV-fallback path uses the same byte-backed CSV
-scan as explicit CSV. Path-backed Arrow IPC file sources scan lazily and
-both path-backed Arrow IPC source forms hold native parity. JSON Lines
-sources (path, stdin, and host bytes) stay row-only by design — schema
-inference and text semantics remain row-runtime behavior — and the
-planner reports `input-format` for every JSON Lines source. The 0.46.0
-release retired the v0.43 `stdin-bytes-backed-scan` and
-`host-bytes-backed-scan` reserve reasons; the planner no longer produces
-them, and the variants remain in the vocabulary until the v0.49 cleanup.
+buffered footer-driven read. Byte-backed native scans MUST produce output bytes
+byte-identical to the row runtime: schema inference, type coercion on read, null
+parsing, and row order match the row engine exactly. Stdin format resolution
+keeps the spec order (explicit format, CLI override, extension,
+magic-byte sniffing, text sniffing, CSV fallback), the byte-backed adapter
+receives the full stream including any bytes the sniffer consumed, and the
+CSV-fallback path uses the same byte-backed CSV scan as explicit CSV.
+Path-backed Arrow IPC file sources scan lazily and both path-backed Arrow IPC
+source forms hold native parity. Since version 0.49.0, JSON Lines sources
+(path, stdin, and host bytes) are native-eligible with row-identical schema
+inference, missing-field null semantics, row order, and text round-trip. The
+planner no longer reports `input-format` for JSON Lines; that reason survives
+only for genuinely unknown formats.
 
-Since version 0.46.5, the temporal scalar functions `date`, `datetime`,
-`year`, `month`, `day`, `date_floor`, and `date_format` are row-only by
-design: native lowering is deferred to a later native-coverage release.
-In automatic mode pipelines using them demote to the row engine and the
-planner reports the typed `temporal-function` reason; forced native mode
-reports `E1211`.
+Since version 0.49.0, the temporal scalar functions `date`, `datetime`, `year`,
+`month`, `day`, `date_floor`, and `date_format` are native-eligible. Native
+execution MUST match the row runtime's parse acceptance and rejection,
+normalized output strings, date-floor bucket boundaries, formatting, and null
+propagation.
 
 Since version 0.47.0, the native engine supports all six named window
 frames. `frame whole_partition` and `frame running` keep their existing
@@ -3040,14 +3055,27 @@ the save sink, and continues the pipeline from the same cached frame. Multiple
 that fan-out contract, automatic mode MUST demote it with
 `non-terminal-save-fanout` and forced native mode MUST report `E1211`.
 
-Unsupported aggregate functions, non-equi joins, incompatible-schema union
-extensions, JSON Lines input, a single assignment containing incompatible
-multi-key window order groups, data-dependent dynamic `col(...)`, dynamic
-`replace` patterns, row-only named outputs in forced native mode, and other
-unsupported expressions fall back to rows in automatic mode before native scans
-are opened when they are known to be unsupported. Forced native mode reports an
-`E1211` diagnostic with a stable unsupported native reason category instead of
-silently falling back.
+Since version 0.49.0, every shipped language feature is native-eligible on
+native hosts. The native executor may internally materialize a Polars-backed
+plan into the public row table representation at an operation boundary when
+that is the only way to preserve row-runtime semantics, such as
+data-dependent column indirection, expression-valued text replacement,
+mixed-class `if_else`, mixed-class `pivot_longer`, class-changing `complete`,
+heterogeneous-schema `union` null padding, JSON Lines scans, temporal scalar
+functions, expression-valued `lag`/`lead` offsets, and incompatible composite
+window order groups. This internal materialization is still a native execution
+selection: `selected_engine` remains `native`, writers and downstream stages
+continue through native orchestration where possible, and output bytes MUST be
+row-identical.
+
+The `--engine native-strict` flag is available since version 0.49.0. It uses
+the native engine and fails instead of falling back for the main pipeline,
+bindings, named outputs, and non-terminal save fan-out. After v0.49 it SHOULD
+not fail for any valid pipeline composed only of shipped language features; it
+exists as a regression tripwire for tests and CI. Forced native and
+native-strict modes report `E1211` with a stable unsupported native reason
+category when a defensive, invalid-program, missing-facts, or host-boundary
+case prevents native execution.
 
 Since version 0.43.0, the unsupported-native reason surface is typed.
 `NativeUnsupportedReason` in `pdl-exec` replaces the v0.40–v0.42 coarse
@@ -3055,13 +3083,9 @@ free-form fallback categories with coverage-boundary variants:
 `no-runnable-main`, `input-format`, `scalar-function`,
 `scalar-function-arity`, `aggregate-function`, `aggregate-arity`,
 `window-expression`, `data-dependent-col-indirection`,
-`data-dependent-replace-pattern`, `unsupported-numeric-coercion` (v0.47
-reserve), `temporal-function` (since v0.46.5; temporal scalar functions
-are row-only by design), `union-null-padding` (v0.41 reserve),
-`non-equi-join` (v0.41 reserve),
-`binding-start-not-eligible` (since v0.48 for binding starts whose referenced
-binding is row-only), `named-output-mixed-engines` (since v0.48 for forced
-native named-output programs with any row-only output),
+`data-dependent-replace-pattern`, `unsupported-numeric-coercion`,
+`temporal-function`, `union-null-padding`, `non-equi-join`,
+`binding-start-not-eligible`, `named-output-mixed-engines`,
 `non-terminal-save-fanout` (reserved for native save fan-out subcases that
 cannot preserve row-runtime write order), `stdin-bytes-backed-scan` (retired in
 v0.46; no longer produced), `host-bytes-backed-scan` (retired in v0.46; no
@@ -3070,18 +3094,23 @@ longer produced), `native-sink-writer`, `row-only-stage`,
 `wasm-target-graph` and `editor-service`. These are internal observability
 values, not diagnostic codes. `pdl plan` text output names the variant, and
 `pdl plan --json` and `pdl manifest` serialize it under
-`execution.observability.fallback_reason`. Every runnable pipeline that is
-not natively eligible MUST carry a variant. Row-dependent `col(...)` reports
-`data-dependent-col-indirection`, and row-dependent `replace` patterns or
-replacements report `data-dependent-replace-pattern`.
+`execution.observability.fallback_reason`. Since version 0.49.0, the promoted
+language-feature variants (`window-expression`,
+`data-dependent-col-indirection`, `data-dependent-replace-pattern`,
+`unsupported-numeric-coercion`, `temporal-function`, `union-null-padding`,
+`non-equi-join`, `stdin-bytes-backed-scan`, and `host-bytes-backed-scan`) are
+not produced for valid shipped language-feature pipelines. They may remain in
+the enum for stable JSON compatibility, parser-recovery paths, future unshipped
+syntax experiments, or invalid arity/function cases.
 
 Version 0.43.0 also ships the row-vs-native parity harness
 (`cargo test -p pdl-parity-tests parity_examples`) and the silent-demotion
 canary (`cargo test -p pdl-parity-tests selected_engine_fixtures`). The
 harness runs every example in `examples/` through `pdl run` on the row,
-row-strict, auto, and (for examples pinned native) forced native engines
-with stdin fixtures supplied per example, then diffs stdout payloads and
-saved or named-output files against the row engine. The row engine is the
+row-strict, auto, and (for examples pinned native) forced native and
+native-strict engines with stdin fixtures supplied per example, then diffs
+stdout payloads and saved or named-output files against the row engine. The row
+engine is the
 parity spec: CSV and JSON Lines payloads MUST match byte-for-byte — since
 version 0.44.0 the native direct writers emit those bytes through the row
 writers' cell encoders, so the byte contract holds without row-engine
@@ -3121,13 +3150,30 @@ when automatic planning selects different engines for different outputs.
 
 Version 0.40.0 defines the native coverage matrix in
 `docs/PDL_NATIVE_COVERAGE.csv` and documents it in
-`docs/PDL_NATIVE_COVERAGE.md`. Matrix statuses are limited to `native parity`,
-`native partial`, `row-only by design`, `planned native`, `unsupported`, and
-`deferred`.
+`docs/PDL_NATIVE_COVERAGE.md`. Since version 0.49.0, matrix statuses are
+limited to `native parity` and `row-only by design`; `native partial`,
+`planned native`, `unsupported`, and `deferred` are no longer valid matrix
+statuses.
+
+### 15.5 Post-v0.49 Row-Only Catalog
+
+After version 0.49.0, the row-only catalog contains exactly two non-execution
+host boundaries:
+
+- WASM execution (`wasm-target-graph`): browser builds MUST keep Polars,
+  Parquet, object-store assumptions, and native filesystem assumptions out of
+  the wasm target graph. The row engine remains the browser execution engine.
+- LSP/editor services (`editor-service`): language services expose parser,
+  analyzer, formatter, semantic-token, hover, completion, navigation, and
+  rename behavior without exposing native dataframe internals.
+
+These boundaries are not language-feature fallbacks. Every shipped PDL source,
+stage, expression family, sink, and pipeline shape is native-eligible on native
+hosts.
 
 The plan SHOULD identify blocking stages.
 
-### 15.5 Failure Semantics
+### 15.6 Failure Semantics
 
 Static errors stop execution.
 
@@ -3139,7 +3185,7 @@ In permissive mode, row-level parse errors MAY be collected while execution cont
 
 Strict mode MUST fail on row-level parse errors.
 
-### 15.6 Manifests
+### 15.7 Manifests
 
 The runtime SHOULD emit a run manifest when requested.
 
@@ -3166,7 +3212,7 @@ Manifest fields SHOULD include:
 
 Manifest JSON MUST be deterministic.
 
-### 15.7 Benchmark Reports
+### 15.8 Benchmark Reports
 
 The `pdl-bench` crate is the repository-local benchmark harness.
 
@@ -3181,7 +3227,11 @@ flags, and peak RSS where the developer platform exposes it.
 
 Since version 0.48.0, the large benchmark suite includes a representative
 multi-output fan-out workload using a binding start, two named outputs, and a
-non-terminal save.
+non-terminal save. Since version 0.49.0, it also includes temporal-heavy, JSON
+Lines-heavy, dynamic column/text, expression-offset window, and
+heterogeneous-union null-padding workloads for the completed native coverage
+arc. Non-equi join benchmarking is absent because no non-equi join syntax is
+shipped.
 
 `pdl-bench compare` SHOULD compare medians when present and fall back to
 single-run elapsed time for older reports. Regression gates SHOULD be
@@ -3288,7 +3338,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.48.0` LSP implementation provides diagnostics,
+The current `0.49.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3726,6 +3776,14 @@ versions and consumer pins stay on the latest verified published packages
 (`pdl-wasm@0.47.1` and `pdl-editor@0.47.0`) until a browser package release is
 cut.
 
+Version 0.49.0 is likewise a native Rust/CLI release: native coverage
+completion and `--engine native-strict` change no parser, editor-service, or
+WASM-visible language surface. Npm was checked on June 11, 2026:
+`pdl-wasm@0.49.0` and `pdl-editor@0.49.0` are not published, so browser package
+versions and consumer pins stay on the latest verified published packages
+(`pdl-wasm@0.47.1` and `pdl-editor@0.47.0`) until a browser package release is
+cut.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3798,7 +3856,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.48.0"
+version = "0.49.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -5404,7 +5462,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.48.0.
+PDL source does not require an explicit version declaration in draft 0.49.0.
 
 The implementation SHOULD report supported language version.
 

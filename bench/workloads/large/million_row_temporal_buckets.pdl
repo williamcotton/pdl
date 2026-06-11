@@ -1,0 +1,11 @@
+load "../../data/generated/million-row-events.csv"
+  | mutate
+      order_month = date_format(ordered_at, "%Y-%m"),
+      order_day = date(ordered_at),
+      month_start = date_floor(ordered_at, "month"),
+      order_year = year(ordered_at),
+      order_month_number = month(ordered_at),
+      order_day_number = day(ordered_at)
+  | group_by segment, order_month, month_start
+  | agg orders = count(), revenue = sum(amount)
+  | sort order_month, segment

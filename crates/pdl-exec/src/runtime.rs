@@ -60,6 +60,7 @@ pub enum ExecutionEngine {
     /// `PortableRows` and treat anything else as an error.
     RowStrict,
     Native,
+    NativeStrict,
 }
 
 impl Default for RunOptions {
@@ -141,6 +142,7 @@ pub fn run_prepared_with_io_and_context_and_engine(
                 ExecutionEngine::Row => PlannedEngine::Row,
                 ExecutionEngine::RowStrict => PlannedEngine::RowStrict,
                 ExecutionEngine::Native => PlannedEngine::Native,
+                ExecutionEngine::NativeStrict => PlannedEngine::NativeStrict,
             },
         },
     ) {
@@ -189,13 +191,20 @@ pub fn run_prepared_with_io_and_context_and_engine(
         return execute_mixed_outputs(prepared, ir, &plan, &context, diagnostics, io);
     }
 
-    let should_try_native = matches!(engine, ExecutionEngine::Native)
-        || (matches!(engine, ExecutionEngine::Auto)
-            && plan.observability.selected_engine == PlannedEngine::Native);
+    let should_try_native = matches!(
+        engine,
+        ExecutionEngine::Native | ExecutionEngine::NativeStrict
+    ) || (matches!(engine, ExecutionEngine::Auto)
+        && plan.observability.selected_engine == PlannedEngine::Native);
     if should_try_native {
         match try_execute_native(prepared, ir, &plan, &context, io) {
             Ok(result) => return result,
-            Err(diagnostic) if matches!(engine, ExecutionEngine::Native) => {
+            Err(diagnostic)
+                if matches!(
+                    engine,
+                    ExecutionEngine::Native | ExecutionEngine::NativeStrict
+                ) =>
+            {
                 return RunResult {
                     stdout: None,
                     named_outputs: Vec::new(),
@@ -1017,8 +1026,37 @@ impl Runtime<'_> {
         span: Span,
     ) -> Result<Table, Diagnostic> {
         ensure_union_compatible(&left, &right, by_name, span)?;
-        let columns = left.columns.clone();
-        let mut rows = left.rows.clone();
+        let columns = if by_name {
+            let mut columns = left.columns.clone();
+            for column in &right.columns {
+                if !columns.iter().any(|existing| existing == column) {
+                    columns.push(column.clone());
+                }
+            }
+            columns
+        } else {
+            let width = left.columns.len().max(right.columns.len());
+            let mut columns = left.columns.clone();
+            for index in columns.len()..width {
+                columns.push(
+                    right
+                        .columns
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| format!("column_{}", index + 1)),
+                );
+            }
+            columns
+        };
+        let mut rows = left
+            .rows
+            .iter()
+            .map(|row| Row {
+                values: (0..columns.len())
+                    .map(|index| row.values.get(index).cloned().unwrap_or(Value::Null))
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
         if by_name {
             let right_indices = columns
                 .iter()
@@ -1279,7 +1317,7 @@ mod tests {
     }
 
     #[test]
-    fn stdin_json_lines_stays_row_only_with_input_format_reason() {
+    fn native_engine_runs_stdin_json_lines_with_row_parity() {
         let io = InMemoryDriverIo::default()
             .with_stdin_bytes("{\"status\":\"completed\",\"amount\":10}\n");
         let prepared = prepare_source_for_run_with_io(
@@ -1295,7 +1333,6 @@ mod tests {
             allow_binary_stdout: true,
         };
 
-        // Automatic mode demotes to rows and still runs the pipeline.
         let auto = run_prepared_with_io_and_context_and_engine(
             &prepared,
             options(),
@@ -1304,14 +1341,12 @@ mod tests {
             ExecutionEngine::Auto,
         );
         assert!(auto.diagnostics.is_empty(), "{:?}", auto.diagnostics);
-        assert_eq!(auto.backend, DataBackend::PortableRows);
+        assert_eq!(auto.backend, DataBackend::NativePolars);
         assert_eq!(
             String::from_utf8(auto.stdout.expect("csv stdout")).expect("utf8 csv"),
             "status\ncompleted\n"
         );
 
-        // Forced native mode reports the JSON Lines by-design reason, not
-        // the retired stdin scan-adapter reserve.
         let forced = run_prepared_with_io_and_context_and_engine(
             &prepared,
             options(),
@@ -1319,15 +1354,11 @@ mod tests {
             BTreeMap::new(),
             ExecutionEngine::Native,
         );
-        let diagnostic = forced
-            .diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic.code == "E1211")
-            .expect("forced native E1211");
-        assert!(
-            diagnostic.message.contains("[input-format]"),
-            "unexpected reason: {}",
-            diagnostic.message
+        assert!(forced.diagnostics.is_empty(), "{:?}", forced.diagnostics);
+        assert_eq!(forced.backend, DataBackend::NativePolars);
+        assert_eq!(
+            String::from_utf8(forced.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "status\ncompleted\n"
         );
     }
 
@@ -1437,12 +1468,7 @@ output row_report =
     }
 
     #[test]
-    fn auto_engine_falls_back_to_rows_for_mixed_class_pivot_longer() {
-        // `pivot_longer` is natively eligible since v0.45, but mixed-class
-        // value columns (string `region` plus numeric `amount`) cannot keep
-        // row-runtime per-cell typing on the typed native engine, so the
-        // lowering refuses at execution time and automatic mode demotes to
-        // rows with byte-identical output.
+    fn native_engine_runs_mixed_class_pivot_longer() {
         let workspace = temp_workspace("native-fallback");
         fs::write(
             workspace.join("sales.csv"),
@@ -1470,7 +1496,7 @@ output row_report =
             ExecutionEngine::Auto,
         );
         assert!(auto.diagnostics.is_empty(), "{:?}", auto.diagnostics);
-        assert_eq!(auto.backend, DataBackend::PortableRows);
+        assert_eq!(auto.backend, DataBackend::NativePolars);
         assert_eq!(
             String::from_utf8(auto.stdout.expect("csv stdout")).expect("utf8 csv"),
             "metric,value\nregion,West\namount,30\nregion,East\namount,10\n"
@@ -1487,23 +1513,21 @@ output row_report =
             BTreeMap::new(),
             ExecutionEngine::Native,
         );
-        assert!(forced.stdout.is_none());
+        assert!(forced.diagnostics.is_empty(), "{:?}", forced.diagnostics);
         assert_eq!(forced.backend, DataBackend::NativePolars);
-        assert!(forced
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "E1211"));
+        assert_eq!(
+            String::from_utf8(forced.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "metric,value\nregion,West\namount,30\nregion,East\namount,10\n"
+        );
         fs::remove_dir_all(workspace).expect("clean temp workspace");
     }
 
     #[test]
-    fn native_eligibility_rejects_unsupported_stage_before_execution() {
+    fn native_eligibility_accepts_temporal_functions_before_execution() {
         let workspace = temp_workspace("native-eligibility");
         fs::write(workspace.join("sales.csv"), "amount\n10\n").expect("write csv");
         let program_path = workspace.join("main.pdl");
         let io = OsDriverIo;
-        // Temporal scalar functions stay row-only by design; the eligibility
-        // check must reject them before any native scan opens.
         let prepared = prepare_source_with_io(
             &program_path,
             r#"load "sales.csv"
@@ -1522,15 +1546,8 @@ output row_report =
         .expect("execution plan");
         let ir = prepared.analysis.ir.as_ref().expect("ir");
 
-        let diagnostic = check_native_program_eligibility(&prepared, ir, &plan, &BTreeMap::new())
-            .expect_err("unsupported native pipeline");
-
-        assert_eq!(diagnostic.code, "E1211");
-        assert!(
-            diagnostic.message.contains("temporal"),
-            "{}",
-            diagnostic.message
-        );
+        check_native_program_eligibility(&prepared, ir, &plan, &BTreeMap::new())
+            .expect("temporal functions are native-eligible in v0.49");
         fs::remove_dir_all(workspace).expect("clean temp workspace");
     }
 
@@ -4604,6 +4621,39 @@ load "day1.csv"
     }
 
     #[test]
+    fn executes_union_by_name_with_null_padding() {
+        let io = InMemoryDriverIo::default()
+            .with_file_bytes("memory/day1.csv", "order_id,region,amount\nA1,North,10\n")
+            .with_file_bytes("memory/day2.csv", "order_id,amount,channel\nA2,30,web\n");
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"let day2 =
+  load "day2.csv"
+
+load "day1.csv"
+  | union day2 by_name true
+  | sort order_id"#,
+            &io,
+        );
+
+        let result = run_prepared_with_io(
+            &prepared,
+            RunOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+            },
+            &io,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
+            "order_id,region,amount,channel\nA1,North,10,\nA2,,30,web\n"
+        );
+    }
+
+    #[test]
     fn incompatible_join_key_types_report_e1208() {
         let io = InMemoryDriverIo::default()
             .with_file_bytes("memory/left.csv", "id,value\n1,left\n")
@@ -4679,7 +4729,7 @@ load "left.csv"
         );
 
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
-        assert_eq!(result.backend, DataBackend::PortableRows);
+        assert_eq!(result.backend, DataBackend::NativePolars);
         assert_eq!(
             String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
             "day_key,normalized,y,m,d,month_start,month_key,week_key\n\

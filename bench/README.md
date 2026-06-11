@@ -59,7 +59,12 @@ emission row-vs-native. v0.45 adds a reshape-dominated
 `million_row_mutate_csv_stdin` workload that feeds the million-row CSV
 through stdin to measure the byte-backed stdin scan path row-vs-native.
 v0.48 adds `million_row_multi_output_fanout`, a file-emitting workload with a
-binding start, two named outputs, and a non-terminal save.
+binding start, two named outputs, and a non-terminal save. v0.49 adds generated
+`million-row-events` CSV and JSON Lines inputs, plus workloads for temporal
+bucketing, JSON Lines scans, dynamic `col`/`replace` with mixed-class
+`if_else`, dynamic window offsets, and heterogeneous-schema union null padding.
+Non-equi join benchmarking is not listed because PDL does not ship non-equi
+join syntax.
 
 ## PDL-to-Algraf Arrow Smoke
 

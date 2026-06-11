@@ -146,7 +146,7 @@ Aggregate windows take an optional named frame: `frame whole_partition`,
 [`examples/window_frame_named.pdl`](examples/window_frame_named.pdl) for the
 native-parity frames and
 [`examples/window_frame_bounded.pdl`](examples/window_frame_bounded.pdl) for
-the bounded frames that run on the row engine.
+bounded-frame analytics.
 
 ```pdl
 load "sales.csv"
@@ -240,13 +240,20 @@ target/debug/pdl run examples/named_outputs.pdl
 target/debug/pdl run examples/non_terminal_save.pdl --stdout-format csv
 ```
 
+The v0.49 coverage example exercises dynamic column indirection, dynamic text
+replacement, and mixed-class conditionals on the native engine:
+
+```bash
+target/debug/pdl run examples/dynamic_text_and_col.pdl --stdout-format csv
+```
+
 ## File formats and output
 
 PDL supports CSV, JSON Lines, Parquet, Arrow IPC file, and Arrow IPC stream
 loading/saving. Native execution covers path-backed, stdin, and host-byte
-CSV, Parquet, Arrow IPC file, and Arrow IPC stream inputs, plus every sink
-format; JSON Lines inputs stay on the row engine by design. Stdout can emit
-CSV, JSON Lines, Parquet, Arrow IPC file, or Arrow IPC stream when requested.
+CSV, JSON Lines, Parquet, Arrow IPC file, and Arrow IPC stream inputs, plus
+every sink format. Stdout can emit CSV, JSON Lines, Parquet, Arrow IPC file, or
+Arrow IPC stream when requested.
 
 ```bash
 pdl run examples/stdout_jsonl.pdl --stdout-format jsonl
@@ -259,11 +266,12 @@ Human diagnostics and logs go to stderr so stdout stays a clean data stream.
 ## Native execution engine
 
 `pdl run` defaults to `--engine auto`: it classifies the pipeline ahead of data
-load and picks a Polars 0.53–backed native engine when every stage is covered.
-Stages outside native coverage trigger an automatic fallback to the portable
-row runtime so the same source keeps producing the same output. Force a
-specific engine with `--engine native` or `--engine row` when you want to pin
-behavior.
+load and picks a Polars 0.53–backed native engine for every shipped language
+feature on native hosts. The portable row runtime remains the parity reference,
+the browser/WASM execution path, and the `--engine row` opt-in. Force a
+specific engine with `--engine native`, `--engine native-strict`, `--engine row`,
+or `--engine row-strict` when you want to pin behavior or make fallback a CI
+failure.
 
 ```bash
 pdl plan examples/top_regions.pdl --stdout-format csv
@@ -271,11 +279,9 @@ pdl plan examples/top_regions.pdl --stdout-format csv
 
 `pdl plan` reports the selected engine and any fallback reasons stage by stage,
 so the cost of running natively (or not) is visible before you execute. Native
-coverage includes path-backed, stdin, and host-byte CSV/Parquet/Arrow IPC
-loads, single and composite-key equi-joins, grouped aggregates, window
-functions (`row_number`, `rank`, `lag`/`lead`, aggregate windows),
-`pivot_longer` and `complete` reshapes, and binary Parquet/Arrow output
-without a text round-trip.
+coverage includes every shipped source, stage, expression family, sink, and
+pipeline shape. The only row-only rows in the coverage matrix are non-execution
+host boundaries: WASM execution and LSP/editor services.
 
 ## Editor and browser support
 

@@ -1,0 +1,9 @@
+let narrow =
+  load "../../data/generated/million-row-narrow.csv"
+
+load "../../data/generated/million-row.csv"
+  | union narrow by_name true
+  | mutate latency_filled = coalesce(latency_ms, 0)
+  | group_by segment
+  | agg row_count = count(), avg_latency = mean(latency_filled)
+  | sort segment
