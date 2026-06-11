@@ -1,13 +1,23 @@
 # PDL Detailed Specification
 
-Status: Draft 0.47.0
+Status: Draft 0.48.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.47.0`, tracked in
-`docs/V0_47_PLAN.md`. Version 0.47.0 completes the v0.43-v0.49
+The current repository implementation line is `0.48.0`, tracked in
+`docs/V0_48_PLAN.md`. Version 0.48.0 promotes native pipeline-shape coverage:
+binding-start pipelines run natively when the referenced binding is recursively
+native-eligible, named-output programs run natively when every output is
+recursively native-eligible, and non-terminal `save` stages use native fan-out
+so a saved frame is emitted while the pipeline continues. Plan and manifest
+observability now include one entry per named output with `selected_engine` and
+`fallback_reason`, while preserving the existing program-level fields. The
+release adds no new PDL syntax, stages, functions, primitive value classes, or
+diagnostic codes.
+
+Version 0.47.0, tracked in `docs/V0_47_PLAN.md`, completes the v0.43-v0.49
 expression-level native coverage tranche for bounded named window frames,
 mixed multi-key window order groups, aggregate arguments over native
 expression families, and the contracted `to_number` / `to_string` /
@@ -2834,9 +2844,10 @@ dataframes, lazy frames, expressions, Arrow reader internals, or Parquet reader
 internals.
 
 The portable row backend is the reference behavior. Native execution is enabled
-only for whole-pipeline plans whose inputs, expressions, stages, and output
-sinks have parity coverage. If parity is uncertain, automatic execution MUST
-use the row backend.
+only for whole-pipeline plans, or per-output named-output plans, whose inputs,
+expressions, stages, and output sinks have parity coverage. If parity is
+uncertain, automatic execution MUST use the row backend for the affected
+pipeline.
 
 The first native fast path in version 0.32.0 is limited to path-backed plans
 with supported stages. Since version 0.33.0, supported native stages include
@@ -3005,15 +3016,38 @@ the partition. `count()` bounded frames use native row-position arithmetic;
 select the clamped frame boundary row. The native implementation MUST
 preserve the row runtime's stable ordering for ties and all-null order keys.
 
-Unsupported aggregate functions,
-binding starts, named outputs, multi-output execution, non-equi joins,
-incompatible-schema union extensions, JSON Lines
-input, a single assignment containing incompatible multi-key window order
-groups, data-dependent dynamic `col(...)`, dynamic `replace` patterns, and
-other unsupported expressions fall back to
-rows in automatic mode before native scans are opened when they are known to be
-unsupported. Forced native mode reports an `E1211` diagnostic with a stable
-unsupported native reason category instead of silently falling back.
+Since version 0.48.0, a pipeline whose start is a binding reference is
+native-eligible when that binding's pipeline is recursively native-eligible.
+The native executor lowers the referenced binding to a cached `pdl-data`
+`DataPlan` first, then continues the referring pipeline from that plan. If the
+referenced binding cannot be lowered, the planner reports
+`binding-start-not-eligible`.
+
+Since version 0.48.0, named-output programs are native-eligible when every
+output pipeline and every referenced binding reachable from those outputs is
+native-eligible. Outputs execute in IR order, and native file/stdout side
+effects MUST occur in the same order as the row runtime. Automatic planning MAY
+select `mixed` for a named-output program when per-output observability is
+available and only some outputs are native-eligible; in that case the output
+entries identify which outputs use `native` or `row`. Forced native execution
+MUST reject a named-output program unless every output can run natively, using
+the `named-output-mixed-engines` reason.
+
+Since version 0.48.0, `save` may appear before later stages in a native
+pipeline. The native executor caches the current lazy plan, writes one clone to
+the save sink, and continues the pipeline from the same cached frame. Multiple
+`save` stages MUST write in stage order. If a future subcase cannot preserve
+that fan-out contract, automatic mode MUST demote it with
+`non-terminal-save-fanout` and forced native mode MUST report `E1211`.
+
+Unsupported aggregate functions, non-equi joins, incompatible-schema union
+extensions, JSON Lines input, a single assignment containing incompatible
+multi-key window order groups, data-dependent dynamic `col(...)`, dynamic
+`replace` patterns, row-only named outputs in forced native mode, and other
+unsupported expressions fall back to rows in automatic mode before native scans
+are opened when they are known to be unsupported. Forced native mode reports an
+`E1211` diagnostic with a stable unsupported native reason category instead of
+silently falling back.
 
 Since version 0.43.0, the unsupported-native reason surface is typed.
 `NativeUnsupportedReason` in `pdl-exec` replaces the v0.40–v0.42 coarse
@@ -3025,9 +3059,12 @@ free-form fallback categories with coverage-boundary variants:
 reserve), `temporal-function` (since v0.46.5; temporal scalar functions
 are row-only by design), `union-null-padding` (v0.41 reserve),
 `non-equi-join` (v0.41 reserve),
-`binding-start-not-eligible`, `named-output-mixed-engines`,
-`non-terminal-save-fanout`, `stdin-bytes-backed-scan` (retired in v0.46;
-no longer produced), `host-bytes-backed-scan` (retired in v0.46; no
+`binding-start-not-eligible` (since v0.48 for binding starts whose referenced
+binding is row-only), `named-output-mixed-engines` (since v0.48 for forced
+native named-output programs with any row-only output),
+`non-terminal-save-fanout` (reserved for native save fan-out subcases that
+cannot preserve row-runtime write order), `stdin-bytes-backed-scan` (retired in
+v0.46; no longer produced), `host-bytes-backed-scan` (retired in v0.46; no
 longer produced), `native-sink-writer`, `row-only-stage`,
 `driver-facts`, and the non-execution documentation boundaries
 `wasm-target-graph` and `editor-service`. These are internal observability
@@ -3074,6 +3111,14 @@ plan output also includes the same facts. Observability MUST NOT write to binary
 stdout during `run`; it is exposed through plan/manifest JSON, text plan output,
 stderr diagnostics, or benchmark sidecar reports.
 
+Since version 0.48.0, the same observability object includes
+`outputs[]` for named-output programs. Each entry MUST include the output name
+and that output's `selected_engine`, and MUST include `fallback_reason` when the
+output is row-selected because it is not native-eligible. The top-level
+`selected_engine` remains the program-level view: `native` when every selected
+output is native, `row` when the whole program is row-selected, and `mixed`
+when automatic planning selects different engines for different outputs.
+
 Version 0.40.0 defines the native coverage matrix in
 `docs/PDL_NATIVE_COVERAGE.csv` and documents it in
 `docs/PDL_NATIVE_COVERAGE.md`. Matrix statuses are limited to `native parity`,
@@ -3115,8 +3160,9 @@ Manifest fields SHOULD include:
 - content hashes where computed
 - diagnostics
 - stream interop hints when stdout format is Arrow IPC
-- execution observability for selected engine, fallback reason, sink strategy,
-  blocking stages, row-materialization status, and required source columns
+- execution observability for selected engine, per-output selected engines,
+  fallback reasons, sink strategy, blocking stages, row-materialization status,
+  and required source columns
 
 Manifest JSON MUST be deterministic.
 
@@ -3132,6 +3178,10 @@ count, output rows, output bytes, selected engine, eligible engine, fallback
 reason, sink strategy, row-materialization status, required source columns,
 system metadata, Rust version, build profile, git ref, dirty flag, feature
 flags, and peak RSS where the developer platform exposes it.
+
+Since version 0.48.0, the large benchmark suite includes a representative
+multi-output fan-out workload using a binding start, two named outputs, and a
+non-terminal save.
 
 `pdl-bench compare` SHOULD compare medians when present and fall back to
 single-run elapsed time for older reports. Regression gates SHOULD be
@@ -3238,7 +3288,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.47.0` LSP implementation provides diagnostics,
+The current `0.48.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3668,6 +3718,14 @@ WASM-visible behavior. Browser package versions and consumer pins stay at
 the published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6` until a browser
 package release is cut.
 
+Version 0.48.0 is likewise a native Rust/CLI release: pipeline-shape native
+coverage and per-output observability change no parser, editor-service, or
+WASM-visible execution behavior. At implementation time npm confirms
+`pdl-wasm@0.48.0` and `pdl-editor@0.48.0` are not published, so browser package
+versions and consumer pins stay on the latest verified published packages
+(`pdl-wasm@0.47.1` and `pdl-editor@0.47.0`) until a browser package release is
+cut.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3740,7 +3798,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.47.0"
+version = "0.48.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -5346,7 +5404,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.47.0.
+PDL source does not require an explicit version declaration in draft 0.48.0.
 
 The implementation SHOULD report supported language version.
 

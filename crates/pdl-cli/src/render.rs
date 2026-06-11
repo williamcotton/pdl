@@ -108,6 +108,20 @@ pub fn render_plan_text(prepared: &PreparedProgram, plan: &ExecutionPlan) -> Str
     if let Some(reason) = plan.observability.fallback_reason {
         text.push_str(&format!("  fallback reason: {}\n", reason.code()));
     }
+    if !plan.observability.outputs.is_empty() {
+        text.push_str("  outputs:\n");
+        for output in &plan.observability.outputs {
+            text.push_str(&format!(
+                "    - {} selected engine: {}",
+                output.name,
+                output.selected_engine.as_str()
+            ));
+            if let Some(reason) = output.fallback_reason {
+                text.push_str(&format!(" fallback reason: {}", reason.code()));
+            }
+            text.push('\n');
+        }
+    }
     text.push_str(&format!(
         "  sink strategy: {}\n",
         plan.observability.sink_strategy.as_str()

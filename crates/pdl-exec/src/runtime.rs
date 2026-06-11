@@ -183,7 +183,16 @@ pub fn run_prepared_with_io_and_context_and_engine(
         };
     }
 
-    if !matches!(engine, ExecutionEngine::Row | ExecutionEngine::RowStrict) {
+    if matches!(engine, ExecutionEngine::Auto)
+        && plan.observability.selected_engine == PlannedEngine::Mixed
+    {
+        return execute_mixed_outputs(prepared, ir, &plan, &context, diagnostics, io);
+    }
+
+    let should_try_native = matches!(engine, ExecutionEngine::Native)
+        || (matches!(engine, ExecutionEngine::Auto)
+            && plan.observability.selected_engine == PlannedEngine::Native);
+    if should_try_native {
         match try_execute_native(prepared, ir, &plan, &context, io) {
             Ok(result) => return result,
             Err(diagnostic) if matches!(engine, ExecutionEngine::Native) => {
@@ -355,6 +364,104 @@ fn context_kind_label(kind: ContextKindIr) -> &'static str {
     match kind {
         ContextKindIr::Param => "parameter",
         ContextKindIr::State => "state",
+    }
+}
+
+fn execute_mixed_outputs(
+    prepared: &PreparedProgram,
+    ir: &pdl_semantics::ProgramIr,
+    plan: &crate::planning::ExecutionPlan,
+    context: &BTreeMap<String, Value>,
+    diagnostics: Vec<Diagnostic>,
+    io: &dyn DriverIo,
+) -> RunResult {
+    let mut runtime = Runtime {
+        prepared,
+        diagnostics,
+        cache: BTreeMap::new(),
+        active_bindings: Vec::new(),
+        context: context.clone(),
+        dry_run: plan.dry_run,
+        stdout: None,
+        io,
+    };
+    let mut native_stdout = None;
+    let mut native_active_bindings = Vec::new();
+    let mut native_binding_cache = BTreeMap::new();
+    let mut named_outputs = Vec::new();
+
+    for output in &ir.outputs {
+        let output_engine = plan
+            .observability
+            .outputs
+            .iter()
+            .find(|observability| observability.name == output.name)
+            .map(|observability| observability.selected_engine)
+            .unwrap_or(PlannedEngine::Row);
+
+        if output_engine == PlannedEngine::Native {
+            let native_result = {
+                let mut native_context = native_planning::NativeExecutionContext {
+                    prepared,
+                    ir,
+                    execution_plan: plan,
+                    context,
+                    io,
+                    stdout: &mut native_stdout,
+                    active_bindings: &mut native_active_bindings,
+                    binding_cache: &mut native_binding_cache,
+                };
+                native_planning::execute_native_pipeline(&mut native_context, &output.pipeline)
+                    .and_then(|data_plan| data_plan.collect())
+            };
+            match native_result {
+                Ok(table) => named_outputs.push(NamedOutput {
+                    name: output.name.clone(),
+                    table,
+                }),
+                Err(diagnostic) => {
+                    runtime.diagnostics.push(diagnostic);
+                    return RunResult {
+                        stdout: native_stdout.or_else(|| runtime.stdout.take()),
+                        named_outputs,
+                        diagnostics: runtime.diagnostics,
+                        backend: DataBackend::NativePolars,
+                    };
+                }
+            }
+            if native_stdout.is_some() {
+                runtime.stdout = native_stdout.clone();
+            }
+            continue;
+        }
+
+        match runtime.execute_pipeline(&output.pipeline) {
+            Ok(table) => {
+                named_outputs.push(NamedOutput {
+                    name: output.name.clone(),
+                    table,
+                });
+                if runtime.stdout.is_some() {
+                    native_stdout = runtime.stdout.clone();
+                }
+            }
+            Err(diagnostic) => {
+                runtime.diagnostics.push(diagnostic);
+                return RunResult {
+                    stdout: runtime.stdout.take().or(native_stdout),
+                    named_outputs,
+                    diagnostics: runtime.diagnostics,
+                    backend: DataBackend::NativePolars,
+                };
+            }
+        }
+    }
+
+    RunResult {
+        stdout: runtime.stdout.take().or(native_stdout),
+        named_outputs,
+        diagnostics: runtime.diagnostics,
+        backend: DataBackend::NativePolars,
     }
 }
 
@@ -1261,6 +1368,70 @@ mod tests {
         assert_eq!(
             String::from_utf8(result.stdout.expect("csv stdout")).expect("utf8 csv"),
             "region,amount\nNorth,40\n"
+        );
+        fs::remove_dir_all(workspace).expect("clean temp workspace");
+    }
+
+    #[test]
+    fn auto_engine_runs_mixed_named_outputs() {
+        let workspace = temp_workspace("mixed-named-outputs");
+        fs::write(
+            workspace.join("sales.csv"),
+            "region,amount\nWest,30\nEast,10\n",
+        )
+        .expect("write csv");
+        fs::write(
+            workspace.join("events.jsonl"),
+            "{\"region\":\"North\",\"amount\":50}\n",
+        )
+        .expect("write jsonl");
+        let program_path = workspace.join("main.pdl");
+        let native_report_path = workspace.join("native_report.csv");
+        let row_report_path = workspace.join("row_report.csv");
+        let io = OsDriverIo;
+        let source = format!(
+            r#"output native_report =
+  load "sales.csv"
+  | sort amount desc
+  | save "{}"
+
+output row_report =
+  load "events.jsonl"
+  | save "{}""#,
+            native_report_path.display(),
+            row_report_path.display()
+        );
+        let prepared = prepare_source_with_io(&program_path, &source, &io);
+
+        let result = run_prepared_with_io_and_context_and_engine(
+            &prepared,
+            RunOptions {
+                stdout_format: None,
+                dry_run: false,
+                allow_binary_stdout: true,
+            },
+            &io,
+            BTreeMap::new(),
+            ExecutionEngine::Auto,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.backend, DataBackend::NativePolars);
+        assert_eq!(
+            fs::read_to_string(&native_report_path).expect("native report"),
+            "region,amount\nWest,30\nEast,10\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&row_report_path).expect("row report"),
+            "region,amount\nNorth,50\n"
+        );
+        assert_eq!(
+            result
+                .named_outputs
+                .iter()
+                .map(|output| output.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["native_report", "row_report"]
         );
         fs::remove_dir_all(workspace).expect("clean temp workspace");
     }

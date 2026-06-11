@@ -1,9 +1,9 @@
 # PDL Native Coverage Matrix
 
-Status: v0.47.0 source of truth
+Status: v0.48.0 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
-This matrix records what the native execution strategy may claim in v0.40. The
+This matrix records what the native execution strategy may claim in v0.48. The
 portable row runtime remains the semantic reference. A matrix row may use only
 one of these statuses:
 
@@ -37,7 +37,7 @@ boundary changes status, update the CSV and the tests in the same change.
 | `union` | native partial | Native covers compatible-schema binding inputs by name or position with optional `distinct`; incompatible schemas, language-level null padding, and browser byte boundaries stay row-only. |
 | `pivot_longer` | native partial | Class-homogeneous value columns lower to native unpivot with row-identical interleaved output order (v0.45). Mixed-class value column sets stay row-only by design: the typed engine cannot keep the row runtime's per-cell value types, so automatic mode demotes at lowering time with byte-identical row output. |
 | `complete` | native partial | First-appearance key expansion lowers to a native cross join, null-matching left join, and fill projection with row-identical order (v0.45). Class-changing fills and window-bearing fills stay row-only by design; duplicate key tuples report `E1208` on both engines. |
-| `save` | native partial | Terminal saves use native direct writers for every format since v0.44; non-terminal save fan-out stays row-only (v0.48). |
+| `save` | native parity | Terminal and non-terminal saves use native direct writers for every format; non-terminal saves cache/fan out the current frame in row-runtime write order (v0.48). |
 
 ## Expression Coverage
 
@@ -82,7 +82,15 @@ boundary changes status, update the CSV and the tests in the same change.
 | JSON Lines | row-only by design | Schema inference and text semantics stay on the row runtime. v0.46 considered and declined the promotion for path, stdin, and host bytes; the planner reports `input-format` for every JSON Lines source. |
 | stdin | native parity | CSV, Parquet, and Arrow IPC file/stream stdin bytes scan natively through byte-backed adapters (v0.46); JSON Lines and unknown stdin bytes stay row-only by design. |
 | byte-backed host files | native parity | CSV, Parquet, and Arrow IPC file/stream host bytes scan natively through the byte-backed adapters when no real filesystem path is available (v0.46); JSON Lines host bytes stay row-only by design. |
-| named bindings | native partial | Binding-backed inputs are native for supported join/union right sides; binding starts and named outputs remain row-only. |
+| named bindings | native partial | Binding-backed inputs are native for supported join/union right sides and binding-start pipelines when the referenced binding is recursively native-eligible (v0.48). Row-only binding starts report `binding-start-not-eligible`. |
+
+## Pipeline Shape Coverage
+
+| Item | Status | Notes |
+| --- | --- | --- |
+| binding-start pipelines | native partial | Native when the referenced binding is recursively native-eligible; otherwise row-only under `binding-start-not-eligible`. |
+| named-output programs | native partial | Native when every output pipeline and referenced binding is recursively native-eligible. Automatic planning may report `mixed` with per-output observability when outputs disagree; forced native reports `named-output-mixed-engines` if any output is row-only. |
+| non-terminal save | native parity | Uses native frame cache/fan-out and writes in stage order before later stages continue. `non-terminal-save-fanout` remains reserved for future subcases that cannot preserve this order. |
 
 ## Sink Coverage
 

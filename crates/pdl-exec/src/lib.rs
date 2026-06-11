@@ -6,8 +6,8 @@ pub mod runtime;
 
 pub use output::{emit_stdout, write_output};
 pub use planning::{
-    plan_prepared, ExecutionPlan, ExecutionPlanStep, NativeUnsupportedReason, PlanObservability,
-    PlannedEngine, SinkStrategy,
+    plan_prepared, ExecutionPlan, ExecutionPlanStep, NativeUnsupportedReason,
+    OutputPlanObservability, PlanObservability, PlannedEngine, SinkStrategy,
 };
 pub use runtime::{
     run_prepared, run_prepared_with_engine, run_prepared_with_io, run_prepared_with_io_and_context,

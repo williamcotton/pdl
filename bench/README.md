@@ -58,6 +58,8 @@ emission row-vs-native. v0.45 adds a reshape-dominated
 `pivot_longer` and `complete` lowerings row-vs-native. v0.46 adds a
 `million_row_mutate_csv_stdin` workload that feeds the million-row CSV
 through stdin to measure the byte-backed stdin scan path row-vs-native.
+v0.48 adds `million_row_multi_output_fanout`, a file-emitting workload with a
+binding start, two named outputs, and a non-terminal save.
 
 ## PDL-to-Algraf Arrow Smoke
 

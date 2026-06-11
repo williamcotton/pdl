@@ -84,7 +84,7 @@ pub fn example_config(name: &str) -> ExampleConfig {
         },
         // Named outputs save their own files; a shared stdout stream is a
         // planning error for multi-output programs.
-        "reactive_trip_dashboard" => ExampleConfig {
+        "reactive_trip_dashboard" | "named_outputs" => ExampleConfig {
             stdin_format: None,
             stdout_format: None,
         },

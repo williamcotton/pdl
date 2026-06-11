@@ -1,0 +1,8 @@
+let completed_sales =
+  load "sales.csv"
+  | filter status == "completed"
+
+completed_sales
+  | group_by region
+  | agg revenue = sum(amount), orders = count()
+  | sort revenue desc

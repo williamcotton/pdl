@@ -1,0 +1,7 @@
+load "sales.csv"
+  | filter status == "completed"
+  | select region, customer_id, amount
+  | save "completed_sales_snapshot.csv"
+  | group_by region
+  | agg revenue = sum(amount), orders = count()
+  | sort revenue desc

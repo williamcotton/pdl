@@ -254,6 +254,15 @@ struct Workload {
     stdin_path: Option<&'static str>,
 }
 
+impl Workload {
+    fn stdout_format(&self) -> Option<&'static str> {
+        match self.output_format {
+            "multi-csv" => None,
+            format => Some(format),
+        }
+    }
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let root = repo_root();
@@ -1017,6 +1026,17 @@ fn large_workloads() -> &'static [Workload] {
             required_path: "bench/data/generated/million-row.csv",
             stdin_path: None,
         },
+        // v0.48: representative pipeline-shape workload. It uses a binding
+        // start, two named outputs, and a non-terminal save fan-out.
+        Workload {
+            name: "million_row_multi_output_fanout",
+            program: "bench/workloads/large/million_row_multi_output_fanout.pdl",
+            dataset: "million-row",
+            input_format: "csv",
+            output_format: "multi-csv",
+            required_path: "bench/data/generated/million-row.csv",
+            stdin_path: None,
+        },
     ]
 }
 
@@ -1151,11 +1171,15 @@ fn run_workload(
         .stdin_path
         .map(|stdin_path| format!(" < {stdin_path}"))
         .unwrap_or_default();
+    let stdout_format_arg = workload
+        .stdout_format()
+        .map(|format| format!(" --stdout-format {format}"))
+        .unwrap_or_default();
     let command_text = format!(
-        "{} run {} --stdout-format {} --engine {}{}",
+        "{} run {}{} --engine {}{}",
         relative(root, &pdl_bin(context)),
         workload.program,
-        workload.output_format,
+        stdout_format_arg,
         context.engine.as_str(),
         stdin_redirect
     );
@@ -1297,9 +1321,11 @@ fn run_pdl_command(
     command
         .current_dir(context.root)
         .arg("run")
-        .arg(workload.program)
-        .arg("--stdout-format")
-        .arg(workload.output_format)
+        .arg(workload.program);
+    if let Some(stdout_format) = workload.stdout_format() {
+        command.arg("--stdout-format").arg(stdout_format);
+    }
+    command
         .arg("--engine")
         .arg(context.engine.as_str())
         .stdout(Stdio::from(stdout))
@@ -1366,9 +1392,11 @@ fn plan_facts(
     command
         .current_dir(context.root)
         .arg("plan")
-        .arg(workload.program)
-        .arg("--stdout-format")
-        .arg(workload.output_format)
+        .arg(workload.program);
+    if let Some(stdout_format) = workload.stdout_format() {
+        command.arg("--stdout-format").arg(stdout_format);
+    }
+    command
         .arg("--engine")
         .arg(context.engine.as_str())
         .arg("--json");

@@ -9,20 +9,21 @@ consumer lockfiles after npm has the new tarballs.
 ## Published Package Mode
 
 Use published packages for demo, Studio, and downstream package-surface checks.
-For the v0.44.0 release, npm was checked on June 10, 2026: `pdl-wasm` publishes
-`0.30.0`, `0.39.0`, and `0.43.5`; `pdl-editor` publishes `0.30.0`, `0.30.1`,
-`0.39.0`, `0.43.5`, and `0.43.6`.
+For the v0.48.0 release, npm was checked on June 11, 2026: `pdl-wasm`
+publishes `0.30.0`, `0.39.0`, `0.43.5`, `0.47.0`, and `0.47.1`;
+`pdl-editor` publishes `0.30.0`, `0.30.1`, `0.39.0`, `0.43.5`,
+`0.43.6`, and `0.47.0`.
 
 The v0.43.5 named-frame release changed the language surface that the browser
 packages carry (the WASM parser and the editor grammar assets), so new browser
-package versions were prepared and have since been published: `pdl-wasm@0.43.5`
-and `pdl-editor@0.43.6`. Ordinary demo and downstream checks use the latest
+package versions were prepared and have since been published. Ordinary demo
+and downstream checks use the latest
 verified published browser package versions:
 
 1. Install the published browser packages:
 
    ```bash
-   npm install pdl-wasm@0.43.5 pdl-editor@0.43.6
+   npm install pdl-wasm@0.47.1 pdl-editor@0.47.0
    ```
 
 2. Use the package-local WASM asset or pass an explicit host URL. Vite hosts
@@ -35,7 +36,7 @@ import { loadPdlRuntime } from "pdl-wasm";
 const runtime = await loadPdlRuntime({ wasmUrl: "/wasm/pdl.wasm" });
 ```
 
-The PDL demo consumes the published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`
+The PDL demo consumes the published `pdl-wasm@0.47.1` / `pdl-editor@0.47.0`
 versions. Do not move consumer pins or browser install commands past versions
 npm confirms exist; after any future publication, regenerate consumer
 lockfiles against the published tarballs.
@@ -67,10 +68,14 @@ pins stay at the published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`, and no
 
 The v0.47.0 bounded-frame native promotion release is a native Rust/CLI
 release with no browser-visible behavior change. Npm was re-checked on
-June 11, 2026: `pdl-wasm` publishes `0.30.0`, `0.39.0`, and `0.43.5`;
-`pdl-editor` publishes `0.30.0`, `0.30.1`, `0.39.0`, `0.43.5`, and
-`0.43.6`. Browser package versions and consumer pins stay at the
-published `pdl-wasm@0.43.5` / `pdl-editor@0.43.6`; no `0.47.0` browser
+June 11, 2026. Browser package versions and consumer pins may use the
+published `pdl-wasm@0.47.1` / `pdl-editor@0.47.0` packages.
+
+The v0.48.0 pipeline-shape native promotion release is likewise a native
+Rust/CLI release with no browser-visible execution behavior change. Npm was
+re-checked on June 11, 2026: `pdl-wasm@0.48.0` and `pdl-editor@0.48.0` are
+not published. Browser package versions and consumer pins stay at the
+published `pdl-wasm@0.47.1` / `pdl-editor@0.47.0`; no `0.48.0` browser
 packages are prepared.
 
 ## Package Validation

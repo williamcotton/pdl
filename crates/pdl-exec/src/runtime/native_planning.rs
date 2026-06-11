@@ -28,16 +28,89 @@ pub(crate) fn try_execute_native(
     io: &dyn DriverIo,
 ) -> Result<RunResult, Diagnostic> {
     check_native_program_eligibility(prepared, ir, plan, context)?;
+    if !ir.outputs.is_empty() {
+        return execute_native_outputs(prepared, ir, plan, context, io);
+    }
+
     let main = ir.main.as_ref().ok_or_else(|| {
         unsupported_native_pipeline(
             NativeUnsupportedReason::NoRunnableMain,
             "no runnable main pipeline",
         )
     })?;
-    let stdout =
-        match execute_native_pipeline(prepared, ir, main, plan, context, io, &mut Vec::new())? {
-            NativePipelineResult::Plan(data_plan) => {
-                if let Some(stdout_format) = plan.stdout_format {
+    let mut stdout = None;
+    let mut active_bindings = Vec::new();
+    let mut binding_cache = BTreeMap::new();
+    let data_plan = {
+        let mut native_context = NativeExecutionContext {
+            prepared,
+            ir,
+            execution_plan: plan,
+            context,
+            io,
+            stdout: &mut stdout,
+            active_bindings: &mut active_bindings,
+            binding_cache: &mut binding_cache,
+        };
+        execute_native_pipeline(&mut native_context, main)?
+    };
+    let stdout = if let Some(stdout_format) = plan.stdout_format {
+        data_plan
+            .write_to_sink(DataSink::Bytes {
+                format: stdout_format,
+            })?
+            .ok_or_else(|| {
+                unsupported_native_pipeline(
+                    NativeUnsupportedReason::NativeSinkWriter,
+                    "native stdout bytes were not returned",
+                )
+            })?
+            .into()
+    } else {
+        stdout
+    };
+    Ok(RunResult {
+        stdout,
+        named_outputs: Vec::new(),
+        diagnostics: prepared.diagnostics(),
+        backend: DataBackend::NativePolars,
+    })
+}
+
+fn execute_native_outputs(
+    prepared: &PreparedProgram,
+    ir: &pdl_semantics::ProgramIr,
+    plan: &ExecutionPlan,
+    context: &BTreeMap<String, Value>,
+    io: &dyn DriverIo,
+) -> Result<RunResult, Diagnostic> {
+    let mut stdout = None;
+    let mut named_outputs = Vec::new();
+    let mut active_bindings = Vec::new();
+    let mut binding_cache = BTreeMap::new();
+
+    {
+        let mut native_context = NativeExecutionContext {
+            prepared,
+            ir,
+            execution_plan: plan,
+            context,
+            io,
+            stdout: &mut stdout,
+            active_bindings: &mut active_bindings,
+            binding_cache: &mut binding_cache,
+        };
+
+        for output in &ir.outputs {
+            let data_plan = execute_native_pipeline(&mut native_context, &output.pipeline)?;
+            let data_plan = if plan.stdout_format.is_some() {
+                data_plan.cache()
+            } else {
+                data_plan
+            };
+            let table = data_plan.clone().collect()?;
+            if let Some(stdout_format) = plan.stdout_format {
+                *native_context.stdout = Some(
                     data_plan
                         .write_to_sink(DataSink::Bytes {
                             format: stdout_format,
@@ -47,17 +120,19 @@ pub(crate) fn try_execute_native(
                                 NativeUnsupportedReason::NativeSinkWriter,
                                 "native stdout bytes were not returned",
                             )
-                        })?
-                        .into()
-                } else {
-                    None
-                }
+                        })?,
+                );
             }
-            NativePipelineResult::Completed { stdout } => stdout,
-        };
+            named_outputs.push(crate::runtime::NamedOutput {
+                name: output.name.clone(),
+                table,
+            });
+        }
+    }
+
     Ok(RunResult {
         stdout,
-        named_outputs: Vec::new(),
+        named_outputs,
         diagnostics: prepared.diagnostics(),
         backend: DataBackend::NativePolars,
     })
@@ -69,19 +144,25 @@ pub(crate) fn check_native_program_eligibility(
     plan: &ExecutionPlan,
     context: &BTreeMap<String, Value>,
 ) -> Result<(), Diagnostic> {
-    if !ir.outputs.is_empty() {
-        return Err(unsupported_native_pipeline(
-            NativeUnsupportedReason::NamedOutputMixedEngines,
-            "native execution for named outputs is deferred",
-        ));
+    if ir.outputs.is_empty() {
+        let main = ir.main.as_ref().ok_or_else(|| {
+            unsupported_native_pipeline(
+                NativeUnsupportedReason::NoRunnableMain,
+                "no runnable main pipeline",
+            )
+        })?;
+        return check_native_pipeline_eligibility(prepared, main, plan, context);
     }
-    let main = ir.main.as_ref().ok_or_else(|| {
-        unsupported_native_pipeline(
-            NativeUnsupportedReason::NoRunnableMain,
-            "no runnable main pipeline",
-        )
-    })?;
-    check_native_pipeline_eligibility(prepared, main, plan, context)
+
+    for output in &ir.outputs {
+        if check_native_pipeline_eligibility(prepared, &output.pipeline, plan, context).is_err() {
+            return Err(unsupported_native_pipeline(
+                NativeUnsupportedReason::NamedOutputMixedEngines,
+                "not every named output is native-eligible",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn check_native_pipeline_eligibility(
@@ -94,16 +175,27 @@ pub(crate) fn check_native_pipeline_eligibility(
         PipelineStartIr::Load { format, span, .. } => {
             check_native_load_eligibility(prepared, *span, format.as_deref())?;
         }
-        PipelineStartIr::Binding { .. } => {
-            return Err(unsupported_native_pipeline(
-                NativeUnsupportedReason::BindingStartNotEligible,
-                "native execution from bindings is deferred",
-            ));
+        PipelineStartIr::Binding { name, span } => {
+            let binding = ir_binding(prepared, name).ok_or_else(|| {
+                Diagnostic::error(codes::E1007, format!("unknown binding `{name}`"), *span)
+            })?;
+            if check_native_pipeline_eligibility(
+                prepared,
+                &binding.pipeline,
+                execution_plan,
+                context,
+            )
+            .is_err()
+            {
+                return Err(unsupported_native_pipeline(
+                    NativeUnsupportedReason::BindingStartNotEligible,
+                    "binding-start pipeline references a row-only binding",
+                ));
+            }
         }
     }
 
-    for (stage_index, stage) in pipeline.stages.iter().enumerate() {
-        let is_terminal = stage_index + 1 == pipeline.stages.len();
+    for stage in &pipeline.stages {
         match stage {
             StageIr::Filter { expr, .. } => {
                 lower_data_expr(expr, context)?;
@@ -139,12 +231,6 @@ pub(crate) fn check_native_pipeline_eligibility(
             }
             StageIr::Limit { .. } => {}
             StageIr::Save { format, span, .. } => {
-                if !is_terminal {
-                    return Err(unsupported_native_pipeline(
-                        NativeUnsupportedReason::NonTerminalSaveFanout,
-                        "native save stages are supported only as terminal stages",
-                    ));
-                }
                 check_native_save_eligibility(prepared, execution_plan, *span, format.as_deref())?;
             }
             StageIr::Join { source, .. } => {
@@ -287,40 +373,36 @@ pub(crate) fn check_native_save_eligibility(
     Ok(())
 }
 
-// `DataPlan` embeds the native engine's lazy plan, which grew past the
-// clippy variant-size threshold when the v0.45 reshape lowerings enabled
-// additional native engine features. These results are short-lived, moved
-// values; boxing would add indirection without a measurable win.
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum NativePipelineResult {
-    Plan(DataPlan),
-    Completed { stdout: Option<Vec<u8>> },
+pub(crate) struct NativeExecutionContext<'a> {
+    pub(crate) prepared: &'a PreparedProgram,
+    pub(crate) ir: &'a pdl_semantics::ProgramIr,
+    pub(crate) execution_plan: &'a ExecutionPlan,
+    pub(crate) context: &'a BTreeMap<String, Value>,
+    pub(crate) io: &'a dyn DriverIo,
+    pub(crate) stdout: &'a mut Option<Vec<u8>>,
+    pub(crate) active_bindings: &'a mut Vec<String>,
+    pub(crate) binding_cache: &'a mut BTreeMap<String, DataPlan>,
 }
 
 pub(crate) fn execute_native_pipeline(
-    prepared: &PreparedProgram,
-    ir: &pdl_semantics::ProgramIr,
+    native_context: &mut NativeExecutionContext<'_>,
     pipeline: &PipelineIr,
-    execution_plan: &ExecutionPlan,
-    context: &BTreeMap<String, Value>,
-    io: &dyn DriverIo,
-    active_bindings: &mut Vec<String>,
-) -> Result<NativePipelineResult, Diagnostic> {
+) -> Result<DataPlan, Diagnostic> {
+    let prepared = native_context.prepared;
+    let execution_plan = native_context.execution_plan;
+    let context = native_context.context;
+    let io = native_context.io;
     let mut plan = match &pipeline.start {
         PipelineStartIr::Load { format, span, .. } => {
             native_load_plan(prepared, *span, format.as_deref(), io)?
         }
-        PipelineStartIr::Binding { .. } => {
-            return Err(unsupported_native_pipeline(
-                NativeUnsupportedReason::BindingStartNotEligible,
-                "native execution from bindings is deferred",
-            ));
+        PipelineStartIr::Binding { name, span } => {
+            execute_native_binding(native_context, NativeBindingRef { name, span: *span })?
         }
     };
     let mut grouping: Option<Vec<String>> = None;
 
-    for (stage_index, stage) in pipeline.stages.iter().enumerate() {
-        let is_terminal = stage_index + 1 == pipeline.stages.len();
+    for stage in &pipeline.stages {
         plan = match stage {
             StageIr::Filter { expr, .. } => {
                 grouping = None;
@@ -404,19 +486,17 @@ pub(crate) fn execute_native_pipeline(
                 plan.aggregate(&grouping.take().unwrap_or_default(), &items)?
             }
             StageIr::Save { format, span, .. } => {
-                if !is_terminal {
-                    return Err(unsupported_native_pipeline(
-                        NativeUnsupportedReason::NonTerminalSaveFanout,
-                        "native save stages are supported only as terminal stages",
-                    ));
-                }
-                return execute_native_save(
+                plan = plan.cache();
+                if let Some(bytes) = execute_native_save(
                     prepared,
                     execution_plan,
-                    plan,
+                    plan.clone(),
                     *span,
                     format.as_deref(),
-                );
+                )? {
+                    *native_context.stdout = Some(bytes);
+                }
+                plan
             }
             StageIr::Join {
                 source,
@@ -428,16 +508,11 @@ pub(crate) fn execute_native_pipeline(
             } => {
                 grouping = None;
                 let right = execute_native_binding(
-                    prepared,
-                    ir,
+                    native_context,
                     NativeBindingRef {
                         name: source,
                         span: *source_span,
                     },
-                    execution_plan,
-                    context,
-                    io,
-                    active_bindings,
                 )?;
                 let kind = match kind {
                     JoinKindIr::Inner => DataJoinKind::Inner,
@@ -463,16 +538,11 @@ pub(crate) fn execute_native_pipeline(
             } => {
                 grouping = None;
                 let right = execute_native_binding(
-                    prepared,
-                    ir,
+                    native_context,
                     NativeBindingRef {
                         name: source,
                         span: *source_span,
                     },
-                    execution_plan,
-                    context,
-                    io,
-                    active_bindings,
                 )?;
                 plan.union(right, *by_name, *distinct)?
             }
@@ -510,21 +580,23 @@ pub(crate) fn execute_native_pipeline(
             }
         };
     }
-    Ok(NativePipelineResult::Plan(plan))
+    Ok(plan)
 }
 
 pub(crate) fn execute_native_binding(
-    prepared: &PreparedProgram,
-    ir: &pdl_semantics::ProgramIr,
+    native_context: &mut NativeExecutionContext<'_>,
     binding_ref: NativeBindingRef<'_>,
-    execution_plan: &ExecutionPlan,
-    context: &BTreeMap<String, Value>,
-    io: &dyn DriverIo,
-    active_bindings: &mut Vec<String>,
 ) -> Result<DataPlan, Diagnostic> {
     let name = binding_ref.name;
-    if let Some(index) = active_bindings.iter().position(|active| active == name) {
-        let mut path = active_bindings[index..].to_vec();
+    if let Some(plan) = native_context.binding_cache.get(name) {
+        return Ok(plan.clone());
+    }
+    if let Some(index) = native_context
+        .active_bindings
+        .iter()
+        .position(|active| active == name)
+    {
+        let mut path = native_context.active_bindings[index..].to_vec();
         path.push(name.to_string());
         return Err(Diagnostic::error(
             codes::E1501,
@@ -532,7 +604,8 @@ pub(crate) fn execute_native_binding(
             binding_ref.span,
         ));
     }
-    let binding = ir
+    let binding = native_context
+        .ir
         .bindings
         .iter()
         .find(|binding| binding.name == name)
@@ -543,24 +616,15 @@ pub(crate) fn execute_native_binding(
                 binding_ref.span,
             )
         })?;
-    active_bindings.push(name.to_string());
-    let result = execute_native_pipeline(
-        prepared,
-        ir,
-        &binding.pipeline,
-        execution_plan,
-        context,
-        io,
-        active_bindings,
-    );
-    active_bindings.pop();
-    match result? {
-        NativePipelineResult::Plan(plan) => Ok(plan),
-        NativePipelineResult::Completed { .. } => Err(unsupported_native_pipeline(
-            NativeUnsupportedReason::NonTerminalSaveFanout,
-            "native binding outputs must remain table plans",
-        )),
-    }
+    let pipeline = binding.pipeline.clone();
+    native_context.active_bindings.push(name.to_string());
+    let result = execute_native_pipeline(native_context, &pipeline);
+    native_context.active_bindings.pop();
+    let plan = result?;
+    native_context
+        .binding_cache
+        .insert(name.to_string(), plan.clone());
+    Ok(plan)
 }
 
 pub(crate) struct NativeBindingRef<'a> {
@@ -587,9 +651,9 @@ pub(crate) fn execute_native_save(
     plan: DataPlan,
     stage_span: Span,
     explicit_format: Option<&str>,
-) -> Result<NativePipelineResult, Diagnostic> {
+) -> Result<Option<Vec<u8>>, Diagnostic> {
     if execution_plan.dry_run {
-        return Ok(NativePipelineResult::Completed { stdout: None });
+        return Ok(None);
     }
     let Some(sink) = prepared.driver_plan.sink_for_stage_span(stage_span) else {
         return Err(Diagnostic::error(
@@ -609,16 +673,14 @@ pub(crate) fn execute_native_save(
                         "native stdout bytes were not returned",
                     )
                 })?;
-            Ok(NativePipelineResult::Completed {
-                stdout: Some(stdout),
-            })
+            Ok(Some(stdout))
         }
         SinkDescriptor::Path { resolved_path, .. } => {
             plan.write_to_sink(DataSink::Path {
                 path: resolved_path,
                 format,
             })?;
-            Ok(NativePipelineResult::Completed { stdout: None })
+            Ok(None)
         }
     }
 }

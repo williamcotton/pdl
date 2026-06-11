@@ -37,6 +37,7 @@ pub enum DataBackend {
     NativePolars,
 }
 
+#[derive(Clone)]
 pub struct DataPlan {
     inner: DataPlanInner,
 }
@@ -47,6 +48,7 @@ pub struct DataPlan {
 // stored in collections, so boxing would add indirection without a
 // measurable win.
 #[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
 enum DataPlanInner {
     Rows(Table),
     #[cfg(feature = "polars-engine")]
@@ -54,6 +56,7 @@ enum DataPlanInner {
 }
 
 #[cfg(feature = "polars-engine")]
+#[derive(Clone)]
 struct NativePlan {
     format: DataFormat,
     plan: native::LazyFrame,
@@ -736,6 +739,19 @@ impl DataPlan {
             DataPlanInner::Rows(table) => Ok(table),
             #[cfg(feature = "polars-engine")]
             DataPlanInner::Native(plan) => native_collect_to_table(plan),
+        }
+    }
+
+    pub fn cache(self) -> Self {
+        match self.inner {
+            DataPlanInner::Rows(table) => Self::from_table(table),
+            #[cfg(feature = "polars-engine")]
+            DataPlanInner::Native(plan) => Self {
+                inner: DataPlanInner::Native(NativePlan {
+                    format: plan.format,
+                    plan: plan.plan.cache(),
+                }),
+            },
         }
     }
 

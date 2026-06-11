@@ -7,7 +7,10 @@ use pdl_driver::{
     DriverPlan, FormatDecision, PipelineLabel, PreparedProgram, SinkDescriptor, SniffingDecision,
     SniffingReason, SourceDescriptor, StreamDirection, StreamKind,
 };
-use pdl_exec::{ExecutionPlan, ExecutionPlanStep, NativeUnsupportedReason, PlanObservability};
+use pdl_exec::{
+    ExecutionPlan, ExecutionPlanStep, NativeUnsupportedReason, OutputPlanObservability,
+    PlanObservability,
+};
 use serde::Serialize;
 
 use crate::render::schema_render::{output_schema_json, SchemaJson};
@@ -105,6 +108,15 @@ pub(crate) struct PlanObservabilityJson {
     pub(crate) row_materialization: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) required_source_columns: Option<Vec<String>>,
+    pub(crate) outputs: Vec<OutputPlanObservabilityJson>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct OutputPlanObservabilityJson {
+    pub(crate) name: String,
+    pub(crate) selected_engine: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fallback_reason: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -203,6 +215,23 @@ pub(crate) fn plan_observability_json(observability: &PlanObservability) -> Plan
         blocking_stages: observability.blocking_stages.clone(),
         row_materialization: observability.row_materialization,
         required_source_columns: observability.required_source_columns.clone(),
+        outputs: observability
+            .outputs
+            .iter()
+            .map(output_observability_json)
+            .collect(),
+    }
+}
+
+pub(crate) fn output_observability_json(
+    observability: &OutputPlanObservability,
+) -> OutputPlanObservabilityJson {
+    OutputPlanObservabilityJson {
+        name: observability.name.clone(),
+        selected_engine: observability.selected_engine.as_str(),
+        fallback_reason: observability
+            .fallback_reason
+            .map(NativeUnsupportedReason::code),
     }
 }
 
@@ -301,9 +330,9 @@ pub(crate) fn execution_step_text(step: &ExecutionPlanStep) -> String {
 pub(crate) fn manifest_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> ManifestJson {
     let stdout_format = plan.stdout_format.map(|format| format.canonical_name());
     ManifestJson {
-        manifest_version: "0.47.0",
+        manifest_version: "0.48.0",
         implementation_version: env!("CARGO_PKG_VERSION"),
-        language_version: "0.47.0",
+        language_version: "0.48.0",
         source_path: prepared.path.display().to_string(),
         driver: driver_plan_json(&prepared.driver_plan),
         execution: execution_plan_json(plan),

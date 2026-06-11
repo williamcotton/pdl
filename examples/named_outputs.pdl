@@ -1,0 +1,17 @@
+let completed_sales =
+  load "sales.csv"
+  | filter status == "completed"
+
+output revenue_by_region =
+  completed_sales
+  | group_by region
+  | agg revenue = sum(amount), orders = count()
+  | sort revenue desc
+  | save "named_revenue_by_region.csv"
+
+output largest_completed_sales =
+  completed_sales
+  | select customer_id, region, amount
+  | sort amount desc
+  | limit 3
+  | save "named_largest_completed_sales.csv"

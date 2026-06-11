@@ -1,6 +1,6 @@
 # PDL v0.48 Plan
 
-Status: Proposed
+Status: Shipped
 Target version: 0.48.0
 Owner: PDL maintainers
 Related spec: [`PDL_SPEC.md`](PDL_SPEC.md)
@@ -109,7 +109,7 @@ keywords, and no new functions.
 
 - Promote native binding-start pipelines.
 
-  Status: Proposed.
+  Status: Complete.
 
   Eligibility flip in
   `crates/pdl-exec/src/runtime/native_planning.rs`. The native
@@ -122,7 +122,7 @@ keywords, and no new functions.
 
 - Promote native named outputs.
 
-  Status: Proposed.
+  Status: Complete.
 
   Eligibility for `ir.outputs` recursively requires every output and
   every referenced binding to be native-eligible. Each output becomes
@@ -135,7 +135,7 @@ keywords, and no new functions.
 - Add per-output `selected_engine` and `fallback_reason` to
   `PlanObservability`.
 
-  Status: Proposed.
+  Status: Complete.
 
   Fields land in `crates/pdl-exec/src/planning.rs` (or its v0.42
   split sibling). `pdl plan` text rendering shows one line per
@@ -150,7 +150,7 @@ keywords, and no new functions.
 
 - Promote non-terminal `save` via `LazyFrame.cache()` fan-out.
 
-  Status: Proposed.
+  Status: Complete.
 
   Lowering in `native_lowering.rs` rewrites a pipeline containing
   non-terminal `save` into a `LazyFrame.cache()` fan-out: the cached
@@ -164,7 +164,7 @@ keywords, and no new functions.
 
 - Update the coverage matrix in lockstep.
 
-  Status: Proposed.
+  Status: Complete.
 
   `docs/PDL_NATIVE_COVERAGE.md` and `docs/PDL_NATIVE_COVERAGE.csv`
   update in the same commit as each promotion or split.
@@ -176,7 +176,7 @@ keywords, and no new functions.
 
 - Hold the WASM target graph.
 
-  Status: Proposed.
+  Status: Complete.
 
   `pdl-wasm` Cargo manifest is unchanged. `cargo check -p pdl-wasm
   --target wasm32-unknown-unknown` remains green. The
@@ -186,7 +186,7 @@ keywords, and no new functions.
 
 - Update the spec and release stamps.
 
-  Status: Proposed.
+  Status: Complete.
 
   `docs/PDL_SPEC.md` records the v0.48 history line and updates the
   native-execution and observability sections to document
@@ -201,7 +201,9 @@ keywords, and no new functions.
 
 - Land each pipeline-shape promotion in its own commit.
 
-  Status: Proposed.
+  Status: Complete in implementation order. The repository-local
+  `AGENTS.md` forbids agents from creating commits, so the suggested
+  per-promotion commit split remains a human review/commit task.
 
   Suggested order: binding-start first (smallest blast radius,
   reuses existing eligibility walker); then non-terminal `save`
@@ -215,7 +217,7 @@ keywords, and no new functions.
 - Add a `pdl-bench` benchmark for a representative multi-output
   pipeline.
 
-  Status: Proposed.
+  Status: Complete.
 
   Multi-output programs are common end-user pipelines. A benchmark
   in `crates/pdl-bench/` that uses two named outputs, one binding,
@@ -224,7 +226,10 @@ keywords, and no new functions.
 
 - Audit `NativeUnsupportedReason` retirement.
 
-  Status: Proposed.
+  Status: Complete. `BindingStartNotEligible` and
+  `NamedOutputMixedEngines` are populated by planner/forced-native subcases.
+  `NonTerminalSaveFanout` remains reserved because the v0.48 implementation
+  supports every current non-terminal-save fan-out subcase without demotion.
 
   The v0.43 reserve variants `BindingStartNotEligible`,
   `NamedOutputMixedEngines`, and `NonTerminalSaveFanout` are

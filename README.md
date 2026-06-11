@@ -231,6 +231,15 @@ let a browser host override them through the runtime context map:
 target/debug/pdl run examples/reactive_trip_dashboard.pdl
 ```
 
+The v0.48 pipeline-shape examples exercise native binding starts, named
+outputs, and non-terminal save fan-out:
+
+```bash
+target/debug/pdl run examples/binding_start.pdl --stdout-format csv
+target/debug/pdl run examples/named_outputs.pdl
+target/debug/pdl run examples/non_terminal_save.pdl --stdout-format csv
+```
+
 ## File formats and output
 
 PDL supports CSV, JSON Lines, Parquet, Arrow IPC file, and Arrow IPC stream

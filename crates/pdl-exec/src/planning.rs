@@ -43,6 +43,9 @@ pub enum PlannedEngine {
     /// engine for a row-strict request is `Row`.
     RowStrict,
     Native,
+    /// Program-level observability for named-output programs where automatic
+    /// planning selects different engines per output. Not a CLI request value.
+    Mixed,
 }
 
 impl PlannedEngine {
@@ -52,6 +55,7 @@ impl PlannedEngine {
             PlannedEngine::Row => "row",
             PlannedEngine::RowStrict => "row-strict",
             PlannedEngine::Native => "native",
+            PlannedEngine::Mixed => "mixed",
         }
     }
 }
@@ -70,6 +74,14 @@ pub struct PlanObservability {
     pub blocking_stages: Vec<String>,
     pub row_materialization: bool,
     pub required_source_columns: Option<Vec<String>>,
+    pub outputs: Vec<OutputPlanObservability>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutputPlanObservability {
+    pub name: String,
+    pub selected_engine: PlannedEngine,
+    pub fallback_reason: Option<NativeUnsupportedReason>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,8 +114,8 @@ impl SinkStrategy {
 ///
 /// The v0.43 refinement split the coarse v0.40–v0.42 categories into
 /// coverage-boundary variants. Variants marked "reserve" are defined ahead of
-/// the v0.44–v0.49 native-coverage promotions and are not yet produced by the
-/// planner.
+/// the v0.44–v0.49 native-coverage promotions. Retired variants stay in the
+/// vocabulary until the v0.49 cleanup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeUnsupportedReason {
     /// No runnable main pipeline exists.
@@ -140,13 +152,12 @@ pub enum NativeUnsupportedReason {
     /// Join predicate is not an equality on columns (v0.41 row-only reserve).
     NonEquiJoin,
     /// Pipeline-start binding references a binding the native planner cannot
-    /// lower (v0.48 reserve refines this further).
+    /// lower.
     BindingStartNotEligible,
-    /// Multi-output program has at least one row-only output and per-output
-    /// observability is not enabled (v0.48 reserve refines this further).
+    /// Forced-native named-output program has at least one row-only output.
     NamedOutputMixedEngines,
-    /// Non-terminal `save` requires fan-out the native planner does not yet
-    /// support (v0.48 reserve refines this further).
+    /// Non-terminal `save` requires a fan-out subcase the native planner cannot
+    /// preserve in row-runtime write order.
     NonTerminalSaveFanout,
     /// Retired in v0.46: the byte-backed scan adapters promoted stdin CSV
     /// and Parquet, so the planner no longer produces this variant. JSON
@@ -500,24 +511,36 @@ fn build_observability(
     stdout_format: Option<DataFormat>,
     options: &PlanningOptions,
 ) -> PlanObservability {
-    let native_reason = native_unsupported_reason(prepared, ir);
-    let native_eligible = native_reason.is_none();
-    let eligible_engine = if native_eligible {
-        PlannedEngine::Native
+    let output_observability = output_observability(prepared, ir, options.engine);
+    let mut native_reason = native_unsupported_reason(prepared, ir);
+    if !ir.outputs.is_empty()
+        && options.engine == PlannedEngine::Native
+        && output_observability
+            .iter()
+            .any(|output| output.fallback_reason.is_some())
+    {
+        native_reason = Some(NativeUnsupportedReason::NamedOutputMixedEngines);
+    }
+    let native_eligible = if ir.outputs.is_empty() {
+        native_reason.is_none()
     } else {
-        PlannedEngine::Row
+        output_observability
+            .iter()
+            .all(|output| output.fallback_reason.is_none())
     };
+    let eligible_engine = eligible_engine(ir, native_eligible, &output_observability);
     let selected_engine = match options.engine {
         PlannedEngine::Auto => eligible_engine,
         PlannedEngine::Row | PlannedEngine::RowStrict => PlannedEngine::Row,
         PlannedEngine::Native => PlannedEngine::Native,
+        PlannedEngine::Mixed => PlannedEngine::Mixed,
     };
     let output_format = plan_output_format(prepared, stdout_format, steps);
     let sink_strategy = sink_strategy(prepared, stdout_format, selected_engine, &output_format);
     // Since v0.44 the native CSV/NDJSON writers stream dataframe rows through
     // the row writers' cell encoders, so text output no longer forces a row
     // materialization on the native engine.
-    let row_materialization = selected_engine == PlannedEngine::Row;
+    let row_materialization = selected_engine != PlannedEngine::Native;
 
     PlanObservability {
         requested_engine: options.engine,
@@ -546,6 +569,60 @@ fn build_observability(
             .main
             .as_ref()
             .and_then(|pipeline| required_source_columns(prepared, pipeline)),
+        outputs: output_observability,
+    }
+}
+
+fn output_observability(
+    prepared: &PreparedProgram,
+    ir: &ProgramIr,
+    requested_engine: PlannedEngine,
+) -> Vec<OutputPlanObservability> {
+    ir.outputs
+        .iter()
+        .map(|output| {
+            let fallback_reason = native_pipeline_unsupported_reason(prepared, &output.pipeline);
+            let eligible_engine = if fallback_reason.is_none() {
+                PlannedEngine::Native
+            } else {
+                PlannedEngine::Row
+            };
+            let selected_engine = match requested_engine {
+                PlannedEngine::Auto => eligible_engine,
+                PlannedEngine::Row | PlannedEngine::RowStrict => PlannedEngine::Row,
+                PlannedEngine::Native => PlannedEngine::Native,
+                PlannedEngine::Mixed => eligible_engine,
+            };
+            OutputPlanObservability {
+                name: output.name.clone(),
+                selected_engine,
+                fallback_reason,
+            }
+        })
+        .collect()
+}
+
+fn eligible_engine(
+    ir: &ProgramIr,
+    native_eligible: bool,
+    outputs: &[OutputPlanObservability],
+) -> PlannedEngine {
+    if ir.outputs.is_empty() {
+        if native_eligible {
+            PlannedEngine::Native
+        } else {
+            PlannedEngine::Row
+        }
+    } else {
+        let native_outputs = outputs
+            .iter()
+            .filter(|output| output.fallback_reason.is_none())
+            .count();
+        match native_outputs {
+            0 => PlannedEngine::Row,
+            count if count == outputs.len() => PlannedEngine::Native,
+            _ => PlannedEngine::Mixed,
+        }
     }
 }
 
@@ -616,13 +693,30 @@ fn native_unsupported_reason(
     prepared: &PreparedProgram,
     ir: &ProgramIr,
 ) -> Option<NativeUnsupportedReason> {
-    if !ir.outputs.is_empty() {
-        return Some(NativeUnsupportedReason::NamedOutputMixedEngines);
+    if ir.outputs.is_empty() {
+        let Some(main) = ir.main.as_ref() else {
+            return Some(NativeUnsupportedReason::NoRunnableMain);
+        };
+        return native_pipeline_unsupported_reason(prepared, main);
     }
-    let Some(main) = ir.main.as_ref() else {
-        return Some(NativeUnsupportedReason::NoRunnableMain);
-    };
-    native_pipeline_unsupported_reason(prepared, main)
+
+    let mut first_reason = None;
+    let mut native_outputs = 0usize;
+    for output in &ir.outputs {
+        match native_pipeline_unsupported_reason(prepared, &output.pipeline) {
+            Some(reason) => {
+                first_reason.get_or_insert(reason);
+            }
+            None => {
+                native_outputs += 1;
+            }
+        };
+    }
+    if native_outputs > 0 {
+        None
+    } else {
+        first_reason
+    }
 }
 
 fn native_pipeline_unsupported_reason(
@@ -636,13 +730,22 @@ fn native_pipeline_unsupported_reason(
                 return Some(reason);
             }
         }
-        PipelineStartIr::Binding { .. } => {
-            return Some(NativeUnsupportedReason::BindingStartNotEligible)
+        PipelineStartIr::Binding { name, .. } => {
+            let Some(binding) = prepared
+                .analysis
+                .ir
+                .as_ref()
+                .and_then(|ir| ir.bindings.iter().find(|binding| binding.name == *name))
+            else {
+                return Some(NativeUnsupportedReason::BindingStartNotEligible);
+            };
+            if native_pipeline_unsupported_reason(prepared, &binding.pipeline).is_some() {
+                return Some(NativeUnsupportedReason::BindingStartNotEligible);
+            }
         }
     }
 
-    for (stage_index, stage) in pipeline.stages.iter().enumerate() {
-        let is_terminal = stage_index + 1 == pipeline.stages.len();
+    for stage in &pipeline.stages {
         match stage {
             StageIr::Filter { expr, .. } => {
                 if let Some(reason) = native_expr_unsupported_reason(expr) {
@@ -672,9 +775,6 @@ fn native_pipeline_unsupported_reason(
                         return Some(reason);
                     }
                 }
-            }
-            StageIr::Save { .. } if !is_terminal => {
-                return Some(NativeUnsupportedReason::NonTerminalSaveFanout);
             }
             StageIr::Save { .. } => {}
             StageIr::Join { source, .. } => {
@@ -1534,6 +1634,130 @@ load "sales.csv"
         );
         assert_eq!(plan.observability.fallback_reason, None);
         assert_eq!(plan.observability.selected_engine, PlannedEngine::Native);
+    }
+
+    #[test]
+    fn planning_selects_native_for_binding_start_pipeline() {
+        let io = InMemoryDriverIo::default().with_schema("memory/sales.csv", ["status", "amount"]);
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"let completed =
+  load "sales.csv"
+  | filter status == "completed"
+
+completed
+  | select amount"#,
+            &io,
+        );
+
+        let plan = plan_prepared(
+            &prepared,
+            PlanningOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+                engine: PlannedEngine::Auto,
+            },
+        )
+        .expect("execution plan");
+
+        assert_eq!(plan.observability.selected_engine, PlannedEngine::Native);
+        assert_eq!(plan.observability.fallback_reason, None);
+    }
+
+    #[test]
+    fn planning_selects_native_for_non_terminal_save() {
+        let io = InMemoryDriverIo::default().with_schema("memory/sales.csv", ["status", "region"]);
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"load "sales.csv"
+  | filter status == "completed"
+  | save "completed.csv"
+  | select region"#,
+            &io,
+        );
+
+        let plan = plan_prepared(
+            &prepared,
+            PlanningOptions {
+                stdout_format: Some("csv".to_string()),
+                dry_run: true,
+                allow_binary_stdout: true,
+                engine: PlannedEngine::Auto,
+            },
+        )
+        .expect("execution plan");
+
+        assert_eq!(plan.observability.selected_engine, PlannedEngine::Native);
+        assert_eq!(plan.observability.fallback_reason, None);
+    }
+
+    #[test]
+    fn planning_records_per_output_engine_selection() {
+        let io = InMemoryDriverIo::default()
+            .with_schema("memory/sales.csv", ["region", "amount"])
+            .with_file_bytes(
+                "memory/events.jsonl",
+                b"{\"region\":\"West\",\"amount\":1}\n",
+            );
+        let prepared = prepare_source_with_io(
+            "memory/main.pdl",
+            r#"output native_report =
+  load "sales.csv"
+  | select region, amount
+  | save "native_report.csv"
+
+output row_report =
+  load "events.jsonl"
+  | select region, amount
+  | save "row_report.csv""#,
+            &io,
+        );
+
+        let plan = plan_prepared(
+            &prepared,
+            PlanningOptions {
+                stdout_format: None,
+                dry_run: true,
+                allow_binary_stdout: true,
+                engine: PlannedEngine::Auto,
+            },
+        )
+        .expect("execution plan");
+
+        assert_eq!(plan.observability.selected_engine, PlannedEngine::Mixed);
+        assert_eq!(plan.observability.eligible_engine, PlannedEngine::Mixed);
+        assert_eq!(plan.observability.fallback_reason, None);
+        assert_eq!(
+            plan.observability.outputs,
+            vec![
+                OutputPlanObservability {
+                    name: "native_report".to_string(),
+                    selected_engine: PlannedEngine::Native,
+                    fallback_reason: None,
+                },
+                OutputPlanObservability {
+                    name: "row_report".to_string(),
+                    selected_engine: PlannedEngine::Row,
+                    fallback_reason: Some(NativeUnsupportedReason::InputFormat),
+                },
+            ]
+        );
+
+        let forced = plan_prepared(
+            &prepared,
+            PlanningOptions {
+                stdout_format: None,
+                dry_run: true,
+                allow_binary_stdout: true,
+                engine: PlannedEngine::Native,
+            },
+        )
+        .expect("forced native execution plan");
+        assert_eq!(
+            forced.observability.fallback_reason,
+            Some(NativeUnsupportedReason::NamedOutputMixedEngines)
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ stage,join,native partial,native covers path-backed main inputs joined to native
 stage,union,native partial,native covers compatible-schema binding inputs by name or position with optional distinct; incompatible schemas language-level null padding and browser byte boundaries stay row-only
 stage,pivot_longer,native partial,class-homogeneous value columns lower to native unpivot with row-identical interleaved output order (v0.45); mixed-class value column sets stay row-only by design because the typed engine cannot keep per-cell value types
 stage,complete,native partial,first-appearance key expansion lowers to native cross join + null-matching left join + fill projection with row-identical order (v0.45); class-changing fills and window-bearing fills stay row-only by design
-stage,save,native partial,terminal saves use native direct writers for every format since v0.44; non-terminal save fan-out stays row-only (v0.48)
+stage,save,native parity,terminal and non-terminal saves use native direct writers for every format; non-terminal saves cache/fan out the current frame in row-runtime write order (v0.48)
 expression,literals,native parity,string numeric boolean and null literals lower natively
 expression,column references,native parity,static column references lower natively
 expression,context references,native partial,scalar contexts lower as literals; context column positions resolve before native planning
@@ -49,7 +49,10 @@ source,path-backed Arrow IPC stream,native parity,stream file is read into nativ
 source,JSON Lines,row-only by design,schema inference and text semantics stay on row runtime; v0.46 considered and declined the promotion for path stdin and host bytes; planner reports input-format for every JSON Lines source
 source,stdin,native parity,CSV Parquet and Arrow IPC file/stream stdin bytes scan natively through byte-backed adapters (v0.46); JSON Lines and unknown stdin bytes stay row-only by design
 source,byte-backed host files,native parity,CSV Parquet and Arrow IPC file/stream host bytes scan natively through the byte-backed adapters when no real filesystem path is available (v0.46); JSON Lines host bytes stay row-only by design
-source,named bindings,native partial,binding-backed inputs are native for supported join/union right sides; binding starts and named outputs remain row-only
+source,named bindings,native partial,binding-backed inputs are native for supported join/union right sides and binding-start pipelines when the referenced binding is recursively native-eligible (v0.48); row-only binding starts report binding-start-not-eligible
+pipeline-shape,binding-start pipelines,native partial,native when the referenced binding is recursively native-eligible; otherwise row-only under binding-start-not-eligible
+pipeline-shape,named-output programs,native partial,native when every output pipeline and referenced binding is recursively native-eligible; automatic planning may report mixed with per-output observability when outputs disagree and forced native reports named-output-mixed-engines if any output is row-only
+pipeline-shape,non-terminal save,native parity,uses native frame cache/fan-out and writes in stage order before later stages continue; non-terminal-save-fanout remains reserved for future subcases that cannot preserve this order
 sink,path,native parity,every format uses the native direct writer
 sink,stdout,native parity,every format is byte-clean through the native direct writer
 sink,bytes,native parity,every format uses the native direct writer

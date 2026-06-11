@@ -66,6 +66,33 @@ fn selected_engine_fixtures() {
             );
         }
 
+        if let Some(outputs) = observability["outputs"].as_array() {
+            for output in outputs {
+                let output_name = output["name"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{name}: output observability has no name"));
+                let output_selected = output["selected_engine"].as_str().unwrap_or_else(|| {
+                    panic!("{name}: output {output_name} has no selected_engine")
+                });
+                let output_fallback = output["fallback_reason"].as_str();
+                if output_selected == "row" {
+                    let reason = output_fallback.unwrap_or_else(|| {
+                        panic!("{name}: output {output_name} reports row without fallback_reason")
+                    });
+                    assert!(
+                        NativeUnsupportedReason::all_codes().contains(&reason),
+                        "{name}: output {output_name} fallback_reason `{reason}` is not typed"
+                    );
+                } else {
+                    assert_eq!(
+                        output_fallback, None,
+                        "{name}: output {output_name} selected `{output_selected}` but reports \
+                         fallback_reason"
+                    );
+                }
+            }
+        }
+
         unmatched_fixtures.remove(&name);
     }
 
