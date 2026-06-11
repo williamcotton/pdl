@@ -6,7 +6,7 @@ let enriched =
   | filter score > 40
   | join segments on segment kind left
   | mutate score_per_latency = round(score / latency_ms, 6)
-  | save "../../data/generated/multi_output_enriched_snapshot.csv"
+  | save "bench/data/generated/multi_output_enriched_snapshot.csv"
 
 output tier_rollup =
   enriched
@@ -16,11 +16,11 @@ output tier_rollup =
       avg_score = mean(score),
       avg_score_per_latency = mean(score_per_latency)
   | sort tier
-  | save "../../data/generated/multi_output_tier_rollup.csv"
+  | save "bench/data/generated/multi_output_tier_rollup.csv"
 
 output segment_leaders =
   enriched
   | sort score desc
   | limit 20
   | select row, segment, tier, score, score_per_latency
-  | save "../../data/generated/multi_output_segment_leaders.csv"
+  | save "bench/data/generated/multi_output_segment_leaders.csv"

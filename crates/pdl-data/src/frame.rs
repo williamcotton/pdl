@@ -21,7 +21,7 @@ impl Table {
     }
 
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.column_index_map().get(name).copied()
+        self.columns.iter().position(|column| column == name)
     }
 
     pub fn column_index_map(&self) -> IndexMap<String, usize> {
@@ -37,7 +37,7 @@ impl Table {
             .and_then(|index| row.values.get(index))
     }
 
-    pub fn select(&self, items: &[(String, String)]) -> Self {
+    pub fn select(self, items: &[(String, String)]) -> Self {
         let indices: Vec<usize> = items
             .iter()
             .filter_map(|(source, _)| self.column_index(source))
@@ -45,18 +45,18 @@ impl Table {
         let columns = items.iter().map(|(_, output)| output.clone()).collect();
         let rows = self
             .rows
-            .iter()
+            .into_iter()
             .map(|row| Row {
                 values: indices
                     .iter()
-                    .map(|index| row.values[*index].clone())
+                    .map(|index| row.values.get(*index).cloned().unwrap_or(Value::Null))
                     .collect(),
             })
             .collect();
         Table { columns, rows }
     }
 
-    pub fn drop_columns(&self, columns_to_drop: &[String]) -> Self {
+    pub fn drop_columns(self, columns_to_drop: &[String]) -> Self {
         let keep: Vec<(usize, String)> = self
             .columns
             .iter()
@@ -67,18 +67,18 @@ impl Table {
         let columns = keep.iter().map(|(_, column)| column.clone()).collect();
         let rows = self
             .rows
-            .iter()
+            .into_iter()
             .map(|row| Row {
                 values: keep
                     .iter()
-                    .map(|(index, _)| row.values[*index].clone())
+                    .map(|(index, _)| row.values.get(*index).cloned().unwrap_or(Value::Null))
                     .collect(),
             })
             .collect();
         Table { columns, rows }
     }
 
-    pub fn rename_columns(&self, renames: &[(String, String)]) -> Self {
+    pub fn rename_columns(self, renames: &[(String, String)]) -> Self {
         let columns = self
             .columns
             .iter()
@@ -91,18 +91,16 @@ impl Table {
             .collect();
         Table {
             columns,
-            rows: self.rows.clone(),
+            rows: self.rows,
         }
     }
 
-    pub fn limit(&self, n: usize) -> Self {
-        Table {
-            columns: self.columns.clone(),
-            rows: self.rows.iter().take(n).cloned().collect(),
-        }
+    pub fn limit(mut self, n: usize) -> Self {
+        self.rows.truncate(n);
+        self
     }
 
-    pub fn distinct(&self, key_columns: &[String]) -> Self {
+    pub fn distinct(self, key_columns: &[String]) -> Self {
         let keys: Vec<String> = if key_columns.is_empty() {
             self.columns.clone()
         } else {
@@ -115,7 +113,7 @@ impl Table {
         let mut seen = BTreeSet::new();
         let rows = self
             .rows
-            .iter()
+            .into_iter()
             .filter(|row| {
                 let key = key_indices
                     .iter()
@@ -123,10 +121,9 @@ impl Table {
                     .collect::<Vec<_>>();
                 seen.insert(key)
             })
-            .cloned()
             .collect();
         Table {
-            columns: self.columns.clone(),
+            columns: self.columns,
             rows,
         }
     }

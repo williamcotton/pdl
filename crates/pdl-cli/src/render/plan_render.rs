@@ -106,6 +106,12 @@ pub(crate) struct PlanObservabilityJson {
     pub(crate) sink_strategy: &'static str,
     pub(crate) blocking_stages: Vec<String>,
     pub(crate) row_materialization: bool,
+    pub(crate) materialization_reasons: Vec<&'static str>,
+    pub(crate) native_bridge_count: usize,
+    pub(crate) estimated_row_bridge_stages: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dynamic_window_strategy: Option<String>,
+    pub(crate) performance_classification: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) required_source_columns: Option<Vec<String>>,
     pub(crate) outputs: Vec<OutputPlanObservabilityJson>,
@@ -214,6 +220,15 @@ pub(crate) fn plan_observability_json(observability: &PlanObservability) -> Plan
         sink_strategy: observability.sink_strategy.as_str(),
         blocking_stages: observability.blocking_stages.clone(),
         row_materialization: observability.row_materialization,
+        materialization_reasons: observability
+            .materialization_reasons
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect(),
+        native_bridge_count: observability.native_bridge_count,
+        estimated_row_bridge_stages: observability.estimated_row_bridge_stages.clone(),
+        dynamic_window_strategy: observability.dynamic_window_strategy.clone(),
+        performance_classification: observability.performance_classification.clone(),
         required_source_columns: observability.required_source_columns.clone(),
         outputs: observability
             .outputs
@@ -330,9 +345,9 @@ pub(crate) fn execution_step_text(step: &ExecutionPlanStep) -> String {
 pub(crate) fn manifest_json(prepared: &PreparedProgram, plan: &ExecutionPlan) -> ManifestJson {
     let stdout_format = plan.stdout_format.map(|format| format.canonical_name());
     ManifestJson {
-        manifest_version: "0.49.0",
+        manifest_version: "0.50.0",
         implementation_version: env!("CARGO_PKG_VERSION"),
-        language_version: "0.49.0",
+        language_version: "0.50.0",
         source_path: prepared.path.display().to_string(),
         driver: driver_plan_json(&prepared.driver_plan),
         execution: execution_plan_json(plan),

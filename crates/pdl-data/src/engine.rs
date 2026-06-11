@@ -224,6 +224,41 @@ pub enum DataJoinKind {
     Anti,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum NativeMaterializationReason {
+    TerminalCollect,
+    DynamicColumnLookup,
+    DynamicReplaceText,
+    MixedClassConditional,
+    TemporalScalar,
+    WindowDynamicOffset,
+    WindowMultiOrder,
+    UnionAlignment,
+    PivotLongerOrderOrMixedValue,
+    CompleteKeyExpansionOrFill,
+    JsonLinesScan,
+    NativeWriterTextBridge,
+}
+
+impl NativeMaterializationReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TerminalCollect => "terminal_collect",
+            Self::DynamicColumnLookup => "dynamic_column_lookup",
+            Self::DynamicReplaceText => "dynamic_replace_text",
+            Self::MixedClassConditional => "mixed_class_conditional",
+            Self::TemporalScalar => "temporal_scalar",
+            Self::WindowDynamicOffset => "window_dynamic_offset",
+            Self::WindowMultiOrder => "window_multi_order",
+            Self::UnionAlignment => "union_alignment",
+            Self::PivotLongerOrderOrMixedValue => "pivot_longer_order_or_mixed_value",
+            Self::CompleteKeyExpansionOrFill => "complete_key_expansion_or_fill",
+            Self::JsonLinesScan => "json_lines_scan",
+            Self::NativeWriterTextBridge => "native_writer_text_bridge",
+        }
+    }
+}
+
 impl DataPlan {
     pub fn scan(source: DataSource<'_>) -> Result<Self, Diagnostic> {
         Self::scan_with_backend(source, DataBackend::PortableRows)
@@ -258,8 +293,8 @@ impl DataPlan {
             DataPlanInner::Rows(table) => Ok(Self::from_table(filter_rows(table, &expr)?)),
             #[cfg(feature = "polars-engine")]
             DataPlanInner::Native(plan) => {
-                if data_expr_requires_row_semantics(&expr) {
-                    let table = native_collect_to_table(plan)?;
+                if let Some(reason) = data_expr_materialization_reason(&expr) {
+                    let table = native_collect_to_table(plan, reason)?;
                     return Ok(Self::from_table(filter_rows(table, &expr)?));
                 }
                 let expr = native_expr(&expr)?;
@@ -326,12 +361,18 @@ impl DataPlan {
             DataPlanInner::Rows(table) => Ok(Self::from_table(mutate_rows(table, items)?)),
             #[cfg(feature = "polars-engine")]
             DataPlanInner::Native(plan) => {
-                if items
+                if let Some(reason) = items
                     .iter()
-                    .any(|(_, expr)| data_expr_requires_row_semantics(expr))
-                    || native_window_partition_mutate_items(items).is_err()
+                    .find_map(|(_, expr)| data_expr_materialization_reason(expr))
                 {
-                    let table = native_collect_to_table(plan)?;
+                    let table = native_collect_to_table(plan, reason)?;
+                    return Ok(Self::from_table(mutate_rows(table, items)?));
+                }
+                if native_window_partition_mutate_items(items).is_err() {
+                    let table = native_collect_to_table(
+                        plan,
+                        NativeMaterializationReason::WindowMultiOrder,
+                    )?;
                     return Ok(Self::from_table(mutate_rows(table, items)?));
                 }
                 let row_index_name = items
@@ -510,12 +551,12 @@ impl DataPlan {
             }
             #[cfg(feature = "polars-engine")]
             DataPlanInner::Native(plan) => {
-                if items
+                if let Some(reason) = items
                     .iter()
                     .flat_map(|item| item.args.iter())
-                    .any(data_expr_requires_row_semantics)
+                    .find_map(data_expr_materialization_reason)
                 {
-                    let table = native_collect_to_table(plan)?;
+                    let table = native_collect_to_table(plan, reason)?;
                     return Ok(Self::from_table(aggregate_rows(&table, group_keys, items)?));
                 }
                 let aggregations = items
@@ -636,22 +677,29 @@ impl DataPlan {
             )),
             #[cfg(feature = "polars-engine")]
             (DataPlanInner::Native(left), DataPlanInner::Rows(right)) => {
-                let left = native_collect_to_table(left)?;
+                let left =
+                    native_collect_to_table(left, NativeMaterializationReason::UnionAlignment)?;
                 Ok(Self::from_table(union_rows(
                     left, right, by_name, distinct,
                 )?))
             }
             #[cfg(feature = "polars-engine")]
             (DataPlanInner::Rows(left), DataPlanInner::Native(right)) => {
-                let right = native_collect_to_table(right)?;
+                let right =
+                    native_collect_to_table(right, NativeMaterializationReason::UnionAlignment)?;
                 Ok(Self::from_table(union_rows(
                     left, right, by_name, distinct,
                 )?))
             }
             #[cfg(feature = "polars-engine")]
             (DataPlanInner::Native(left), DataPlanInner::Native(right)) => {
-                let left = native_collect_to_table(left)?;
-                let right = native_collect_to_table(right)?;
+                if let Some(plan) = native_union(left.clone(), right.clone(), by_name, distinct)? {
+                    return Ok(plan);
+                }
+                let left =
+                    native_collect_to_table(left, NativeMaterializationReason::UnionAlignment)?;
+                let right =
+                    native_collect_to_table(right, NativeMaterializationReason::UnionAlignment)?;
                 Ok(Self::from_table(union_rows(
                     left, right, by_name, distinct,
                 )?))
@@ -686,7 +734,14 @@ impl DataPlan {
             )?)),
             #[cfg(feature = "polars-engine")]
             DataPlanInner::Native(plan) => {
-                let table = native_collect_to_table(plan)?;
+                if let Ok(native) = native_pivot_longer(plan.clone(), columns, names_to, values_to)
+                {
+                    return Ok(native);
+                }
+                let table = native_collect_to_table(
+                    plan,
+                    NativeMaterializationReason::PivotLongerOrderOrMixedValue,
+                )?;
                 Ok(Self::from_table(pivot_longer_rows(
                     table, columns, names_to, values_to,
                 )?))
@@ -717,7 +772,15 @@ impl DataPlan {
             DataPlanInner::Rows(table) => Ok(Self::from_table(complete_rows(table, keys, fills)?)),
             #[cfg(feature = "polars-engine")]
             DataPlanInner::Native(plan) => {
-                let table = native_collect_to_table(plan)?;
+                match native_complete(plan.clone(), keys, fills) {
+                    Ok(native) => return Ok(native),
+                    Err(diagnostic) if diagnostic.code != codes::E1211 => return Err(diagnostic),
+                    Err(_) => {}
+                }
+                let table = native_collect_to_table(
+                    plan,
+                    NativeMaterializationReason::CompleteKeyExpansionOrFill,
+                )?;
                 Ok(Self::from_table(complete_rows(table, keys, fills)?))
             }
         }
@@ -727,7 +790,9 @@ impl DataPlan {
         match self.inner {
             DataPlanInner::Rows(table) => Ok(table),
             #[cfg(feature = "polars-engine")]
-            DataPlanInner::Native(plan) => native_collect_to_table(plan),
+            DataPlanInner::Native(plan) => {
+                native_collect_to_table(plan, NativeMaterializationReason::TerminalCollect)
+            }
         }
     }
 
@@ -887,6 +952,107 @@ fn native_full_join(
             plan,
         }),
     })
+}
+
+#[cfg(feature = "polars-engine")]
+fn native_union(
+    left: NativePlan,
+    right: NativePlan,
+    by_name: bool,
+    distinct: bool,
+) -> Result<Option<DataPlan>, Diagnostic> {
+    let format = left.format;
+    let left_schema = left
+        .plan
+        .clone()
+        .collect_schema()
+        .map_err(native_collect_error(left.format))?;
+    let right_schema = right
+        .plan
+        .clone()
+        .collect_schema()
+        .map_err(native_collect_error(right.format))?;
+    let left_names = left_schema
+        .iter_names()
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+    let right_names = right_schema
+        .iter_names()
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+
+    let right_plan = if by_name {
+        let left_set = left_names.iter().collect::<BTreeSet<_>>();
+        let right_set = right_names.iter().collect::<BTreeSet<_>>();
+        if left_set != right_set {
+            return Ok(None);
+        }
+        right
+            .plan
+            .select(left_names.iter().map(native::col).collect::<Vec<_>>())
+    } else {
+        if left_names.len() != right_names.len() {
+            return Ok(None);
+        }
+        if left_names == right_names {
+            right.plan
+        } else {
+            right
+                .plan
+                .rename(right_names.clone(), left_names.clone(), true)
+        }
+    };
+
+    let class_pairs = if by_name {
+        left_names
+            .iter()
+            .map(|name| (name.as_str(), name.as_str()))
+            .collect::<Vec<_>>()
+    } else {
+        left_names
+            .iter()
+            .zip(&right_names)
+            .map(|(left_name, right_name)| (left_name.as_str(), right_name.as_str()))
+            .collect::<Vec<_>>()
+    };
+
+    for (left_name, right_name) in class_pairs {
+        let left_class = left_schema
+            .get(left_name)
+            .map(native_dtype_class)
+            .transpose()?
+            .flatten();
+        let right_class = right_schema
+            .get(right_name)
+            .map(native_dtype_class)
+            .transpose()?
+            .flatten();
+        if let (Some(left_class), Some(right_class)) = (left_class, right_class) {
+            if left_class != right_class {
+                return Ok(None);
+            }
+        }
+    }
+
+    let plan = native::concat(
+        [left.plan, right_plan],
+        native::UnionArgs {
+            parallel: false,
+            strict: false,
+            to_supertypes: true,
+            maintain_order: true,
+            ..Default::default()
+        },
+    )
+    .map_err(native_collect_error(format))?;
+    let plan = if distinct {
+        plan.unique_stable_generic(None, native::UniqueKeepStrategy::First)
+    } else {
+        plan
+    };
+    Ok(Some(DataPlan {
+        inner: DataPlanInner::Native(NativePlan { format, plan }),
+    }))
 }
 
 /// Value classes the native engine can hold in one column without changing
@@ -1776,19 +1942,24 @@ fn native_write_error(label: &'static str) -> impl FnOnce(native::PolarsError) -
 }
 
 fn filter_rows(table: Table, expr: &DataExpr) -> Result<Table, Diagnostic> {
-    let rows = table
+    let mut cache = DataWindowCache::default();
+    let keep = table
         .rows
         .iter()
-        .filter_map(|row| match eval_row_expr(expr, &table, row) {
-            Ok(value) if value.is_truthy_true() => Some(Ok(row.clone())),
-            Ok(_) => None,
-            Err(diagnostic) => Some(Err(diagnostic)),
-        })
+        .map(
+            |row| match eval_row_expr_with_cache(expr, &table, row, &mut cache) {
+                Ok(value) => Ok(value.is_truthy_true()),
+                Err(diagnostic) => Err(diagnostic),
+            },
+        )
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Table {
-        columns: table.columns,
-        rows,
-    })
+    let Table { columns, rows } = table;
+    let rows = rows
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(row, keep)| keep.then_some(row))
+        .collect();
+    Ok(Table { columns, rows })
 }
 
 fn mutate_rows(table: Table, items: &[(String, DataExpr)]) -> Result<Table, Diagnostic> {
@@ -1799,23 +1970,42 @@ fn mutate_rows(table: Table, items: &[(String, DataExpr)]) -> Result<Table, Diag
             columns.push(column.clone());
         }
     }
-    let rows = table
+
+    let item_indices = items
+        .iter()
+        .map(|(column, _)| {
+            columns
+                .iter()
+                .position(|existing| existing == column)
+                .expect("mutate output column exists")
+        })
+        .collect::<Vec<_>>();
+    let mut cache = DataWindowCache::default();
+    let assigned_values = table
         .rows
         .iter()
         .enumerate()
         .map(|(row_index, row)| {
-            let mut values = row.values.clone();
-            for (column, expr) in items {
-                let value = eval_row_expr_at(expr, &table, row, Some(row_index))?;
-                if let Some(index) = input_columns.iter().position(|existing| existing == column) {
-                    values[index] = value;
-                } else {
-                    values.push(value);
-                }
-            }
-            Ok(Row { values })
+            items
+                .iter()
+                .map(|(_, expr)| {
+                    eval_row_expr_at_with_cache(expr, &table, row, Some(row_index), &mut cache)
+                })
+                .collect::<Result<Vec<_>, Diagnostic>>()
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
+    let rows = table
+        .rows
+        .into_iter()
+        .zip(assigned_values)
+        .map(|(mut row, values)| {
+            row.values.resize(columns.len(), Value::Null);
+            for (index, value) in item_indices.iter().copied().zip(values) {
+                row.values[index] = value;
+            }
+            row
+        })
+        .collect();
     Ok(Table { columns, rows })
 }
 
@@ -2035,6 +2225,8 @@ fn union_rows(
     distinct: bool,
 ) -> Result<Table, Diagnostic> {
     ensure_union_rows_compatible(&left, &right, by_name)?;
+    let left_width = left.columns.len();
+    let right_width = right.columns.len();
     let columns = if by_name {
         let mut columns = left.columns.clone();
         for column in &right.columns {
@@ -2058,24 +2250,29 @@ fn union_rows(
         columns
     };
 
-    let mut rows = left
-        .rows
-        .iter()
-        .map(|row| union_row_by_position(row, left.columns.len(), columns.len()))
-        .collect::<Vec<_>>();
+    let right_columns = right.columns;
+    let mut rows = if left_width == columns.len() {
+        left.rows
+    } else {
+        left.rows
+            .into_iter()
+            .map(|row| union_row_by_position_owned(row, left_width, columns.len()))
+            .collect()
+    };
     if by_name {
+        let right_map = union_output_index_map(&right_columns, &columns);
         rows.extend(
             right
                 .rows
-                .iter()
-                .map(|row| union_row_by_name(row, &right.columns, &columns)),
+                .into_iter()
+                .map(|row| union_row_by_map(row, &right_map)),
         );
     } else {
         rows.extend(
             right
                 .rows
-                .iter()
-                .map(|row| union_row_by_position(row, right.columns.len(), columns.len())),
+                .into_iter()
+                .map(|row| union_row_by_position_owned(row, right_width, columns.len())),
         );
     }
     let table = Table { columns, rows };
@@ -2146,14 +2343,22 @@ fn row_value_classes(table: &Table, column: &str) -> BTreeSet<RowValueClass> {
         .collect()
 }
 
-fn union_row_by_name(row: &Row, source_columns: &[String], output_columns: &[String]) -> Row {
+fn union_output_index_map(
+    source_columns: &[String],
+    output_columns: &[String],
+) -> Vec<Option<usize>> {
+    output_columns
+        .iter()
+        .map(|column| source_columns.iter().position(|source| source == column))
+        .collect()
+}
+
+fn union_row_by_map(row: Row, output_index_map: &[Option<usize>]) -> Row {
     Row {
-        values: output_columns
+        values: output_index_map
             .iter()
-            .map(|column| {
-                source_columns
-                    .iter()
-                    .position(|source| source == column)
+            .map(|index| {
+                index
                     .and_then(|index| row.values.get(index))
                     .cloned()
                     .unwrap_or(Value::Null)
@@ -2162,17 +2367,10 @@ fn union_row_by_name(row: &Row, source_columns: &[String], output_columns: &[Str
     }
 }
 
-fn union_row_by_position(row: &Row, source_width: usize, output_width: usize) -> Row {
-    Row {
-        values: (0..output_width)
-            .map(|index| {
-                (index < source_width)
-                    .then(|| row.values.get(index).cloned())
-                    .flatten()
-                    .unwrap_or(Value::Null)
-            })
-            .collect(),
-    }
+fn union_row_by_position_owned(mut row: Row, source_width: usize, output_width: usize) -> Row {
+    row.values.truncate(source_width);
+    row.values.resize(output_width, Value::Null);
+    row
 }
 
 fn aggregate_rows(
@@ -2286,25 +2484,37 @@ fn aggregate_arg_values(
     table: &Table,
     rows: &[&Row],
 ) -> Result<Vec<Value>, Diagnostic> {
+    let mut cache = DataWindowCache::default();
     rows.iter()
-        .map(|row| eval_row_expr(expr, table, row))
+        .map(|row| eval_row_expr_with_cache(expr, table, row, &mut cache))
         .collect()
 }
 
 fn eval_row_expr(expr: &DataExpr, table: &Table, row: &Row) -> Result<Value, Diagnostic> {
-    eval_row_expr_at(expr, table, row, None)
+    let mut cache = DataWindowCache::default();
+    eval_row_expr_with_cache(expr, table, row, &mut cache)
 }
 
-fn eval_row_expr_at(
+fn eval_row_expr_with_cache(
+    expr: &DataExpr,
+    table: &Table,
+    row: &Row,
+    cache: &mut DataWindowCache,
+) -> Result<Value, Diagnostic> {
+    eval_row_expr_at_with_cache(expr, table, row, None, cache)
+}
+
+fn eval_row_expr_at_with_cache(
     expr: &DataExpr,
     table: &Table,
     row: &Row,
     window_row_index: Option<usize>,
+    cache: &mut DataWindowCache,
 ) -> Result<Value, Diagnostic> {
     match expr {
         DataExpr::Column(column) => column_value(table, row, column),
         DataExpr::DynamicColumn(name_expr) => {
-            let name = eval_row_expr_at(name_expr, table, row, window_row_index)?;
+            let name = eval_row_expr_at_with_cache(name_expr, table, row, window_row_index, cache)?;
             let Value::String(column) = name else {
                 return Err(type_error("col() requires a string value"));
             };
@@ -2312,7 +2522,7 @@ fn eval_row_expr_at(
         }
         DataExpr::Literal(literal) => Ok(literal_value(literal)),
         DataExpr::Unary { op, expr } => {
-            let value = eval_row_expr_at(expr, table, row, window_row_index)?;
+            let value = eval_row_expr_at_with_cache(expr, table, row, window_row_index, cache)?;
             match op {
                 DataUnaryOp::Not => match value {
                     Value::Bool(value) => Ok(Value::Bool(!value)),
@@ -2326,19 +2536,23 @@ fn eval_row_expr_at(
             }
         }
         DataExpr::Binary { left, op, right } => {
-            let left_value = eval_row_expr_at(left, table, row, window_row_index)?;
-            let right_value = eval_row_expr_at(right, table, row, window_row_index)?;
+            let left_value =
+                eval_row_expr_at_with_cache(left, table, row, window_row_index, cache)?;
+            let right_value =
+                eval_row_expr_at_with_cache(right, table, row, window_row_index, cache)?;
             eval_binary_value(left_value, *op, right_value)
         }
         DataExpr::Call { function, args } => {
-            eval_scalar_function(*function, args, table, row, window_row_index)
+            eval_scalar_function(*function, args, table, row, window_row_index, cache)
         }
         DataExpr::Window {
             function,
             args,
             spec,
         } => match window_row_index {
-            Some(row_index) => eval_data_window_expr(*function, args, spec, table, row_index),
+            Some(row_index) => {
+                eval_data_window_expr(*function, args, spec, table, row_index, cache)
+            }
             None => Err(unsupported_native_operation("row data window expression")),
         },
     }
@@ -2427,11 +2641,12 @@ fn eval_scalar_function(
     table: &Table,
     row: &Row,
     window_row_index: Option<usize>,
+    cache: &mut DataWindowCache,
 ) -> Result<Value, Diagnostic> {
     match function {
         DataScalarFunction::Coalesce => {
             for arg in args {
-                let value = eval_row_expr_at(arg, table, row, window_row_index)?;
+                let value = eval_row_expr_at_with_cache(arg, table, row, window_row_index, cache)?;
                 if !matches!(value, Value::Null) {
                     return Ok(value);
                 }
@@ -2441,7 +2656,7 @@ fn eval_scalar_function(
         DataScalarFunction::Concat => {
             let mut text = String::new();
             for arg in args {
-                let value = eval_row_expr_at(arg, table, row, window_row_index)?;
+                let value = eval_row_expr_at_with_cache(arg, table, row, window_row_index, cache)?;
                 if !matches!(value, Value::Null) {
                     text.push_str(&value.to_csv_cell());
                 }
@@ -2456,9 +2671,13 @@ fn eval_scalar_function(
                     Span::zero(),
                 ));
             };
-            match eval_row_expr_at(condition, table, row, window_row_index)? {
-                Value::Bool(true) => eval_row_expr_at(when_true, table, row, window_row_index),
-                Value::Bool(false) => eval_row_expr_at(when_false, table, row, window_row_index),
+            match eval_row_expr_at_with_cache(condition, table, row, window_row_index, cache)? {
+                Value::Bool(true) => {
+                    eval_row_expr_at_with_cache(when_true, table, row, window_row_index, cache)
+                }
+                Value::Bool(false) => {
+                    eval_row_expr_at_with_cache(when_false, table, row, window_row_index, cache)
+                }
                 Value::Null => Ok(Value::Null),
                 _ => Err(type_error("if_else() condition requires a boolean")),
             }
@@ -2471,8 +2690,9 @@ fn eval_scalar_function(
                     Span::zero(),
                 ));
             };
-            let value = eval_row_expr_at(value, table, row, window_row_index)?;
-            let pattern = eval_row_expr_at(pattern, table, row, window_row_index)?;
+            let value = eval_row_expr_at_with_cache(value, table, row, window_row_index, cache)?;
+            let pattern =
+                eval_row_expr_at_with_cache(pattern, table, row, window_row_index, cache)?;
             Ok(
                 match (
                     value_to_optional_text(value),
@@ -2495,9 +2715,11 @@ fn eval_scalar_function(
                     Span::zero(),
                 ));
             };
-            let value = eval_row_expr_at(value, table, row, window_row_index)?;
-            let pattern = eval_row_expr_at(pattern, table, row, window_row_index)?;
-            let replacement = eval_row_expr_at(replacement, table, row, window_row_index)?;
+            let value = eval_row_expr_at_with_cache(value, table, row, window_row_index, cache)?;
+            let pattern =
+                eval_row_expr_at_with_cache(pattern, table, row, window_row_index, cache)?;
+            let replacement =
+                eval_row_expr_at_with_cache(replacement, table, row, window_row_index, cache)?;
             Ok(
                 match (
                     value_to_optional_text(value),
@@ -2519,7 +2741,8 @@ fn eval_scalar_function(
                     Span::zero(),
                 ));
             };
-            let unit = match eval_row_expr_at(unit, table, row, window_row_index)? {
+            let unit = match eval_row_expr_at_with_cache(unit, table, row, window_row_index, cache)?
+            {
                 Value::String(unit) => {
                     crate::temporal::parse_temporal_unit(&unit).ok_or_else(|| {
                         Diagnostic::error(
@@ -2540,7 +2763,7 @@ fn eval_scalar_function(
                     ));
                 }
             };
-            let value = eval_row_expr_at(value, table, row, window_row_index)?;
+            let value = eval_row_expr_at_with_cache(value, table, row, window_row_index, cache)?;
             Ok(parse_temporal_value(value)
                 .map(|parsed| {
                     let floored = crate::temporal::floor_temporal(&parsed, unit);
@@ -2559,26 +2782,27 @@ fn eval_scalar_function(
                     Span::zero(),
                 ));
             };
-            let pattern = match eval_row_expr_at(pattern, table, row, window_row_index)? {
-                Value::String(pattern) => {
-                    crate::temporal::validate_format_pattern(&pattern).map_err(|token| {
-                        Diagnostic::error(
-                            codes::E1406,
-                            format!("date_format() pattern token `{token}` is not supported"),
+            let pattern =
+                match eval_row_expr_at_with_cache(pattern, table, row, window_row_index, cache)? {
+                    Value::String(pattern) => {
+                        crate::temporal::validate_format_pattern(&pattern).map_err(|token| {
+                            Diagnostic::error(
+                                codes::E1406,
+                                format!("date_format() pattern token `{token}` is not supported"),
+                                Span::zero(),
+                            )
+                        })?;
+                        pattern
+                    }
+                    _ => {
+                        return Err(Diagnostic::error(
+                            codes::E1403,
+                            "date_format() pattern must be a string",
                             Span::zero(),
-                        )
-                    })?;
-                    pattern
-                }
-                _ => {
-                    return Err(Diagnostic::error(
-                        codes::E1403,
-                        "date_format() pattern must be a string",
-                        Span::zero(),
-                    ));
-                }
-            };
-            let value = eval_row_expr_at(value, table, row, window_row_index)?;
+                        ));
+                    }
+                };
+            let value = eval_row_expr_at_with_cache(value, table, row, window_row_index, cache)?;
             Ok(parse_temporal_value(value)
                 .and_then(|parsed| crate::temporal::format_temporal(&parsed, &pattern))
                 .map(Value::String)
@@ -2606,7 +2830,7 @@ fn eval_scalar_function(
                     Span::zero(),
                 ));
             };
-            let value = eval_row_expr_at(arg, table, row, window_row_index)?;
+            let value = eval_row_expr_at_with_cache(arg, table, row, window_row_index, cache)?;
             match function {
                 DataScalarFunction::IsNull => Ok(Value::Bool(matches!(value, Value::Null))),
                 DataScalarFunction::NotNull => Ok(Value::Bool(!matches!(value, Value::Null))),
@@ -2709,40 +2933,293 @@ fn type_error(message: &'static str) -> Diagnostic {
     Diagnostic::error(codes::E1302, message, Span::zero())
 }
 
+#[derive(Default)]
+struct DataWindowCache {
+    specs: Vec<CachedDataWindowSpec>,
+}
+
+struct CachedDataWindowSpec {
+    spec: DataWindowSpec,
+    partitions: Vec<Vec<usize>>,
+    row_positions: Vec<Option<(usize, usize)>>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum DataWindowKeyValue {
+    Null,
+    Bool(bool),
+    Number(u64),
+    String(String),
+}
+
 #[cfg(feature = "polars-engine")]
-fn data_expr_requires_row_semantics(expr: &DataExpr) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DataValueClass {
+    Null,
+    Bool,
+    Number,
+    String,
+}
+
+impl DataWindowCache {
+    fn partition_position(
+        &mut self,
+        table: &Table,
+        spec: &DataWindowSpec,
+        row_index: usize,
+    ) -> Option<(usize, usize, usize)> {
+        let spec_index = self.ensure_spec(table, spec);
+        self.specs[spec_index]
+            .row_positions
+            .get(row_index)
+            .and_then(|position| *position)
+            .map(|(partition_index, position)| (spec_index, partition_index, position))
+    }
+
+    fn partition(&self, spec_index: usize, partition_index: usize) -> &[usize] {
+        &self.specs[spec_index].partitions[partition_index]
+    }
+
+    fn ensure_spec(&mut self, table: &Table, spec: &DataWindowSpec) -> usize {
+        if let Some(index) = self.specs.iter().position(|cached| cached.spec == *spec) {
+            return index;
+        }
+        let cached = CachedDataWindowSpec::new(table, spec.clone());
+        self.specs.push(cached);
+        self.specs.len() - 1
+    }
+}
+
+impl CachedDataWindowSpec {
+    fn new(table: &Table, spec: DataWindowSpec) -> Self {
+        let mut groups = BTreeMap::<Vec<DataWindowKeyValue>, Vec<usize>>::new();
+        for row_index in 0..table.rows.len() {
+            if let Some(key) = data_partition_cache_key(table, &spec, row_index) {
+                groups.entry(key).or_default().push(row_index);
+            }
+        }
+        let mut partitions = groups.into_values().collect::<Vec<_>>();
+        for partition in &mut partitions {
+            if !spec.order_by.is_empty() {
+                partition.sort_by(|left, right| {
+                    data_compare_rows_for_window_order(table, &spec, *left, *right)
+                });
+            }
+        }
+
+        let mut row_positions = vec![None; table.rows.len()];
+        for (partition_index, partition) in partitions.iter().enumerate() {
+            for (position, row_index) in partition.iter().enumerate() {
+                row_positions[*row_index] = Some((partition_index, position));
+            }
+        }
+
+        Self {
+            spec,
+            partitions,
+            row_positions,
+        }
+    }
+}
+
+fn data_partition_cache_key(
+    table: &Table,
+    spec: &DataWindowSpec,
+    row_index: usize,
+) -> Option<Vec<DataWindowKeyValue>> {
+    let row = &table.rows[row_index];
+    spec.partition_by
+        .iter()
+        .map(|column| {
+            let value = table.value(row, column).unwrap_or(&Value::Null);
+            data_window_key_value(value)
+        })
+        .collect()
+}
+
+fn data_window_key_value(value: &Value) -> Option<DataWindowKeyValue> {
+    match value {
+        Value::Null => Some(DataWindowKeyValue::Null),
+        Value::Bool(value) => Some(DataWindowKeyValue::Bool(*value)),
+        Value::Number(value) if value.is_nan() => None,
+        Value::Number(value) => {
+            let value = if *value == 0.0 { 0.0 } else { *value };
+            Some(DataWindowKeyValue::Number(value.to_bits()))
+        }
+        Value::String(value) => Some(DataWindowKeyValue::String(value.clone())),
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn data_expr_materialization_reason(expr: &DataExpr) -> Option<NativeMaterializationReason> {
     match expr {
-        DataExpr::DynamicColumn(_) => true,
-        DataExpr::Column(_) | DataExpr::Literal(_) => false,
-        DataExpr::Unary { expr, .. } => data_expr_requires_row_semantics(expr),
-        DataExpr::Binary { left, right, .. } => {
-            data_expr_requires_row_semantics(left) || data_expr_requires_row_semantics(right)
-        }
+        DataExpr::DynamicColumn(_) => Some(NativeMaterializationReason::DynamicColumnLookup),
+        DataExpr::Column(_) | DataExpr::Literal(_) => None,
+        DataExpr::Unary { expr, .. } => data_expr_materialization_reason(expr),
+        DataExpr::Binary { left, right, .. } => data_expr_materialization_reason(left)
+            .or_else(|| data_expr_materialization_reason(right)),
         DataExpr::Call { function, args } => {
-            matches!(
-                function,
-                DataScalarFunction::IfElse
-                    | DataScalarFunction::Date
-                    | DataScalarFunction::Datetime
-                    | DataScalarFunction::Year
-                    | DataScalarFunction::Month
-                    | DataScalarFunction::Day
-                    | DataScalarFunction::DateFloor
-                    | DataScalarFunction::DateFormat
-            ) || (*function == DataScalarFunction::Replace
-                && args
-                    .get(1..)
-                    .is_some_and(|rest| rest.iter().any(|arg| !native_static_text_expr(arg))))
-                || args.iter().any(data_expr_requires_row_semantics)
+            let direct_reason = match function {
+                DataScalarFunction::IfElse if data_if_else_homogeneous(args) => None,
+                DataScalarFunction::IfElse => {
+                    Some(NativeMaterializationReason::MixedClassConditional)
+                }
+                DataScalarFunction::Date
+                | DataScalarFunction::Datetime
+                | DataScalarFunction::Year
+                | DataScalarFunction::Month
+                | DataScalarFunction::Day
+                | DataScalarFunction::DateFloor
+                | DataScalarFunction::DateFormat => {
+                    Some(NativeMaterializationReason::TemporalScalar)
+                }
+                DataScalarFunction::Replace
+                    if args.get(1..).is_some_and(|rest| {
+                        rest.iter().any(|arg| !native_static_text_expr(arg))
+                    }) =>
+                {
+                    Some(NativeMaterializationReason::DynamicReplaceText)
+                }
+                DataScalarFunction::IsNull
+                | DataScalarFunction::NotNull
+                | DataScalarFunction::Coalesce
+                | DataScalarFunction::Concat
+                | DataScalarFunction::Lower
+                | DataScalarFunction::Upper
+                | DataScalarFunction::Trim
+                | DataScalarFunction::Contains
+                | DataScalarFunction::StartsWith
+                | DataScalarFunction::Replace
+                | DataScalarFunction::ToString
+                | DataScalarFunction::ToNumber
+                | DataScalarFunction::ToBoolean
+                | DataScalarFunction::Abs
+                | DataScalarFunction::Round { .. } => None,
+            };
+            direct_reason.or_else(|| args.iter().find_map(data_expr_materialization_reason))
         }
-        DataExpr::Window { args, spec, .. } => {
-            args.iter().any(data_expr_requires_row_semantics)
-                || spec.order_by.len() > 1
-                || matches!(
+        DataExpr::Window { args, spec, .. } => args
+            .iter()
+            .find_map(data_expr_materialization_reason)
+            .or_else(|| {
+                (spec.order_by.len() > 1).then_some(NativeMaterializationReason::WindowMultiOrder)
+            })
+            .or_else(|| {
+                matches!(
                     args.get(1),
                     Some(expr) if !matches!(expr, DataExpr::Literal(DataLiteral::Number(_)))
                 )
-        }
+                .then_some(NativeMaterializationReason::WindowDynamicOffset)
+            }),
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn data_if_else_homogeneous(args: &[DataExpr]) -> bool {
+    let [_, when_true, when_false] = args else {
+        return false;
+    };
+    match (
+        data_expr_proven_value_class(when_true),
+        data_expr_proven_value_class(when_false),
+    ) {
+        (Some(DataValueClass::Null), Some(_)) | (Some(_), Some(DataValueClass::Null)) => true,
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+#[cfg(feature = "polars-engine")]
+fn data_expr_proven_value_class(expr: &DataExpr) -> Option<DataValueClass> {
+    match expr {
+        DataExpr::Literal(DataLiteral::Null) => Some(DataValueClass::Null),
+        DataExpr::Literal(DataLiteral::Bool(_)) => Some(DataValueClass::Bool),
+        DataExpr::Literal(DataLiteral::Number(_)) => Some(DataValueClass::Number),
+        DataExpr::Literal(DataLiteral::String(_)) => Some(DataValueClass::String),
+        DataExpr::Column(_) | DataExpr::DynamicColumn(_) => None,
+        DataExpr::Unary { op, .. } => match op {
+            DataUnaryOp::Not => Some(DataValueClass::Bool),
+            DataUnaryOp::Neg => Some(DataValueClass::Number),
+        },
+        DataExpr::Binary { op, .. } => match op {
+            DataBinaryOp::Or
+            | DataBinaryOp::And
+            | DataBinaryOp::Eq
+            | DataBinaryOp::Ne
+            | DataBinaryOp::Lt
+            | DataBinaryOp::Lte
+            | DataBinaryOp::Gt
+            | DataBinaryOp::Gte => Some(DataValueClass::Bool),
+            DataBinaryOp::Add
+            | DataBinaryOp::Sub
+            | DataBinaryOp::Mul
+            | DataBinaryOp::Div
+            | DataBinaryOp::Rem => Some(DataValueClass::Number),
+        },
+        DataExpr::Call { function, args } => match function {
+            DataScalarFunction::IsNull
+            | DataScalarFunction::NotNull
+            | DataScalarFunction::Contains
+            | DataScalarFunction::StartsWith
+            | DataScalarFunction::ToBoolean => Some(DataValueClass::Bool),
+            DataScalarFunction::ToNumber
+            | DataScalarFunction::Abs
+            | DataScalarFunction::Round { .. }
+            | DataScalarFunction::Year
+            | DataScalarFunction::Month
+            | DataScalarFunction::Day => Some(DataValueClass::Number),
+            DataScalarFunction::Concat
+            | DataScalarFunction::Lower
+            | DataScalarFunction::Upper
+            | DataScalarFunction::Trim
+            | DataScalarFunction::Replace
+            | DataScalarFunction::ToString
+            | DataScalarFunction::Date
+            | DataScalarFunction::Datetime
+            | DataScalarFunction::DateFloor
+            | DataScalarFunction::DateFormat => Some(DataValueClass::String),
+            DataScalarFunction::Coalesce => {
+                let mut class = None;
+                for arg in args {
+                    let next = data_expr_proven_value_class(arg)?;
+                    if next == DataValueClass::Null {
+                        continue;
+                    }
+                    match class {
+                        Some(current) if current != next => return None,
+                        Some(_) => {}
+                        None => class = Some(next),
+                    }
+                }
+                Some(class.unwrap_or(DataValueClass::Null))
+            }
+            DataScalarFunction::IfElse if data_if_else_homogeneous(args) => {
+                let [_, when_true, when_false] = args.as_slice() else {
+                    return None;
+                };
+                match data_expr_proven_value_class(when_true) {
+                    Some(DataValueClass::Null) => data_expr_proven_value_class(when_false),
+                    value => value,
+                }
+            }
+            DataScalarFunction::IfElse => None,
+        },
+        DataExpr::Window { function, args, .. } => match function {
+            DataWindowFunction::RowNumber
+            | DataWindowFunction::Rank
+            | DataWindowFunction::DenseRank
+            | DataWindowFunction::PercentRank
+            | DataWindowFunction::CumeDist
+            | DataWindowFunction::Count
+            | DataWindowFunction::Sum
+            | DataWindowFunction::Mean => Some(DataValueClass::Number),
+            DataWindowFunction::Lag
+            | DataWindowFunction::Lead
+            | DataWindowFunction::FirstValue
+            | DataWindowFunction::LastValue
+            | DataWindowFunction::Min
+            | DataWindowFunction::Max => args.first().and_then(data_expr_proven_value_class),
+        },
     }
 }
 
@@ -2762,64 +3239,90 @@ fn eval_data_window_expr(
     spec: &DataWindowSpec,
     table: &Table,
     current_index: usize,
+    cache: &mut DataWindowCache,
 ) -> Result<Value, Diagnostic> {
-    let partition = data_ordered_partition_indices(table, spec, current_index);
-    let Some(position) = partition.iter().position(|index| *index == current_index) else {
+    let Some((spec_index, partition_index, position)) =
+        cache.partition_position(table, spec, current_index)
+    else {
         return Ok(Value::Null);
     };
 
     match function {
         DataWindowFunction::RowNumber => Ok(Value::Number((position + 1) as f64)),
         DataWindowFunction::Rank => Ok(Value::Number(data_rank_value(
-            table, spec, &partition, position,
+            table,
+            spec,
+            cache.partition(spec_index, partition_index),
+            position,
         ) as f64)),
         DataWindowFunction::DenseRank => Ok(Value::Number(data_dense_rank_value(
-            table, spec, &partition, position,
+            table,
+            spec,
+            cache.partition(spec_index, partition_index),
+            position,
         ) as f64)),
         DataWindowFunction::PercentRank => {
+            let partition = cache.partition(spec_index, partition_index);
             if partition.len() <= 1 {
                 Ok(Value::Number(0.0))
             } else {
-                let rank = data_rank_value(table, spec, &partition, position);
+                let rank = data_rank_value(table, spec, partition, position);
                 Ok(Value::Number(
                     (rank.saturating_sub(1)) as f64 / (partition.len() - 1) as f64,
                 ))
             }
         }
         DataWindowFunction::CumeDist => {
+            let partition = cache.partition(spec_index, partition_index);
             if partition.is_empty() {
                 Ok(Value::Null)
             } else {
-                let last_peer = data_last_peer_position(table, spec, &partition, position);
+                let last_peer = data_last_peer_position(table, spec, partition, position);
                 Ok(Value::Number(
                     (last_peer + 1) as f64 / partition.len() as f64,
                 ))
             }
         }
-        DataWindowFunction::Lag => eval_data_offset_window(args, table, &partition, position, -1),
-        DataWindowFunction::Lead => eval_data_offset_window(args, table, &partition, position, 1),
+        DataWindowFunction::Lag => eval_data_offset_window(
+            args,
+            table,
+            cache,
+            spec_index,
+            partition_index,
+            position,
+            -1,
+        ),
+        DataWindowFunction::Lead => {
+            eval_data_offset_window(args, table, cache, spec_index, partition_index, position, 1)
+        }
         DataWindowFunction::FirstValue | DataWindowFunction::LastValue => {
             let Some(arg) = args.first() else {
                 return Err(type_error("value window expects one argument"));
             };
-            let frame = data_frame_indices(spec.frame, &partition, position);
-            let row_index = if function == DataWindowFunction::FirstValue {
-                frame.first()
-            } else {
-                frame.last()
+            let row_index = {
+                let partition = cache.partition(spec_index, partition_index);
+                let frame = data_frame_indices(spec.frame, partition, position);
+                if function == DataWindowFunction::FirstValue {
+                    frame.first().copied()
+                } else {
+                    frame.last().copied()
+                }
             };
             let Some(row_index) = row_index else {
                 return Ok(Value::Null);
             };
-            eval_row_expr_at(arg, table, &table.rows[*row_index], None)
+            eval_row_expr_at_with_cache(arg, table, &table.rows[row_index], None, cache)
         }
         DataWindowFunction::Count
         | DataWindowFunction::Sum
         | DataWindowFunction::Mean
         | DataWindowFunction::Min
         | DataWindowFunction::Max => {
-            let frame = data_frame_indices(spec.frame, &partition, position);
-            eval_data_window_aggregate(function, args, table, &frame)
+            let frame = {
+                let partition = cache.partition(spec_index, partition_index);
+                data_frame_indices(spec.frame, partition, position)
+            };
+            eval_data_window_aggregate(function, args, table, &frame, cache)
         }
     }
 }
@@ -2827,35 +3330,46 @@ fn eval_data_window_expr(
 fn eval_data_offset_window(
     args: &[DataExpr],
     table: &Table,
-    partition: &[usize],
+    cache: &mut DataWindowCache,
+    spec_index: usize,
+    partition_index: usize,
     position: usize,
     direction: isize,
 ) -> Result<Value, Diagnostic> {
     let Some(value_expr) = args.first() else {
         return Err(type_error("lag/lead expects at least one argument"));
     };
-    let offset = data_window_offset(args.get(1), table, partition[position])? as isize;
+    let current_row_index = cache.partition(spec_index, partition_index)[position];
+    let offset = data_window_offset(args.get(1), table, current_row_index, cache)? as isize;
+    let partition_len = cache.partition(spec_index, partition_index).len();
     let target = position as isize + direction * offset;
-    if target < 0 || target >= partition.len() as isize {
+    if target < 0 || target >= partition_len as isize {
         return match args.get(2) {
-            Some(default) => {
-                eval_row_expr_at(default, table, &table.rows[partition[position]], None)
-            }
+            Some(default) => eval_row_expr_at_with_cache(
+                default,
+                table,
+                &table.rows[current_row_index],
+                None,
+                cache,
+            ),
             None => Ok(Value::Null),
         };
     }
-    let row_index = partition[target as usize];
-    eval_row_expr_at(value_expr, table, &table.rows[row_index], None)
+    let row_index = cache.partition(spec_index, partition_index)[target as usize];
+    eval_row_expr_at_with_cache(value_expr, table, &table.rows[row_index], None, cache)
 }
 
 fn data_window_offset(
     expr: Option<&DataExpr>,
     table: &Table,
     current_index: usize,
+    cache: &mut DataWindowCache,
 ) -> Result<usize, Diagnostic> {
     let value = match expr {
         None => return Ok(1),
-        Some(expr) => eval_row_expr_at(expr, table, &table.rows[current_index], None)?,
+        Some(expr) => {
+            eval_row_expr_at_with_cache(expr, table, &table.rows[current_index], None, cache)?
+        }
     };
     match value {
         Value::Number(value) if value >= 0.0 && value.fract() == 0.0 => Ok(value as usize),
@@ -2872,11 +3386,12 @@ fn eval_data_window_aggregate(
     args: &[DataExpr],
     table: &Table,
     frame: &[usize],
+    cache: &mut DataWindowCache,
 ) -> Result<Value, Diagnostic> {
     match function {
         DataWindowFunction::Count if args.is_empty() => Ok(Value::Number(frame.len() as f64)),
         DataWindowFunction::Count => {
-            let values = data_window_arg_values(args, table, frame)?;
+            let values = data_window_arg_values(args, table, frame, cache)?;
             Ok(Value::Number(
                 values
                     .iter()
@@ -2885,7 +3400,7 @@ fn eval_data_window_aggregate(
             ))
         }
         DataWindowFunction::Sum => {
-            let numbers = data_window_arg_values(args, table, frame)?
+            let numbers = data_window_arg_values(args, table, frame, cache)?
                 .into_iter()
                 .filter_map(|value| value.as_number())
                 .collect::<Vec<_>>();
@@ -2896,7 +3411,7 @@ fn eval_data_window_aggregate(
             }
         }
         DataWindowFunction::Mean => {
-            let numbers = data_window_arg_values(args, table, frame)?
+            let numbers = data_window_arg_values(args, table, frame, cache)?
                 .into_iter()
                 .filter_map(|value| value.as_number())
                 .collect::<Vec<_>>();
@@ -2908,20 +3423,24 @@ fn eval_data_window_aggregate(
                 ))
             }
         }
-        DataWindowFunction::Min => data_window_arg_values(args, table, frame).map(|values| {
-            values
-                .into_iter()
-                .filter(|value| !matches!(value, Value::Null))
-                .min_by(|left, right| compare_values(left, right).unwrap_or(Ordering::Equal))
-                .unwrap_or(Value::Null)
-        }),
-        DataWindowFunction::Max => data_window_arg_values(args, table, frame).map(|values| {
-            values
-                .into_iter()
-                .filter(|value| !matches!(value, Value::Null))
-                .max_by(|left, right| compare_values(left, right).unwrap_or(Ordering::Equal))
-                .unwrap_or(Value::Null)
-        }),
+        DataWindowFunction::Min => {
+            data_window_arg_values(args, table, frame, cache).map(|values| {
+                values
+                    .into_iter()
+                    .filter(|value| !matches!(value, Value::Null))
+                    .min_by(|left, right| compare_values(left, right).unwrap_or(Ordering::Equal))
+                    .unwrap_or(Value::Null)
+            })
+        }
+        DataWindowFunction::Max => {
+            data_window_arg_values(args, table, frame, cache).map(|values| {
+                values
+                    .into_iter()
+                    .filter(|value| !matches!(value, Value::Null))
+                    .max_by(|left, right| compare_values(left, right).unwrap_or(Ordering::Equal))
+                    .unwrap_or(Value::Null)
+            })
+        }
         _ => Err(type_error("window aggregate function is not supported")),
     }
 }
@@ -2930,42 +3449,16 @@ fn data_window_arg_values(
     args: &[DataExpr],
     table: &Table,
     frame: &[usize],
+    cache: &mut DataWindowCache,
 ) -> Result<Vec<Value>, Diagnostic> {
     let Some(arg) = args.first() else {
         return Err(type_error("window aggregate expects one argument"));
     };
     frame
         .iter()
-        .map(|row_index| eval_row_expr_at(arg, table, &table.rows[*row_index], None))
-        .collect()
-}
-
-fn data_ordered_partition_indices(
-    table: &Table,
-    spec: &DataWindowSpec,
-    current_index: usize,
-) -> Vec<usize> {
-    let current_key = data_partition_key(table, spec, current_index);
-    let mut indices = table
-        .rows
-        .iter()
-        .enumerate()
-        .filter_map(|(index, _)| {
-            (data_partition_key(table, spec, index) == current_key).then_some(index)
+        .map(|row_index| {
+            eval_row_expr_at_with_cache(arg, table, &table.rows[*row_index], None, cache)
         })
-        .collect::<Vec<_>>();
-    if !spec.order_by.is_empty() {
-        indices
-            .sort_by(|left, right| data_compare_rows_for_window_order(table, spec, *left, *right));
-    }
-    indices
-}
-
-fn data_partition_key(table: &Table, spec: &DataWindowSpec, row_index: usize) -> Vec<Value> {
-    let row = &table.rows[row_index];
-    spec.partition_by
-        .iter()
-        .map(|column| table.value(row, column).cloned().unwrap_or(Value::Null))
         .collect()
 }
 
@@ -4180,7 +4673,10 @@ fn native_path(path: &Path) -> Result<native::PlRefPath, Diagnostic> {
 }
 
 #[cfg(feature = "polars-engine")]
-fn native_collect_to_table(plan: NativePlan) -> Result<Table, Diagnostic> {
+fn native_collect_to_table(
+    plan: NativePlan,
+    _reason: NativeMaterializationReason,
+) -> Result<Table, Diagnostic> {
     let frame = plan
         .plan
         .collect()
@@ -4464,6 +4960,103 @@ mod tests {
             null_pattern.err().expect("null pattern fails").code,
             codes::E1403
         );
+    }
+
+    #[test]
+    fn dynamic_offset_windows_share_partition_semantics() {
+        let source = DataSource::Bytes {
+            logical_path: Path::new("memory.csv"),
+            format: DataFormat::Csv,
+            bytes: b"segment,seq,amount,offset\nA,1,10,1\nA,2,20,1\nA,3,30,2\n",
+        };
+        let spec = DataWindowSpec {
+            partition_by: vec!["segment".to_string()],
+            order_by: vec![SortSpec {
+                column: "seq".to_string(),
+                direction: SortDirection::Asc,
+                nulls: NullsOrder::Last,
+            }],
+            frame: DataWindowFrame::WholePartition,
+            row_index: None,
+            presorted: false,
+        };
+        let lag = DataExpr::Window {
+            function: DataWindowFunction::Lag,
+            args: vec![
+                DataExpr::Column("amount".to_string()),
+                DataExpr::Column("offset".to_string()),
+                DataExpr::Literal(DataLiteral::Number(0.0)),
+            ],
+            spec: spec.clone(),
+        };
+        let lead = DataExpr::Window {
+            function: DataWindowFunction::Lead,
+            args: vec![
+                DataExpr::Column("amount".to_string()),
+                DataExpr::Column("offset".to_string()),
+                DataExpr::Literal(DataLiteral::Number(-1.0)),
+            ],
+            spec,
+        };
+        let plan = DataPlan::scan(source)
+            .expect("row plan")
+            .mutate(&[
+                ("lag_amount".to_string(), lag),
+                ("lead_amount".to_string(), lead),
+            ])
+            .expect("mutate")
+            .select(&[
+                ("seq".to_string(), "seq".to_string()),
+                ("lag_amount".to_string(), "lag_amount".to_string()),
+                ("lead_amount".to_string(), "lead_amount".to_string()),
+            ])
+            .expect("select");
+        let bytes = plan
+            .write_to_sink(DataSink::Bytes {
+                format: DataFormat::Csv,
+            })
+            .expect("csv bytes")
+            .expect("bytes");
+        assert_eq!(
+            String::from_utf8(bytes).expect("utf8"),
+            "seq,lag_amount,lead_amount\n1,0,20\n2,10,30\n3,10,-1\n"
+        );
+    }
+
+    #[test]
+    fn dynamic_offset_windows_preserve_offset_type_errors() {
+        let source = DataSource::Bytes {
+            logical_path: Path::new("memory.csv"),
+            format: DataFormat::Csv,
+            bytes: b"segment,seq,amount,offset\nA,1,10,later\n",
+        };
+        let spec = DataWindowSpec {
+            partition_by: vec!["segment".to_string()],
+            order_by: vec![SortSpec {
+                column: "seq".to_string(),
+                direction: SortDirection::Asc,
+                nulls: NullsOrder::Last,
+            }],
+            frame: DataWindowFrame::WholePartition,
+            row_index: None,
+            presorted: false,
+        };
+        let error = DataPlan::scan(source)
+            .expect("row plan")
+            .mutate(&[(
+                "lag_amount".to_string(),
+                DataExpr::Window {
+                    function: DataWindowFunction::Lag,
+                    args: vec![
+                        DataExpr::Column("amount".to_string()),
+                        DataExpr::Column("offset".to_string()),
+                    ],
+                    spec,
+                },
+            )])
+            .err()
+            .expect("text offset fails");
+        assert_eq!(error.code, codes::E1206);
     }
 
     /// Parity corpus for the v0.44 native text writers: embedded delimiters,
@@ -4949,5 +5542,26 @@ mod tests {
         let empty = Table::new(vec!["región".to_string(), "amount".to_string()], Vec::new());
         assert_native_text_writer_parity(&empty, DataFormat::Csv);
         assert_native_text_writer_parity(&empty, DataFormat::JsonLines);
+    }
+
+    #[test]
+    #[cfg(feature = "polars-engine")]
+    fn native_collect_sites_are_reason_tagged() {
+        let source = include_str!("engine.rs");
+        let lines = source.lines().collect::<Vec<_>>();
+        for (line_number, line) in lines.iter().enumerate() {
+            if line.contains("native_collect_to_table(")
+                && !line.trim_start().starts_with("fn native_collect_to_table")
+                && !line.contains("line.contains")
+            {
+                let call = lines[line_number..lines.len().min(line_number + 5)].join("\n");
+                assert!(
+                    call.contains("NativeMaterializationReason::") || call.contains(", reason"),
+                    "native_collect_to_table call on line {} does not carry a materialization reason: {}",
+                    line_number + 1,
+                    line.trim()
+                );
+            }
+        }
     }
 }

@@ -1,19 +1,27 @@
 # PDL Detailed Specification
 
-Status: Draft 0.49.0
+Status: Draft 0.50.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.49.0`, tracked in
-`docs/V0_49_PLAN.md`. Version 0.49.0 completes the v0.43-v0.49 native coverage
-arc: every shipped language feature is native-eligible on native hosts, the
-coverage matrix uses only `native parity` and `row-only by design`, and the only
-row-only rows are the non-execution host boundaries for WASM and LSP/editor
-services. The release adds `--engine native-strict` as a CI tripwire for any
-future native fallback, while adding no new PDL syntax, stages, functions,
-primitive value classes, or diagnostic codes.
+The current repository implementation line is `0.50.0`, tracked in
+`docs/V0_50_PLAN.md`. Version 0.50.0 is the post-parity performance release:
+it preserves the v0.49 native-parity contract while classifying native
+materialization reasons, caching dynamic-offset window partition/order work,
+adding homogeneous native fast paths for avoidable row bridges, tightening
+benchmark data discipline, and reducing row-runtime clone pressure. The
+release adds no new PDL syntax, stages, functions, primitive value classes, or
+diagnostic codes.
+
+Version 0.49.0, tracked in `docs/V0_49_PLAN.md`, completes the v0.43-v0.49
+native coverage arc: every shipped language feature is native-eligible on
+native hosts, the coverage matrix uses only `native parity` and `row-only by
+design`, and the only row-only rows are the non-execution host boundaries for
+WASM and LSP/editor services. The release adds `--engine native-strict` as a CI
+tripwire for any future native fallback, while adding no new PDL syntax, stages,
+functions, primitive value classes, or diagnostic codes.
 
 Version 0.48.0, tracked in `docs/V0_48_PLAN.md`, promotes native pipeline-shape
 coverage: binding-start pipelines run natively when the referenced binding is
@@ -3068,6 +3076,35 @@ selection: `selected_engine` remains `native`, writers and downstream stages
 continue through native orchestration where possible, and output bytes MUST be
 row-identical.
 
+Since version 0.50.0, every native-to-row table materialization site in
+`pdl-data` carries a stable performance reason category. The categories are
+`terminal_collect`, `dynamic_column_lookup`, `dynamic_replace_text`,
+`mixed_class_conditional`, `temporal_scalar`, `window_dynamic_offset`,
+`window_multi_order`, `union_alignment`,
+`pivot_longer_order_or_mixed_value`, `complete_key_expansion_or_fill`,
+`json_lines_scan`, and `native_writer_text_bridge`. These categories are
+performance observability facts, not fallback reasons: `native-strict` MUST
+continue to mean "no engine fallback", and a selected-native pipeline MAY
+report one or more materialization reasons while remaining selected as native.
+
+Since version 0.50.0, dynamic `lag(value, offset, default)` and
+`lead(value, offset, default)` offset windows that cross the native row bridge
+MUST evaluate against a cache shared by matching window specs in the same
+bridge. The cache groups row indices by partition key once, sorts each
+partition once, and records row-index-to-partition-position mappings once.
+Null, negative, fractional, text, and boolean offsets MUST keep the same
+diagnostics and output behavior as the row runtime. Multiple dynamic-offset
+window assignments with the same partition/order spec MUST reuse the same
+partition/order cache.
+
+Since version 0.50.0, homogeneous `if_else` branch outputs, schema-compatible
+native unions, homogeneous `pivot_longer`, and class-preserving `complete`
+fills SHOULD stay on the Polars-native path when doing so is byte-identical.
+Mixed-class conditionals, mixed-class reshapes, class-changing fills,
+schema-aligning unions, dynamic column lookup, dynamic text replacement, JSON
+Lines scan semantics, and temporal scalar semantics MAY still use row-visible
+native bridges, but those bridges MUST remain classified and byte-identical.
+
 The `--engine native-strict` flag is available since version 0.49.0. It uses
 the native engine and fails instead of falling back for the main pipeline,
 bindings, named outputs, and non-terminal save fan-out. After v0.49 it SHOULD
@@ -3147,6 +3184,13 @@ output is row-selected because it is not native-eligible. The top-level
 `selected_engine` remains the program-level view: `native` when every selected
 output is native, `row` when the whole program is row-selected, and `mixed`
 when automatic planning selects different engines for different outputs.
+
+Since version 0.50.0, the same observability object includes
+`materialization_reasons[]`, `native_bridge_count`,
+`estimated_row_bridge_stages[]`, `dynamic_window_strategy`, and
+`performance_classification`. These fields are performance facts for plan,
+manifest, and benchmark consumers. They MUST NOT affect engine eligibility and
+MUST NOT write to data stdout streams.
 
 Version 0.40.0 defines the native coverage matrix in
 `docs/PDL_NATIVE_COVERAGE.csv` and documents it in
@@ -3338,7 +3382,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.49.0` LSP implementation provides diagnostics,
+The current `0.50.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3784,6 +3828,15 @@ versions and consumer pins stay on the latest verified published packages
 (`pdl-wasm@0.47.1` and `pdl-editor@0.47.0`) until a browser package release is
 cut.
 
+Version 0.50.0 is likewise a native Rust/CLI performance release: materialized
+native bridge classification, dynamic-window caching, benchmark metadata, and
+row-runtime allocation reductions change no parser, editor-service, or
+WASM-visible language surface. Npm was checked on June 11, 2026:
+`pdl-wasm@0.50.0` and `pdl-editor@0.50.0` are not published, so browser package
+versions and consumer pins stay on the latest verified published packages
+(`pdl-wasm@0.47.1` and `pdl-editor@0.47.0`) until a browser package release is
+cut.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3856,7 +3909,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.49.0"
+version = "0.50.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -5462,7 +5515,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.49.0.
+PDL source does not require an explicit version declaration in draft 0.50.0.
 
 The implementation SHOULD report supported language version.
 

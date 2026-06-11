@@ -247,6 +247,13 @@ replacement, and mixed-class conditionals on the native engine:
 target/debug/pdl run examples/dynamic_text_and_col.pdl --stdout-format csv
 ```
 
+The v0.50 performance release keeps that native parity contract and exposes
+bridge/materialization facts through plan JSON:
+
+```bash
+target/debug/pdl plan examples/dynamic_text_and_col.pdl --stdout-format csv --json
+```
+
 ## File formats and output
 
 PDL supports CSV, JSON Lines, Parquet, Arrow IPC file, and Arrow IPC stream

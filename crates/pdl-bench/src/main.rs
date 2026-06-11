@@ -20,7 +20,7 @@ const TLC_URL: &str =
 const TLC_ZONES_URL: &str = "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv";
 const SFO_URL: &str = "https://static.sfomuseum.org/parquet/sfomuseum-data-flights-2026-03.parquet";
 
-const REPORT_HEADER: [&str; 50] = [
+const REPORT_HEADER: [&str; 55] = [
     "repo",
     "tool",
     "run_label",
@@ -54,6 +54,11 @@ const REPORT_HEADER: [&str; 50] = [
     "unsupported_samples",
     "peak_rss_bytes",
     "row_materialization",
+    "materialization_reasons",
+    "native_bridge_count",
+    "estimated_row_bridge_stages",
+    "dynamic_window_strategy",
+    "performance_classification",
     "selected_engine",
     "eligible_engine",
     "fallback_reason",
@@ -140,6 +145,9 @@ enum Commands {
         /// Milliseconds to sleep between measured samples.
         #[arg(long, default_value_t = 0)]
         cooldown_ms: u64,
+        /// Allow generated data whose metadata does not match the requested tier.
+        #[arg(long)]
+        allow_tier_mismatch: bool,
     },
     /// Compare a run report with a baseline report.
     Compare {
@@ -268,13 +276,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
     match cli.command {
         Commands::Generate { tier, rows } => {
-            generate_all(&root, rows.unwrap_or_else(|| tier.rows()))?;
+            generate_all(&root, tier, rows.unwrap_or_else(|| tier.rows()))?;
         }
         Commands::Download { dataset, force } => {
             download_external(&root, dataset, force)?;
         }
         Commands::Prepare { tier, rows } => {
-            prepare_sources(&root, rows.unwrap_or_else(|| tier.rows()))?;
+            prepare_sources(&root, tier, rows.unwrap_or_else(|| tier.rows()))?;
         }
         Commands::Run {
             suite,
@@ -287,6 +295,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             warmups,
             randomize,
             cooldown_ms,
+            allow_tier_mismatch,
         } => {
             run_suite(
                 &root,
@@ -301,6 +310,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     warmups,
                     randomize,
                     cooldown_ms,
+                    allow_tier_mismatch,
                 },
             )?;
         }
@@ -355,6 +365,7 @@ struct RunSuiteOptions {
     warmups: usize,
     randomize: bool,
     cooldown_ms: u64,
+    allow_tier_mismatch: bool,
 }
 
 fn run_suite(root: &Path, options: RunSuiteOptions) -> Result<(), Box<dyn std::error::Error>> {
@@ -369,6 +380,7 @@ fn run_suite(root: &Path, options: RunSuiteOptions) -> Result<(), Box<dyn std::e
         warmups,
         randomize,
         cooldown_ms,
+        allow_tier_mismatch,
     } = options;
     if !matches!(suite, Suite::Large) {
         unreachable!("clap only exposes known suite values");
@@ -392,8 +404,9 @@ fn run_suite(root: &Path, options: RunSuiteOptions) -> Result<(), Box<dyn std::e
         if no_generate {
             return Err("missing generated benchmark datasets under bench/data/generated".into());
         }
-        generate_all(root, tier.rows())?;
+        generate_all(root, tier, tier.rows())?;
     }
+    validate_generated_metadata(root, tier, allow_tier_mismatch)?;
 
     build_cli(root, profile)?;
 
@@ -1156,6 +1169,11 @@ struct PlanFacts {
     sink_strategy: String,
     source_boundary: String,
     row_materialization: String,
+    materialization_reasons: String,
+    native_bridge_count: String,
+    estimated_row_bridge_stages: String,
+    dynamic_window_strategy: String,
+    performance_classification: String,
     required_source_columns: String,
 }
 
@@ -1478,6 +1496,17 @@ fn plan_facts(
             .as_bool()
             .map(|value| value.to_string())
             .unwrap_or_default(),
+        materialization_reasons: json_string_array(observability, "materialization_reasons"),
+        native_bridge_count: observability["native_bridge_count"]
+            .as_u64()
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        estimated_row_bridge_stages: json_string_array(
+            observability,
+            "estimated_row_bridge_stages",
+        ),
+        dynamic_window_strategy: json_string(observability, "dynamic_window_strategy"),
+        performance_classification: json_string(observability, "performance_classification"),
         required_source_columns: observability["required_source_columns"]
             .as_array()
             .map(|columns| {
@@ -1493,6 +1522,19 @@ fn plan_facts(
 
 fn json_string(value: &JsonValue, key: &str) -> String {
     value[key].as_str().unwrap_or_default().to_string()
+}
+
+fn json_string_array(value: &JsonValue, key: &str) -> String {
+    value[key]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>()
+                .join("|")
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Default)]
@@ -1596,6 +1638,11 @@ fn append_v0_36_fields(
             .map(|value| value.to_string())
             .unwrap_or_default(),
         plan_facts.row_materialization.clone(),
+        plan_facts.materialization_reasons.clone(),
+        plan_facts.native_bridge_count.clone(),
+        plan_facts.estimated_row_bridge_stages.clone(),
+        plan_facts.dynamic_window_strategy.clone(),
+        plan_facts.performance_classification.clone(),
         plan_facts.selected_engine.clone(),
         plan_facts.eligible_engine.clone(),
         plan_facts.fallback_reason.clone(),
@@ -1616,12 +1663,12 @@ fn append_v0_36_fields(
     ]);
 }
 
-fn generate_all(root: &Path, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
-    prepare_sources(root, rows)?;
+fn generate_all(root: &Path, tier: Tier, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
+    prepare_sources(root, tier, rows)?;
     Ok(())
 }
 
-fn prepare_sources(root: &Path, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn prepare_sources(root: &Path, tier: Tier, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
     generate_million_row_csv(root, rows)?;
     generate_partitioned_million_row_csv(root, rows)?;
     generate_million_row_narrow_csv(root, rows)?;
@@ -1638,7 +1685,77 @@ fn prepare_sources(root: &Path, rows: usize) -> Result<(), Box<dyn std::error::E
         &batch,
         &root.join("bench/data/generated/million-row.arrow"),
     )?;
+    write_generated_metadata(root, tier, rows)?;
     Ok(())
+}
+
+fn generated_metadata_path(root: &Path) -> PathBuf {
+    root.join("bench/data/generated/metadata.json")
+}
+
+fn write_generated_metadata(
+    root: &Path,
+    tier: Tier,
+    rows: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = generated_metadata_path(root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let value = serde_json::json!({
+        "tier": tier.as_str(),
+        "rows": rows,
+        "generated_at_utc": Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    });
+    fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
+    println!("wrote {}", relative(root, &path));
+    Ok(())
+}
+
+fn validate_generated_metadata(
+    root: &Path,
+    tier: Tier,
+    allow_mismatch: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = generated_metadata_path(root);
+    let metadata = fs::read_to_string(&path).ok();
+    let value = metadata
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<JsonValue>(text).ok());
+    let metadata_tier = value
+        .as_ref()
+        .and_then(|value| value["tier"].as_str())
+        .unwrap_or_default();
+    let metadata_rows = value
+        .as_ref()
+        .and_then(|value| value["rows"].as_u64())
+        .map(|rows| rows as usize);
+    let expected_rows = tier.rows();
+    let matches_tier = metadata_tier == tier.as_str();
+    let matches_rows = metadata_rows == Some(expected_rows);
+    if matches_tier && matches_rows {
+        return Ok(());
+    }
+    if allow_mismatch {
+        return Ok(());
+    }
+
+    let observed_rows =
+        metadata_rows.or_else(|| csv_data_rows(&root.join("bench/data/generated/million-row.csv")));
+    Err(format!(
+        "generated benchmark data does not match tier `{}`: metadata tier `{}`, rows `{}`; run `cargo run -p pdl-bench -- prepare --tier {}` or pass `--allow-tier-mismatch`",
+        tier.as_str(),
+        if metadata_tier.is_empty() {
+            "missing"
+        } else {
+            metadata_tier
+        },
+        observed_rows
+            .map(|rows| rows.to_string())
+            .unwrap_or_else(|| "missing".to_string()),
+        tier.as_str()
+    )
+    .into())
 }
 
 fn generate_million_row_csv(root: &Path, rows: usize) -> Result<(), Box<dyn std::error::Error>> {

@@ -1,9 +1,9 @@
 # PDL Native Coverage Matrix
 
-Status: v0.49.0 source of truth
+Status: v0.50.0 source of truth
 Machine-readable matrix: [`PDL_NATIVE_COVERAGE.csv`](PDL_NATIVE_COVERAGE.csv)
 
-This matrix records what the native execution strategy may claim in v0.49. The
+This matrix records what the native execution strategy may claim in v0.50. The
 portable row runtime remains the semantic reference. A matrix row may use only
 one of these statuses:
 
@@ -11,7 +11,7 @@ one of these statuses:
 - `row-only by design`
 
 Native planning and tests include the CSV matrix so documentation and behavior
-cannot silently drift. After v0.49, every shipped language feature is
+cannot silently drift. After v0.49, every shipped language feature remains
 native-eligible; the only row-only rows are non-execution host boundaries.
 
 ## Stage Coverage

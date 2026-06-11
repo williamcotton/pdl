@@ -1,5 +1,5 @@
 area,item,status,notes
-stage,load,native parity,path-backed stdin and byte-backed host CSV JSON Lines Parquet and Arrow IPC file/stream inputs are native-eligible in v0.49
+stage,load,native parity,path-backed stdin and byte-backed host CSV JSON Lines Parquet and Arrow IPC file/stream inputs remain native-eligible in v0.50
 stage,filter,native parity,scalar expressions lower or materialize at native orchestration boundaries with row-identical predicate semantics
 stage,select,native parity,row-preserving projection and aliasing
 stage,drop,native parity,row-preserving projection

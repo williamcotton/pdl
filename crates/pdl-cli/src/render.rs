@@ -130,6 +130,35 @@ pub fn render_plan_text(prepared: &PreparedProgram, plan: &ExecutionPlan) -> Str
         "  row materialization: {}\n",
         plan.observability.row_materialization
     ));
+    if !plan.observability.materialization_reasons.is_empty() {
+        let reasons = plan
+            .observability
+            .materialization_reasons
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect::<Vec<_>>();
+        text.push_str(&format!(
+            "  materialization reasons: {}\n",
+            reasons.join(", ")
+        ));
+    }
+    text.push_str(&format!(
+        "  native bridge count: {}\n",
+        plan.observability.native_bridge_count
+    ));
+    if !plan.observability.estimated_row_bridge_stages.is_empty() {
+        text.push_str(&format!(
+            "  estimated row bridge stages: {}\n",
+            plan.observability.estimated_row_bridge_stages.join(", ")
+        ));
+    }
+    if let Some(strategy) = &plan.observability.dynamic_window_strategy {
+        text.push_str(&format!("  dynamic window strategy: {strategy}\n"));
+    }
+    text.push_str(&format!(
+        "  performance classification: {}\n",
+        plan.observability.performance_classification
+    ));
     if let Some(columns) = &plan.observability.required_source_columns {
         text.push_str(&format!(
             "  required source columns: {}\n",

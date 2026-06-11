@@ -411,6 +411,65 @@ fn plan_command_prints_dry_run_execution_plan() {
 }
 
 #[test]
+fn plan_json_reports_v0_50_performance_observability() {
+    let input_path = temp_path("dynamic-window-input", "csv");
+    let program_path = temp_path("dynamic-window-plan", "pdl");
+    std::fs::write(
+        &input_path,
+        "row,segment,amount,offset\n1,A,10,1\n2,A,20,1\n3,A,30,2\n",
+    )
+    .expect("write input csv");
+    std::fs::write(
+        &program_path,
+        format!(
+            "load \"{}\"\n  | mutate previous_amount = lag(amount, offset, 0) over (partition_by segment order_by row)\n  | select row, segment, previous_amount\n",
+            input_path.display()
+        ),
+    )
+    .expect("write pdl program");
+
+    let output = command_output_owned(&[
+        "plan",
+        program_path.to_str().expect("utf-8 path"),
+        "--stdout-format",
+        "csv",
+        "--json",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("plan stdout is JSON");
+    let observability = &value["execution"]["observability"];
+    assert_eq!(observability["selected_engine"], "native");
+    assert_eq!(observability["row_materialization"], true);
+    assert_eq!(observability["native_bridge_count"], 1);
+    assert_eq!(
+        observability["dynamic_window_strategy"],
+        "cached-row-bridge"
+    );
+    assert_eq!(
+        observability["performance_classification"],
+        "cached-row-bridge"
+    );
+    assert_eq!(
+        observability["materialization_reasons"],
+        serde_json::json!(["window_dynamic_offset"])
+    );
+    assert_eq!(
+        observability["estimated_row_bridge_stages"],
+        serde_json::json!(["mutate"])
+    );
+
+    let _ = std::fs::remove_file(input_path);
+    let _ = std::fs::remove_file(program_path);
+}
+
+#[test]
 fn ast_ir_and_manifest_commands_emit_json() {
     let ast = command_output(&["ast", "examples/top_regions.pdl"]);
     assert!(
@@ -444,7 +503,7 @@ fn ast_ir_and_manifest_commands_emit_json() {
         String::from_utf8_lossy(&manifest.stderr)
     );
     let manifest_stdout = String::from_utf8(manifest.stdout).expect("manifest stdout is UTF-8");
-    assert!(manifest_stdout.contains("\"manifest_version\": \"0.49.0\""));
+    assert!(manifest_stdout.contains("\"manifest_version\": \"0.50.0\""));
     assert!(manifest_stdout.contains("\"observability\""));
     assert!(manifest_stdout.contains("\"stream_interop\""));
     assert!(manifest_stdout.contains("\"arrow-stream\""));

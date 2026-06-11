@@ -1,5 +1,5 @@
 use pdl_core::{codes, has_errors, Diagnostic, Span};
-use pdl_data::DataFormat;
+use pdl_data::{DataFormat, NativeMaterializationReason};
 use pdl_driver::{PreparedProgram, SinkDescriptor, SourceDescriptor};
 use pdl_semantics::{
     AggItemIr, ExprIr, FrameBoundIr, PipelineIr, PipelineStartIr, ProgramIr, StageIr,
@@ -75,6 +75,11 @@ pub struct PlanObservability {
     pub sink_strategy: SinkStrategy,
     pub blocking_stages: Vec<String>,
     pub row_materialization: bool,
+    pub materialization_reasons: Vec<NativeMaterializationReason>,
+    pub native_bridge_count: usize,
+    pub estimated_row_bridge_stages: Vec<String>,
+    pub dynamic_window_strategy: Option<String>,
+    pub performance_classification: String,
     pub required_source_columns: Option<Vec<String>>,
     pub outputs: Vec<OutputPlanObservability>,
 }
@@ -534,10 +539,25 @@ fn build_observability(
     };
     let output_format = plan_output_format(prepared, stdout_format, steps);
     let sink_strategy = sink_strategy(prepared, stdout_format, selected_engine, &output_format);
+    let materialization_reasons = if selected_engine == PlannedEngine::Native {
+        native_materialization_reasons(prepared, ir)
+    } else {
+        Vec::new()
+    };
+    let native_bridge_count = materialization_reasons.len();
     // Since v0.44 the native CSV/NDJSON writers stream dataframe rows through
     // the row writers' cell encoders, so text output no longer forces a row
     // materialization on the native engine.
-    let row_materialization = selected_engine != PlannedEngine::Native;
+    let row_materialization =
+        selected_engine != PlannedEngine::Native || !materialization_reasons.is_empty();
+    let estimated_row_bridge_stages = if selected_engine == PlannedEngine::Native {
+        native_estimated_row_bridge_stages(prepared, ir)
+    } else {
+        Vec::new()
+    };
+    let dynamic_window_strategy = native_dynamic_window_strategy(ir);
+    let performance_classification =
+        native_performance_classification(selected_engine, sink_strategy, &materialization_reasons);
 
     PlanObservability {
         requested_engine: options.engine,
@@ -562,6 +582,11 @@ fn build_observability(
         sink_strategy,
         blocking_stages: ir.main.as_ref().map(blocking_stages).unwrap_or_default(),
         row_materialization,
+        materialization_reasons,
+        native_bridge_count,
+        estimated_row_bridge_stages,
+        dynamic_window_strategy,
+        performance_classification,
         required_source_columns: ir
             .main
             .as_ref()
@@ -684,6 +709,416 @@ fn sink_strategy(
         SinkDescriptor::Stdout => SinkStrategy::StdoutWriter,
         SinkDescriptor::Path { .. } => SinkStrategy::FilesystemWriter,
     }
+}
+
+fn native_materialization_reasons(
+    prepared: &PreparedProgram,
+    ir: &ProgramIr,
+) -> Vec<NativeMaterializationReason> {
+    let mut reasons = Vec::new();
+    for input in &prepared.driver_plan.inputs {
+        if input.format.effective_name() == "jsonl" {
+            reasons.push(NativeMaterializationReason::JsonLinesScan);
+        }
+    }
+    collect_program_expr_reasons(ir, &mut reasons);
+    reasons.sort();
+    reasons.dedup();
+    reasons
+}
+
+fn native_estimated_row_bridge_stages(prepared: &PreparedProgram, ir: &ProgramIr) -> Vec<String> {
+    let mut stages = Vec::new();
+    if prepared
+        .driver_plan
+        .inputs
+        .iter()
+        .any(|input| input.format.effective_name() == "jsonl")
+    {
+        stages.push("load:json_lines_scan".to_string());
+    }
+    collect_program_bridge_stages(ir, &mut stages);
+    stages.sort();
+    stages.dedup();
+    stages
+}
+
+fn native_dynamic_window_strategy(ir: &ProgramIr) -> Option<String> {
+    program_exprs(ir)
+        .iter()
+        .any(|expr| expr_contains_dynamic_offset_window(expr))
+        .then(|| "cached-row-bridge".to_string())
+        .or_else(|| {
+            program_exprs(ir)
+                .iter()
+                .any(|expr| expr_contains_window(expr))
+                .then(|| "polars-native".to_string())
+        })
+}
+
+fn native_performance_classification(
+    selected_engine: PlannedEngine,
+    sink_strategy: SinkStrategy,
+    materialization_reasons: &[NativeMaterializationReason],
+) -> String {
+    if selected_engine != PlannedEngine::Native {
+        return "row-engine".to_string();
+    }
+    if materialization_reasons.contains(&NativeMaterializationReason::WindowDynamicOffset) {
+        return "cached-row-bridge".to_string();
+    }
+    if !materialization_reasons.is_empty() {
+        return "native-bridge".to_string();
+    }
+    if matches!(
+        sink_strategy,
+        SinkStrategy::NativeDirectWriter | SinkStrategy::BytesSink
+    ) {
+        return "polars-native".to_string();
+    }
+    "polars-native".to_string()
+}
+
+fn collect_program_expr_reasons(ir: &ProgramIr, reasons: &mut Vec<NativeMaterializationReason>) {
+    for pipeline in ir
+        .main
+        .iter()
+        .chain(ir.bindings.iter().map(|binding| &binding.pipeline))
+        .chain(ir.outputs.iter().map(|output| &output.pipeline))
+    {
+        collect_pipeline_expr_reasons(pipeline, reasons);
+    }
+}
+
+fn collect_pipeline_expr_reasons(
+    pipeline: &PipelineIr,
+    reasons: &mut Vec<NativeMaterializationReason>,
+) {
+    for expr in pipeline_exprs(pipeline) {
+        collect_expr_materialization_reasons(expr, reasons);
+    }
+}
+
+fn collect_expr_materialization_reasons(
+    expr: &ExprIr,
+    reasons: &mut Vec<NativeMaterializationReason>,
+) {
+    if let Some(reason) = expr_materialization_reason(expr) {
+        reasons.push(reason);
+    }
+    match expr {
+        ExprIr::Unary { expr, .. } => collect_expr_materialization_reasons(expr, reasons),
+        ExprIr::Binary { left, right, .. } => {
+            collect_expr_materialization_reasons(left, reasons);
+            collect_expr_materialization_reasons(right, reasons);
+        }
+        ExprIr::Call { args, .. } | ExprIr::Window { args, .. } => {
+            for arg in args {
+                collect_expr_materialization_reasons(arg, reasons);
+            }
+        }
+        ExprIr::Quoted { .. }
+        | ExprIr::Number { .. }
+        | ExprIr::Bool { .. }
+        | ExprIr::Null { .. }
+        | ExprIr::Ident { .. }
+        | ExprIr::Context { .. } => {}
+    }
+}
+
+fn expr_materialization_reason(expr: &ExprIr) -> Option<NativeMaterializationReason> {
+    match expr {
+        ExprIr::Call { name, args, .. } if name == "col" => match args.as_slice() {
+            [ExprIr::Quoted { .. }] => None,
+            [_] => Some(NativeMaterializationReason::DynamicColumnLookup),
+            _ => None,
+        },
+        ExprIr::Call { name, args, .. } if name == "replace" => {
+            let dynamic_pattern_or_replacement = args
+                .get(1..)
+                .is_some_and(|rest| rest.iter().any(|arg| !expr_is_static_text(arg)));
+            dynamic_pattern_or_replacement
+                .then_some(NativeMaterializationReason::DynamicReplaceText)
+        }
+        ExprIr::Call { name, args, .. } if name == "if_else" && expr_if_else_homogeneous(args) => {
+            None
+        }
+        ExprIr::Call { name, .. } if name == "if_else" => {
+            Some(NativeMaterializationReason::MixedClassConditional)
+        }
+        ExprIr::Call { name, .. } if is_temporal_function(name) => {
+            Some(NativeMaterializationReason::TemporalScalar)
+        }
+        ExprIr::Window {
+            function,
+            args,
+            spec,
+            ..
+        } if matches!(function.as_str(), "lag" | "lead")
+            && matches!(args.get(1), Some(expr) if !matches!(expr, ExprIr::Number { .. })) =>
+        {
+            Some(NativeMaterializationReason::WindowDynamicOffset)
+        }
+        ExprIr::Window { spec, .. } if spec.order_by.len() > 1 => {
+            Some(NativeMaterializationReason::WindowMultiOrder)
+        }
+        ExprIr::Quoted { .. }
+        | ExprIr::Number { .. }
+        | ExprIr::Bool { .. }
+        | ExprIr::Null { .. }
+        | ExprIr::Ident { .. }
+        | ExprIr::Context { .. }
+        | ExprIr::Unary { .. }
+        | ExprIr::Binary { .. }
+        | ExprIr::Call { .. }
+        | ExprIr::Window { .. } => None,
+    }
+}
+
+fn collect_program_bridge_stages(ir: &ProgramIr, stages: &mut Vec<String>) {
+    for pipeline in ir
+        .main
+        .iter()
+        .chain(ir.bindings.iter().map(|binding| &binding.pipeline))
+        .chain(ir.outputs.iter().map(|output| &output.pipeline))
+    {
+        collect_pipeline_bridge_stages(pipeline, stages);
+    }
+}
+
+fn collect_pipeline_bridge_stages(pipeline: &PipelineIr, stages: &mut Vec<String>) {
+    for stage in &pipeline.stages {
+        match stage {
+            StageIr::Filter { expr, .. } => {
+                if expr_contains_materialization_reason(expr) {
+                    stages.push("filter".to_string());
+                }
+            }
+            StageIr::Mutate { items, .. } => {
+                if items
+                    .iter()
+                    .any(|item| expr_contains_materialization_reason(&item.expr))
+                {
+                    stages.push("mutate".to_string());
+                }
+            }
+            StageIr::Agg { items, .. } => {
+                if items
+                    .iter()
+                    .any(|item| item.args.iter().any(expr_contains_materialization_reason))
+                {
+                    stages.push("agg".to_string());
+                }
+            }
+            StageIr::PivotLonger { .. } => stages.push("pivot_longer:maybe".to_string()),
+            StageIr::Complete { .. } => stages.push("complete:maybe".to_string()),
+            StageIr::Union { .. } => stages.push("union:maybe".to_string()),
+            StageIr::Select { .. }
+            | StageIr::Drop { .. }
+            | StageIr::Rename { .. }
+            | StageIr::GroupBy { .. }
+            | StageIr::Sort { .. }
+            | StageIr::Limit { .. }
+            | StageIr::Distinct { .. }
+            | StageIr::Save { .. }
+            | StageIr::Join { .. }
+            | StageIr::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn program_exprs(ir: &ProgramIr) -> Vec<&ExprIr> {
+    ir.main
+        .iter()
+        .chain(ir.bindings.iter().map(|binding| &binding.pipeline))
+        .chain(ir.outputs.iter().map(|output| &output.pipeline))
+        .flat_map(pipeline_exprs)
+        .collect()
+}
+
+fn pipeline_exprs(pipeline: &PipelineIr) -> Vec<&ExprIr> {
+    let mut exprs = Vec::new();
+    for stage in &pipeline.stages {
+        match stage {
+            StageIr::Filter { expr, .. } => exprs.push(expr),
+            StageIr::Mutate { items, .. } => {
+                exprs.extend(items.iter().map(|item| &item.expr));
+            }
+            StageIr::Agg { items, .. } => {
+                exprs.extend(items.iter().flat_map(|item| item.args.iter()));
+            }
+            StageIr::Complete { fills, .. } => {
+                exprs.extend(fills.iter().map(|fill| &fill.expr));
+            }
+            StageIr::Select { .. }
+            | StageIr::Drop { .. }
+            | StageIr::Rename { .. }
+            | StageIr::GroupBy { .. }
+            | StageIr::Sort { .. }
+            | StageIr::Limit { .. }
+            | StageIr::Join { .. }
+            | StageIr::Union { .. }
+            | StageIr::Distinct { .. }
+            | StageIr::PivotLonger { .. }
+            | StageIr::Save { .. }
+            | StageIr::Unsupported { .. } => {}
+        }
+    }
+    exprs
+}
+
+fn expr_contains_dynamic_offset_window(expr: &ExprIr) -> bool {
+    match expr {
+        ExprIr::Window { function, args, .. }
+            if matches!(function.as_str(), "lag" | "lead")
+                && matches!(args.get(1), Some(expr) if !matches!(expr, ExprIr::Number { .. })) =>
+        {
+            true
+        }
+        ExprIr::Unary { expr, .. } => expr_contains_dynamic_offset_window(expr),
+        ExprIr::Binary { left, right, .. } => {
+            expr_contains_dynamic_offset_window(left) || expr_contains_dynamic_offset_window(right)
+        }
+        ExprIr::Call { args, .. } | ExprIr::Window { args, .. } => {
+            args.iter().any(expr_contains_dynamic_offset_window)
+        }
+        ExprIr::Quoted { .. }
+        | ExprIr::Number { .. }
+        | ExprIr::Bool { .. }
+        | ExprIr::Null { .. }
+        | ExprIr::Ident { .. }
+        | ExprIr::Context { .. } => false,
+    }
+}
+
+fn expr_contains_materialization_reason(expr: &ExprIr) -> bool {
+    if expr_materialization_reason(expr).is_some() {
+        return true;
+    }
+    match expr {
+        ExprIr::Unary { expr, .. } => expr_contains_materialization_reason(expr),
+        ExprIr::Binary { left, right, .. } => {
+            expr_contains_materialization_reason(left)
+                || expr_contains_materialization_reason(right)
+        }
+        ExprIr::Call { args, .. } | ExprIr::Window { args, .. } => {
+            args.iter().any(expr_contains_materialization_reason)
+        }
+        ExprIr::Quoted { .. }
+        | ExprIr::Number { .. }
+        | ExprIr::Bool { .. }
+        | ExprIr::Null { .. }
+        | ExprIr::Ident { .. }
+        | ExprIr::Context { .. } => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExprValueClass {
+    Null,
+    Bool,
+    Number,
+    String,
+}
+
+fn expr_if_else_homogeneous(args: &[ExprIr]) -> bool {
+    let [_, when_true, when_false] = args else {
+        return false;
+    };
+    match (
+        expr_proven_value_class(when_true),
+        expr_proven_value_class(when_false),
+    ) {
+        (Some(ExprValueClass::Null), Some(_)) | (Some(_), Some(ExprValueClass::Null)) => true,
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn expr_proven_value_class(expr: &ExprIr) -> Option<ExprValueClass> {
+    match expr {
+        ExprIr::Quoted { .. } => Some(ExprValueClass::String),
+        ExprIr::Number { .. } => Some(ExprValueClass::Number),
+        ExprIr::Bool { .. } => Some(ExprValueClass::Bool),
+        ExprIr::Null { .. } => Some(ExprValueClass::Null),
+        ExprIr::Ident { .. } | ExprIr::Context { .. } => None,
+        ExprIr::Unary { op, .. } => match op {
+            pdl_semantics::UnaryOpIr::Not => Some(ExprValueClass::Bool),
+            pdl_semantics::UnaryOpIr::Neg => Some(ExprValueClass::Number),
+        },
+        ExprIr::Binary { op, .. } => match op {
+            pdl_semantics::BinaryOpIr::Or
+            | pdl_semantics::BinaryOpIr::And
+            | pdl_semantics::BinaryOpIr::Eq
+            | pdl_semantics::BinaryOpIr::Ne
+            | pdl_semantics::BinaryOpIr::Lt
+            | pdl_semantics::BinaryOpIr::Lte
+            | pdl_semantics::BinaryOpIr::Gt
+            | pdl_semantics::BinaryOpIr::Gte => Some(ExprValueClass::Bool),
+            pdl_semantics::BinaryOpIr::Add
+            | pdl_semantics::BinaryOpIr::Sub
+            | pdl_semantics::BinaryOpIr::Mul
+            | pdl_semantics::BinaryOpIr::Div
+            | pdl_semantics::BinaryOpIr::Rem => Some(ExprValueClass::Number),
+        },
+        ExprIr::Call { name, args, .. } => match name.as_str() {
+            "is_null" | "not_null" | "contains" | "starts_with" | "to_boolean" => {
+                Some(ExprValueClass::Bool)
+            }
+            "to_number" | "abs" | "round" | "year" | "month" | "day" => {
+                Some(ExprValueClass::Number)
+            }
+            "concat" | "lower" | "upper" | "trim" | "replace" | "to_string" | "date"
+            | "datetime" | "date_floor" | "date_format" => Some(ExprValueClass::String),
+            "coalesce" => {
+                let mut class = None;
+                for arg in args {
+                    let next = expr_proven_value_class(arg)?;
+                    if next == ExprValueClass::Null {
+                        continue;
+                    }
+                    match class {
+                        Some(current) if current != next => return None,
+                        Some(_) => {}
+                        None => class = Some(next),
+                    }
+                }
+                Some(class.unwrap_or(ExprValueClass::Null))
+            }
+            "if_else" if expr_if_else_homogeneous(args) => {
+                let [_, when_true, when_false] = args.as_slice() else {
+                    return None;
+                };
+                match expr_proven_value_class(when_true) {
+                    Some(ExprValueClass::Null) => expr_proven_value_class(when_false),
+                    value => value,
+                }
+            }
+            _ => None,
+        },
+        ExprIr::Window { function, args, .. } => match function.as_str() {
+            "row_number" | "rank" | "dense_rank" | "percent_rank" | "cume_dist" | "count"
+            | "sum" | "mean" => Some(ExprValueClass::Number),
+            "lag" | "lead" | "first_value" | "last_value" | "min" | "max" => {
+                args.first().and_then(expr_proven_value_class)
+            }
+            _ => None,
+        },
+    }
+}
+
+fn expr_is_static_text(expr: &ExprIr) -> bool {
+    matches!(
+        expr,
+        ExprIr::Quoted { .. } | ExprIr::Number { .. } | ExprIr::Bool { .. }
+    )
+}
+
+fn is_temporal_function(name: &str) -> bool {
+    matches!(
+        name,
+        "date" | "datetime" | "year" | "month" | "day" | "date_floor" | "date_format"
+    )
 }
 
 fn native_unsupported_reason(
