@@ -2621,7 +2621,7 @@ The CLI SHOULD be a single binary.
 
 The CLI MUST support `run` and `check`.
 
-The CLI SHOULD support `fmt`, `schema`, `plan`, `ast`, `ir`, `manifest`, `lsp`, and `version`.
+The CLI SHOULD support `fmt`, `schema`, `plan`, `ast`, `ir`, `manifest`, `init`, `lsp`, and `version`.
 
 ### 14.2 pdl run
 
@@ -2797,7 +2797,26 @@ non-zero when planning fails.
 
 The LSP backend MUST share parser and analyzer code with CLI.
 
-### 14.11 Exit Codes
+### 14.11 pdl init
+
+`pdl init --codex`, `pdl init --claude`, and `pdl init --agy` create project
+root guidance for LLM coding agents.
+
+The command MUST write a `PDL_LANG.md` language reference in the target
+directory. It MUST NOT overwrite an existing `PDL_LANG.md` with different
+content. If the file already matches the built-in template, the command is a
+no-op for that file.
+
+`--codex` and `--agy` target `AGENTS.md`. `--claude` targets `CLAUDE.md`.
+Existing agent files MUST NOT be overwritten. If an existing target file already
+mentions `PDL_LANG.md`, the command leaves it unchanged. Otherwise it appends a
+short section that points agents at `PDL_LANG.md`.
+
+The command MAY accept a positional target directory. If no directory is
+provided, it uses the current directory. At least one of `--codex`, `--claude`,
+or `--agy` is required.
+
+### 14.12 Exit Codes
 
 Exit code `0` means success.
 
@@ -2807,7 +2826,7 @@ Exit code `2` means CLI usage error.
 
 Additional exit codes MAY be defined.
 
-### 14.12 Stdout Discipline
+### 14.13 Stdout Discipline
 
 When stdout is used for data, all human-readable logs MUST go to stderr.
 

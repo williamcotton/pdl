@@ -263,6 +263,17 @@ pub fn run_cli() -> Result<ExitCode, String> {
             print_json(&manifest_json(&prepared, &plan))?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Init {
+            dir,
+            codex,
+            claude,
+            agy,
+        } => {
+            for action in crate::init::init_agent_files(&dir, codex, claude, agy)? {
+                println!("{action}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Lsp => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

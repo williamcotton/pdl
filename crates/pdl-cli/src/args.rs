@@ -62,6 +62,16 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = EngineArg::Auto)]
         engine: EngineArg,
     },
+    Init {
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        #[arg(long)]
+        codex: bool,
+        #[arg(long)]
+        claude: bool,
+        #[arg(long)]
+        agy: bool,
+    },
     Lsp,
     Version,
 }

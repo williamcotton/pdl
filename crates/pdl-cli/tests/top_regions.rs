@@ -509,6 +509,87 @@ fn ast_ir_and_manifest_commands_emit_json() {
     assert!(manifest_stdout.contains("\"arrow-stream\""));
 }
 
+#[test]
+fn init_codex_creates_language_reference_and_agents_file() {
+    let dir = temp_project_dir("init-codex");
+
+    let output = command_output_owned(&["init", "--codex", dir.to_str().expect("utf-8 path")]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lang = std::fs::read_to_string(dir.join("PDL_LANG.md")).expect("language file");
+    assert!(lang.contains("# PDL Language Reference"));
+    assert!(lang.contains("PDL is not Python, SQL, shell"));
+    let agents = std::fs::read_to_string(dir.join("AGENTS.md")).expect("agents file");
+    assert!(agents.contains("PDL_LANG.md"));
+    assert!(!dir.join("CLAUDE.md").exists());
+}
+
+#[test]
+fn init_claude_and_agy_share_language_reference() {
+    let dir = temp_project_dir("init-claude-agy");
+
+    let output = command_output_owned(&[
+        "init",
+        "--claude",
+        "--agy",
+        dir.to_str().expect("utf-8 path"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(dir.join("PDL_LANG.md").exists());
+    assert!(std::fs::read_to_string(dir.join("AGENTS.md"))
+        .expect("agents file")
+        .contains("PDL_LANG.md"));
+    assert!(std::fs::read_to_string(dir.join("CLAUDE.md"))
+        .expect("claude file")
+        .contains("PDL_LANG.md"));
+}
+
+#[test]
+fn init_appends_to_existing_agents_file_without_overwriting() {
+    let dir = temp_project_dir("init-existing-agents");
+    let agents_path = dir.join("AGENTS.md");
+    std::fs::write(&agents_path, "# Existing\n\nKeep this line.\n").expect("write agents");
+
+    let output = command_output_owned(&["init", "--agy", dir.to_str().expect("utf-8 path")]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let agents = std::fs::read_to_string(agents_path).expect("agents file");
+    assert!(agents.contains("Keep this line."));
+    assert!(agents.contains("PDL_LANG.md"));
+}
+
+#[test]
+fn init_refuses_to_overwrite_existing_language_reference() {
+    let dir = temp_project_dir("init-existing-lang");
+    std::fs::write(dir.join("PDL_LANG.md"), "custom\n").expect("write language file");
+
+    let output = command_output_owned(&["init", "--codex", dir.to_str().expect("utf-8 path")]);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("refusing to overwrite"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("PDL_LANG.md")).expect("language file"),
+        "custom\n"
+    );
+}
+
 fn assert_example_stdout(example: &str, expected_stdout: &str) {
     let output = command_output(&["run", example, "--dry-run", "--stdout-format", "csv"]);
 
@@ -602,6 +683,16 @@ fn temp_path(name: &str, extension: &str) -> std::path::PathBuf {
         "pdl-{name}-{}-{nonce}.{extension}",
         std::process::id()
     ))
+}
+
+fn temp_project_dir(name: &str) -> std::path::PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("pdl-{name}-{}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(&path).expect("create temp project dir");
+    path
 }
 
 fn repo_root() -> std::path::PathBuf {
