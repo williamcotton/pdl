@@ -17,8 +17,8 @@
     "monaco-editor-textmate": "^4.0.0",
     "monaco-textmate": "^3.0.1",
     "onigasm": "^2.2.5",
-    "pdl-editor": "0.47.0",
-    "pdl-wasm": "0.47.1",
+    "pdl-editor": "0.52.0",
+    "pdl-wasm": "0.52.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

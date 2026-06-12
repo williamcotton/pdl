@@ -1,6 +1,6 @@
 {
   "name": "pdl-editor",
-  "version": "0.47.0",
+  "version": "0.52.0",
   "description": "Monaco and React editor integration for PDL browser hosts.",
   "license": "MIT OR Apache-2.0",
   "type": "module",
@@ -38,7 +38,7 @@
     "monaco-editor-textmate": "^4.0.0",
     "monaco-textmate": "^3.0.1",
     "onigasm": "^2.2.5",
-    "pdl-wasm": "0.47.x",
+    "pdl-wasm": "0.52.x",
     "react": "^18.3.1 || ^19.0.0",
     "react-dom": "^18.3.1 || ^19.0.0"
   },
