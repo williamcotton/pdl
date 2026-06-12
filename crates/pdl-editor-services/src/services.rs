@@ -22,9 +22,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::completion::{
-    binding_completion, column_completions, context_completions, dedupe_completions,
-    format_completion, function_completion, keyword_completion, stage_completion,
-    window_frame_name_completions, CompletionContext,
+    binding_completion, column_completions, context_completions, control_initializer_completions,
+    dedupe_completions, format_completion, function_completion, keyword_completion,
+    stage_completion, window_frame_name_completions, CompletionContext,
 };
 use crate::diagnostics::diagnostics_for_editor;
 use crate::scope_analysis::optimistic_columns;
@@ -253,6 +253,8 @@ pub fn completions(
         completions.extend(window_frame_name_completions());
     } else if context.in_agg_function_context {
         completions.extend(AGGREGATE_FUNCTIONS.iter().map(function_completion));
+    } else if context.in_control_initializer_context {
+        completions.extend(control_initializer_completions());
     } else if context.in_scalar_function_context {
         completions.extend(SCALAR_FUNCTIONS.iter().map(function_completion));
         if context.in_mutate_context {
@@ -339,6 +341,7 @@ pub fn semantic_tokens(source: &str) -> Vec<EditorSemanticToken> {
             } else if AGGREGATE_FUNCTIONS.iter().any(|info| info.name == text)
                 || SCALAR_FUNCTIONS.iter().any(|info| info.name == text)
                 || WINDOW_FUNCTIONS.iter().any(|info| info.name == text)
+                || pdl_syntax::ControlKind::from_name(text).is_some()
             {
                 SemanticTokenKind::Function
             } else {
@@ -921,7 +924,7 @@ fn scan_operator(source: &str, start: usize) -> Option<usize> {
     let ch = rest.chars().next()?;
     matches!(
         ch,
-        '|' | '=' | '+' | '-' | '*' | '/' | '%' | '<' | '>' | '!'
+        '|' | '=' | '+' | '-' | '*' | '/' | '%' | '<' | '>' | '!' | ':' | '.' | '[' | ']'
     )
     .then_some(start + ch.len_utf8())
 }

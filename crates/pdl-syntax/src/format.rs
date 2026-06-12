@@ -2,9 +2,9 @@ use pdl_core::Severity;
 
 use crate::{
     decode_context_column_ref, parse, AggItem, BinaryOp, CompleteFillItem, ContextDecl,
-    ContextKind, Expr, JoinOn, MutateItem, NullsOrder, Pipeline, PipelineStart, SinkRef,
-    SortDirection, SortItem, SourceRef, Spanned, Stage, UnaryOp, UnionOptionKind, WindowFrame,
-    WindowSpec,
+    ContextKind, ControlArg, ControlInitializer, ControlLiteral, ControlValue, Expr, JoinOn,
+    MutateItem, NullsOrder, Pipeline, PipelineStart, SinkRef, SortDirection, SortItem, SourceRef,
+    Spanned, Stage, UnaryOp, UnionOptionKind, WindowFrame, WindowSpec,
 };
 
 pub type FormatResult = Option<String>;
@@ -67,8 +67,56 @@ fn format_context_decl(context: &ContextDecl) -> String {
         "{} {} = {}",
         keyword,
         context.name.value,
-        format_expr(&context.default)
+        context
+            .control
+            .as_ref()
+            .map_or_else(|| format_expr(&context.default), format_control_initializer)
     )
+}
+
+fn format_control_initializer(control: &ControlInitializer) -> String {
+    format!(
+        "{}({})",
+        control.kind.as_str(),
+        control
+            .args
+            .iter()
+            .map(format_control_arg)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn format_control_arg(arg: &ControlArg) -> String {
+    format!("{}: {}", arg.name.value, format_control_value(&arg.value))
+}
+
+fn format_control_value(value: &ControlValue) -> String {
+    match value {
+        ControlValue::Literal(value) => format_control_literal(value),
+        ControlValue::Array { values, .. } => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(format_control_literal)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ControlValue::BindingColumn {
+            binding, column, ..
+        } => {
+            format!("{}.{}", binding.value, column.value)
+        }
+    }
+}
+
+fn format_control_literal(value: &ControlLiteral) -> String {
+    match value {
+        ControlLiteral::Quoted(value) => format_string_literal(&value.value),
+        ControlLiteral::Number(value) => format_number(value.value),
+        ControlLiteral::Bool(value) => value.value.to_string(),
+        ControlLiteral::Null(_) => "null".to_string(),
+    }
 }
 
 fn format_pipeline(pipeline: &Pipeline, first_indent: &str, pipe_indent: &str) -> Vec<String> {

@@ -1,6 +1,6 @@
 # PDL v0.51 Plan
 
-Status: In progress
+Status: Shipped
 Target version: 0.51.0
 Owner: PDL maintainers
 Related spec: [`PDL_SPEC.md`](PDL_SPEC.md)

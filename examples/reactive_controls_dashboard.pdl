@@ -1,0 +1,32 @@
+param min_revenue = input_range(label: "Min Revenue", min: 0, max: 150, default: 50, step: 10)
+param active_fleet = input_select(label: "Fleet", choices: ["all", "bus", "rail"], default: "all")
+param active_zone = input_select(label: "Zone", choicesFrom: zones.zone, default: "all")
+param station_filter = input_text(label: "Station", default: "")
+param include_rail = input_checkbox(label: "Include Rail", default: true)
+
+let zones =
+  load "reactive_trips.csv"
+    | select zone
+    | distinct zone
+
+let filtered_trips =
+  load "reactive_trips.csv"
+    | filter revenue >= $min_revenue
+    | filter $active_fleet == "all" or fleet == $active_fleet
+    | filter $active_zone == "all" or zone == $active_zone
+    | filter $station_filter == "" or station == $station_filter
+    | filter $include_rail or fleet != "rail"
+
+output zone_summary =
+  filtered_trips
+    | group_by zone
+    | agg total_revenue = sum(revenue), trips = count()
+    | sort total_revenue desc
+    | save "reactive_controls_zone_summary.csv"
+
+output station_rankings =
+  filtered_trips
+    | group_by station
+    | agg total_revenue = sum(revenue)
+    | sort total_revenue desc
+    | save "reactive_controls_station_rankings.csv"

@@ -18,8 +18,24 @@ pub enum Command {
         stdout_format: Option<String>,
         #[arg(long)]
         dry_run: bool,
+        #[arg(long = "context")]
+        context: Vec<String>,
         #[arg(long, value_enum, default_value_t = EngineArg::Auto)]
         engine: EngineArg,
+    },
+    Controls {
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+        #[arg(long = "context")]
+        context: Vec<String>,
+    },
+    Serve {
+        file: PathBuf,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
     },
     Check {
         file: PathBuf,

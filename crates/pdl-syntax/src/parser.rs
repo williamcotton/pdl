@@ -74,6 +74,10 @@ pub enum SyntaxKind {
     MutateItemNode,
     ExprNode,
     OutputDecl,
+    Colon,
+    Dot,
+    LBracket,
+    RBracket,
 }
 
 impl SyntaxKind {
@@ -122,6 +126,10 @@ impl SyntaxKind {
             40 => SyntaxKind::MutateItemNode,
             41 => SyntaxKind::ExprNode,
             42 => SyntaxKind::OutputDecl,
+            43 => SyntaxKind::Colon,
+            44 => SyntaxKind::Dot,
+            45 => SyntaxKind::LBracket,
+            46 => SyntaxKind::RBracket,
             _ => SyntaxKind::Error,
         }
     }
@@ -147,6 +155,7 @@ pub struct ContextDecl {
     pub kind: ContextKind,
     pub name: Spanned<String>,
     pub default: Expr,
+    pub control: Option<ControlInitializer>,
     pub span: Span,
 }
 
@@ -154,6 +163,122 @@ pub struct ContextDecl {
 pub enum ContextKind {
     Param,
     State,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ControlInitializer {
+    pub kind: ControlKind,
+    pub name: Spanned<String>,
+    pub args: Vec<ControlArg>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlKind {
+    Text,
+    Textarea,
+    Number,
+    Range,
+    Checkbox,
+    Select,
+    Radio,
+    Date,
+    Time,
+    Datetime,
+    Color,
+}
+
+impl ControlKind {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "input_text" => Some(Self::Text),
+            "input_textarea" => Some(Self::Textarea),
+            "input_number" => Some(Self::Number),
+            "input_range" => Some(Self::Range),
+            "input_checkbox" => Some(Self::Checkbox),
+            "input_select" => Some(Self::Select),
+            "input_radio" => Some(Self::Radio),
+            "input_date" => Some(Self::Date),
+            "input_time" => Some(Self::Time),
+            "input_datetime" => Some(Self::Datetime),
+            "input_color" => Some(Self::Color),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "input_text",
+            Self::Textarea => "input_textarea",
+            Self::Number => "input_number",
+            Self::Range => "input_range",
+            Self::Checkbox => "input_checkbox",
+            Self::Select => "input_select",
+            Self::Radio => "input_radio",
+            Self::Date => "input_date",
+            Self::Time => "input_time",
+            Self::Datetime => "input_datetime",
+            Self::Color => "input_color",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ControlArg {
+    pub name: Spanned<String>,
+    pub value: ControlValue,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ControlValue {
+    Literal(ControlLiteral),
+    Array {
+        values: Vec<ControlLiteral>,
+        span: Span,
+    },
+    BindingColumn {
+        binding: Spanned<String>,
+        column: Spanned<String>,
+        span: Span,
+    },
+}
+
+impl ControlValue {
+    pub fn span(&self) -> Span {
+        match self {
+            ControlValue::Literal(value) => value.span(),
+            ControlValue::Array { span, .. } | ControlValue::BindingColumn { span, .. } => *span,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ControlLiteral {
+    Quoted(Spanned<String>),
+    Number(Spanned<f64>),
+    Bool(Spanned<bool>),
+    Null(Span),
+}
+
+impl ControlLiteral {
+    pub fn span(&self) -> Span {
+        match self {
+            ControlLiteral::Quoted(value) => value.span,
+            ControlLiteral::Number(value) => value.span,
+            ControlLiteral::Bool(value) => value.span,
+            ControlLiteral::Null(span) => *span,
+        }
+    }
+
+    pub fn to_expr(&self) -> Expr {
+        match self {
+            ControlLiteral::Quoted(value) => Expr::Quoted(value.clone()),
+            ControlLiteral::Number(value) => Expr::Number(value.clone()),
+            ControlLiteral::Bool(value) => Expr::Bool(value.clone()),
+            ControlLiteral::Null(span) => Expr::Null(*span),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -723,14 +848,193 @@ impl<'a> Parser<'a> {
         };
         let name = self.expect_context_name(kind)?;
         self.expect_equal();
-        let default = self.parse_expr(0)?;
+        let (default, control) = if self.at_control_initializer_start() {
+            let control = self.parse_control_initializer()?;
+            (control_default_expr(&control), Some(control))
+        } else {
+            (self.parse_expr(0)?, None)
+        };
         let span = keyword.span.join(default.span());
         Some(ContextDecl {
             kind,
             name,
             default,
+            control,
             span,
         })
+    }
+
+    fn parse_control_initializer(&mut self) -> Option<ControlInitializer> {
+        let name = self.expect_identifier("control initializer")?;
+        let kind = ControlKind::from_name(&name.value)?;
+        Some(self.parse_control_initializer_after_name(kind, name))
+    }
+
+    fn parse_control_initializer_after_name(
+        &mut self,
+        kind: ControlKind,
+        name: Spanned<String>,
+    ) -> ControlInitializer {
+        self.expect_lparen();
+        let mut args = Vec::new();
+        if !self.at_rparen() {
+            loop {
+                let arg_name = match self.expect_identifier("control argument name") {
+                    Some(name) => name,
+                    None => {
+                        self.recover_to_control_arg_boundary();
+                        if self.consume_comma() {
+                            continue;
+                        }
+                        break;
+                    }
+                };
+                if !self.consume_colon() {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E2007,
+                        "control arguments require `:`",
+                        self.current().span,
+                    ));
+                }
+                let value = self.parse_control_value();
+                let span = arg_name.span.join(value.span());
+                args.push(ControlArg {
+                    name: arg_name,
+                    value,
+                    span,
+                });
+                if self.consume_comma() {
+                    if self.at_rparen() {
+                        break;
+                    }
+                    continue;
+                }
+                if !self.at_rparen() {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E2007,
+                        "expected `,` between control arguments",
+                        self.current().span,
+                    ));
+                    self.recover_to_control_arg_boundary();
+                    if self.consume_comma() {
+                        continue;
+                    }
+                }
+                break;
+            }
+        }
+        let close = self.expect_rparen();
+        let end = close.map_or_else(|| self.previous_span().end, |token| token.span.end);
+        let start = name.span.start;
+        ControlInitializer {
+            kind,
+            name,
+            args,
+            span: Span::new(start, end),
+        }
+    }
+
+    fn parse_control_value(&mut self) -> ControlValue {
+        if self.consume_lbracket() {
+            let start = self.previous_span().start;
+            let mut values = Vec::new();
+            if !self.at_rbracket() {
+                loop {
+                    values.push(self.parse_control_literal());
+                    if self.consume_comma() {
+                        if self.at_rbracket() {
+                            break;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+            }
+            let close = self.expect_rbracket();
+            let end = close.map_or_else(|| self.previous_span().end, |token| token.span.end);
+            return ControlValue::Array {
+                values,
+                span: Span::new(start, end),
+            };
+        }
+
+        if self.at_ident_followed_by_dot() {
+            let binding = self
+                .expect_identifier("choice source binding")
+                .unwrap_or_else(|| Spanned::new(String::new(), self.current().span));
+            self.expect_dot();
+            let column = self
+                .expect_identifier("choice source column")
+                .unwrap_or_else(|| Spanned::new(String::new(), self.current().span));
+            let span = binding.span.join(column.span);
+            return ControlValue::BindingColumn {
+                binding,
+                column,
+                span,
+            };
+        }
+
+        ControlValue::Literal(self.parse_control_literal())
+    }
+
+    fn parse_control_literal(&mut self) -> ControlLiteral {
+        let token = self.advance().clone();
+        match token.kind {
+            TokenKind::String(value) => ControlLiteral::Quoted(Spanned::new(value, token.span)),
+            TokenKind::Number(raw) => match raw.parse::<f64>() {
+                Ok(value) => ControlLiteral::Number(Spanned::new(value, token.span)),
+                Err(_) => {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E1206,
+                        "invalid number literal",
+                        token.span,
+                    ));
+                    ControlLiteral::Null(token.span)
+                }
+            },
+            TokenKind::Minus => {
+                let number = self.advance().clone();
+                match number.kind {
+                    TokenKind::Number(raw) => match raw.parse::<f64>() {
+                        Ok(value) => ControlLiteral::Number(Spanned::new(
+                            -value,
+                            token.span.join(number.span),
+                        )),
+                        Err(_) => {
+                            self.diagnostics.push(Diagnostic::error(
+                                codes::E1206,
+                                "invalid number literal",
+                                number.span,
+                            ));
+                            ControlLiteral::Null(token.span.join(number.span))
+                        }
+                    },
+                    _ => {
+                        self.diagnostics.push(Diagnostic::error(
+                            codes::E2007,
+                            "expected number after `-` in control literal",
+                            number.span,
+                        ));
+                        ControlLiteral::Null(token.span.join(number.span))
+                    }
+                }
+            }
+            TokenKind::Ident(value) if value == "true" => {
+                ControlLiteral::Bool(Spanned::new(true, token.span))
+            }
+            TokenKind::Ident(value) if value == "false" => {
+                ControlLiteral::Bool(Spanned::new(false, token.span))
+            }
+            TokenKind::Ident(value) if value == "null" => ControlLiteral::Null(token.span),
+            _ => {
+                self.diagnostics.push(Diagnostic::error(
+                    codes::E2007,
+                    "expected control literal",
+                    token.span,
+                ));
+                ControlLiteral::Null(token.span)
+            }
+        }
     }
 
     fn parse_binding(&mut self) -> Option<Binding> {
@@ -1900,7 +2204,17 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(value) => {
                 let name = Spanned::new(value, token.span);
-                if self.consume_lparen() {
+                if let Some(kind) = ControlKind::from_name(&name.value)
+                    .filter(|_| self.current().kind == TokenKind::LParen)
+                {
+                    let control = self.parse_control_initializer_after_name(kind, name);
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E2006,
+                        "control initializers are valid only as top-level `param` defaults",
+                        control.span,
+                    ));
+                    Some(Expr::Null(control.span))
+                } else if self.consume_lparen() {
                     let mut args = Vec::new();
                     if !self.at_rparen() {
                         loop {
@@ -2185,6 +2499,25 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn expect_rbracket(&mut self) -> Option<Token> {
+        let token = self.advance().clone();
+        if token.kind == TokenKind::RBracket {
+            Some(token)
+        } else {
+            self.diagnostics
+                .push(Diagnostic::error(codes::E0001, "expected `]`", token.span));
+            None
+        }
+    }
+
+    fn expect_dot(&mut self) {
+        let token = self.advance().clone();
+        if token.kind != TokenKind::Dot {
+            self.diagnostics
+                .push(Diagnostic::error(codes::E0001, "expected `.`", token.span));
+        }
+    }
+
     fn consume_ident_value(&mut self) -> Option<Spanned<String>> {
         let token = self.current().clone();
         if let TokenKind::Ident(value) = token.kind {
@@ -2206,6 +2539,24 @@ impl<'a> Parser<'a> {
 
     fn consume_lparen(&mut self) -> bool {
         if self.current().kind == TokenKind::LParen {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_lbracket(&mut self) -> bool {
+        if self.current().kind == TokenKind::LBracket {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_colon(&mut self) -> bool {
+        if self.current().kind == TokenKind::Colon {
             self.pos += 1;
             true
         } else {
@@ -2250,6 +2601,26 @@ impl<'a> Parser<'a> {
 
     fn at_rparen(&self) -> bool {
         self.current().kind == TokenKind::RParen
+    }
+
+    fn at_rbracket(&self) -> bool {
+        self.current().kind == TokenKind::RBracket
+    }
+
+    fn at_control_initializer_start(&self) -> bool {
+        matches!(&self.current().kind, TokenKind::Ident(value) if ControlKind::from_name(value).is_some())
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| token.kind == TokenKind::LParen)
+    }
+
+    fn at_ident_followed_by_dot(&self) -> bool {
+        matches!(self.current().kind, TokenKind::Ident(_))
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| token.kind == TokenKind::Dot)
     }
 
     fn at_ident_followed_by_column_name(&self) -> bool {
@@ -2338,6 +2709,15 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn recover_to_control_arg_boundary(&mut self) {
+        while !matches!(
+            self.current().kind,
+            TokenKind::Comma | TokenKind::RParen | TokenKind::Eof
+        ) {
+            self.pos += 1;
+        }
+    }
+
     fn current_is_on_same_line_after(&self, span: Span) -> bool {
         self.current_is_on_same_line_after_end(span.end)
     }
@@ -2367,6 +2747,18 @@ fn sink_span(sink: &SinkRef) -> Span {
         SinkRef::Path(value) => value.span,
         SinkRef::Stdout(span) => *span,
     }
+}
+
+fn control_default_expr(control: &ControlInitializer) -> Expr {
+    control
+        .args
+        .iter()
+        .find(|arg| arg.name.value == "default")
+        .and_then(|arg| match &arg.value {
+            ControlValue::Literal(value) => Some(value.to_expr()),
+            _ => None,
+        })
+        .unwrap_or(Expr::Null(control.span))
 }
 
 fn is_recoverable_stage_name(value: &str) -> bool {
@@ -2926,6 +3318,59 @@ load "trips.csv"
         assert_eq!(
             decode_context_column_ref(&columns[0].value),
             Some((ContextKind::Param, "metric_column"))
+        );
+    }
+
+    #[test]
+    fn parses_param_control_initializers() {
+        let source = r#"param min_commits = input_range(label: "Min Commits", min: 0, max: 500, default: 50, step: 10)
+param active_author = input_select(label: "Author", choices: ["all", "Jane"], choicesFrom: author_totals.author_name, default: "all")
+
+let author_totals =
+  load "authors.csv"
+    | select author_name
+
+author_totals
+  | filter author_name == $active_author"#;
+        let result = parse(source);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(result.program.contexts.len(), 2);
+        let control = result.program.contexts[0]
+            .control
+            .as_ref()
+            .expect("range control");
+        assert_eq!(control.kind, ControlKind::Range);
+        assert_eq!(control.args.len(), 5);
+        assert!(matches!(
+            result.program.contexts[0].default,
+            Expr::Number(Spanned { value: 50.0, .. })
+        ));
+        let select = result.program.contexts[1]
+            .control
+            .as_ref()
+            .expect("select control");
+        assert!(select.args.iter().any(|arg| matches!(
+            &arg.value,
+            ControlValue::BindingColumn { binding, column, .. }
+                if binding.value == "author_totals" && column.value == "author_name"
+        )));
+    }
+
+    #[test]
+    fn rejects_control_initializers_in_row_expressions() {
+        let result = parse(
+            r#"load "authors.csv"
+  | filter input_text(label: "Search", default: "") == author_name"#,
+        );
+
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == codes::E2006),
+            "{:?}",
+            result.diagnostics
         );
     }
 

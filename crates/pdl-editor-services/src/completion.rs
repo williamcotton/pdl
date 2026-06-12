@@ -20,6 +20,7 @@ pub(crate) struct CompletionContext {
     pub(crate) in_join_kind_name_context: bool,
     pub(crate) in_agg_function_context: bool,
     pub(crate) in_scalar_function_context: bool,
+    pub(crate) in_control_initializer_context: bool,
     pub(crate) in_mutate_context: bool,
     pub(crate) in_window_frame_name_context: bool,
     pub(crate) in_sort_direction_context: bool,
@@ -82,6 +83,11 @@ impl CompletionContext {
             matches!(stage.as_deref(), Some("filter" | "mutate" | "complete"))
                 && !inside_string
                 && word.chars().all(is_ident_char);
+        let in_control_initializer_context = !inside_string
+            && lower_prefix.trim_start().starts_with("param ")
+            && lower_prefix
+                .split_once('=')
+                .is_some_and(|(_, suffix)| suffix.trim().chars().all(is_ident_char));
         let current_sort_item = after_keyword
             .map(|suffix| suffix.rsplit(',').next().unwrap_or("").trim_start())
             .unwrap_or("");
@@ -121,6 +127,7 @@ impl CompletionContext {
             in_join_kind_name_context,
             in_agg_function_context,
             in_scalar_function_context,
+            in_control_initializer_context,
             in_mutate_context,
             in_window_frame_name_context,
             in_sort_direction_context,
@@ -243,6 +250,38 @@ pub(crate) fn window_frame_name_completions() -> Vec<EditorCompletion> {
         .map(|(name, detail)| keyword_completion(name, detail))
         .collect()
 }
+
+pub(crate) fn control_initializer_completions() -> Vec<EditorCompletion> {
+    CONTROL_INITIALIZER_COMPLETIONS
+        .iter()
+        .map(|(name, detail)| EditorCompletion {
+            label: (*name).to_string(),
+            insert_text: (*name).to_string(),
+            detail: (*detail).to_string(),
+            kind: CompletionKind::Function,
+        })
+        .collect()
+}
+
+pub(crate) const CONTROL_INITIALIZER_COMPLETIONS: [(&str, &str); 11] = [
+    ("input_text", "String parameter rendered as a text input"),
+    ("input_textarea", "String parameter rendered as a textarea"),
+    (
+        "input_number",
+        "Number parameter rendered as a numeric input",
+    ),
+    ("input_range", "Number parameter rendered as a range input"),
+    ("input_checkbox", "Boolean parameter rendered as a checkbox"),
+    ("input_select", "Scalar parameter rendered as a select menu"),
+    ("input_radio", "Scalar parameter rendered as a radio group"),
+    ("input_date", "String parameter rendered as a date input"),
+    ("input_time", "String parameter rendered as a time input"),
+    (
+        "input_datetime",
+        "String parameter rendered as a datetime-local input",
+    ),
+    ("input_color", "String parameter rendered as a color input"),
+];
 
 fn preceding_word(source: &str, word_start: usize) -> Option<&str> {
     let trimmed = source[..word_start].trim_end();

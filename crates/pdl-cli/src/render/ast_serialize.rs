@@ -3,9 +3,10 @@
 
 use pdl_core::Span;
 use pdl_syntax::{
-    AggItem, BinaryOp, Binding, CompleteFillItem, ContextDecl, ContextKind, Expr, JoinOn,
-    MutateItem, OutputDecl, Pipeline, PipelineStart, Program, SaveStage, SinkRef, SortDirection,
-    SourceRef, Stage, UnaryOp, UnionOptionKind, WindowFrame, WindowSpec,
+    AggItem, BinaryOp, Binding, CompleteFillItem, ContextDecl, ContextKind, ControlArg,
+    ControlInitializer, ControlLiteral, ControlValue, Expr, JoinOn, MutateItem, OutputDecl,
+    Pipeline, PipelineStart, Program, SaveStage, SinkRef, SortDirection, SourceRef, Stage, UnaryOp,
+    UnionOptionKind, WindowFrame, WindowSpec,
 };
 use serde::Serialize;
 
@@ -25,7 +26,50 @@ pub(crate) struct ContextDeclJson {
     pub(crate) context_kind: &'static str,
     pub(crate) name: SpannedJson<String>,
     pub(crate) default: ExprJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) control: Option<ControlInitializerJson>,
     pub(crate) span: Span,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ControlInitializerJson {
+    pub(crate) kind: &'static str,
+    pub(crate) name: SpannedJson<String>,
+    pub(crate) args: Vec<ControlArgJson>,
+    pub(crate) span: Span,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ControlArgJson {
+    pub(crate) name: SpannedJson<String>,
+    pub(crate) value: ControlValueJson,
+    pub(crate) span: Span,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ControlValueJson {
+    Literal {
+        value: ControlLiteralJson,
+    },
+    Array {
+        values: Vec<ControlLiteralJson>,
+        span: Span,
+    },
+    BindingColumn {
+        binding: SpannedJson<String>,
+        column: SpannedJson<String>,
+        span: Span,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ControlLiteralJson {
+    Quoted { value: SpannedJson<String> },
+    Number { value: SpannedJson<f64> },
+    Bool { value: SpannedJson<bool> },
+    Null { span: Span },
 }
 
 #[derive(Serialize)]
@@ -306,7 +350,61 @@ fn context_decl_json(context: &ContextDecl) -> ContextDeclJson {
         context_kind: context_kind_text(context.kind),
         name: spanned_json(&context.name),
         default: expr_json(&context.default),
+        control: context.control.as_ref().map(control_initializer_json),
         span: context.span,
+    }
+}
+
+fn control_initializer_json(control: &ControlInitializer) -> ControlInitializerJson {
+    ControlInitializerJson {
+        kind: control.kind.as_str(),
+        name: spanned_json(&control.name),
+        args: control.args.iter().map(control_arg_json).collect(),
+        span: control.span,
+    }
+}
+
+fn control_arg_json(arg: &ControlArg) -> ControlArgJson {
+    ControlArgJson {
+        name: spanned_json(&arg.name),
+        value: control_value_json(&arg.value),
+        span: arg.span,
+    }
+}
+
+fn control_value_json(value: &ControlValue) -> ControlValueJson {
+    match value {
+        ControlValue::Literal(value) => ControlValueJson::Literal {
+            value: control_literal_json(value),
+        },
+        ControlValue::Array { values, span } => ControlValueJson::Array {
+            values: values.iter().map(control_literal_json).collect(),
+            span: *span,
+        },
+        ControlValue::BindingColumn {
+            binding,
+            column,
+            span,
+        } => ControlValueJson::BindingColumn {
+            binding: spanned_json(binding),
+            column: spanned_json(column),
+            span: *span,
+        },
+    }
+}
+
+fn control_literal_json(value: &ControlLiteral) -> ControlLiteralJson {
+    match value {
+        ControlLiteral::Quoted(value) => ControlLiteralJson::Quoted {
+            value: spanned_json(value),
+        },
+        ControlLiteral::Number(value) => ControlLiteralJson::Number {
+            value: spanned_json(value),
+        },
+        ControlLiteral::Bool(value) => ControlLiteralJson::Bool {
+            value: spanned_json(value),
+        },
+        ControlLiteral::Null(span) => ControlLiteralJson::Null { span: *span },
     }
 }
 

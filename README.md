@@ -215,6 +215,8 @@ pdl fmt --check examples/top_regions.pdl
 pdl schema examples/top_regions.pdl
 pdl plan examples/top_regions.pdl --stdout-format csv
 pdl manifest examples/stdout_arrow_stream.pdl --stdout-format arrow-stream
+pdl controls examples/reactive_controls_dashboard.pdl --json
+pdl serve examples/reactive_controls_dashboard.pdl
 ```
 
 From a checkout, build the native binary:
@@ -229,6 +231,14 @@ let a browser host override them through the runtime context map:
 
 ```bash
 target/debug/pdl run examples/reactive_trip_dashboard.pdl
+```
+
+The v0.52 controls example exposes renderable parameter metadata and can be
+served locally without a custom Studio page:
+
+```bash
+target/debug/pdl controls examples/reactive_controls_dashboard.pdl --json
+target/debug/pdl serve examples/reactive_controls_dashboard.pdl
 ```
 
 The v0.48 pipeline-shape examples exercise native binding starts, named

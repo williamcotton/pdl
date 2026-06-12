@@ -24,7 +24,7 @@ use pdl_semantics::{
     decode_context_column_ref_ir, AggItemIr, CompleteFillItemIr, ContextKindIr, ExprIr, JoinKindIr,
     MutateItemIr, NullsOrderIr, PipelineIr, PipelineStartIr, SortDirectionIr, StageIr,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::output::{emit_stdout, write_output};
 use crate::planning::{plan_prepared, PlannedEngine, PlanningOptions};
@@ -305,6 +305,77 @@ pub fn run_prepared_with_io_and_context_and_engine(
     }
 }
 
+pub fn resolve_context_values(
+    ir: &pdl_semantics::ProgramIr,
+    overrides: BTreeMap<String, Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> BTreeMap<String, Value> {
+    build_context_values(ir, overrides, diagnostics)
+}
+
+pub fn collect_binding_column_choices(
+    prepared: &PreparedProgram,
+    binding: &str,
+    column: &str,
+    context: BTreeMap<String, Value>,
+    io: &dyn DriverIo,
+) -> Result<Vec<Value>, Vec<Diagnostic>> {
+    let Some(ir) = prepared.analysis.ir.as_ref() else {
+        let mut diagnostics = prepared.diagnostics();
+        diagnostics.push(Diagnostic::error(
+            codes::E1505,
+            "semantic IR is unavailable for dynamic choice extraction",
+            Span::zero(),
+        ));
+        return Err(diagnostics);
+    };
+    let mut diagnostics = prepared.diagnostics();
+    let context = build_context_values(ir, context, &mut diagnostics);
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == pdl_core::Severity::Error)
+    {
+        return Err(diagnostics);
+    }
+    let mut runtime = Runtime {
+        prepared,
+        diagnostics,
+        cache: BTreeMap::new(),
+        active_bindings: Vec::new(),
+        context,
+        dry_run: true,
+        stdout: None,
+        io,
+    };
+    let table = match runtime.execute_binding(binding, Span::zero()) {
+        Ok(table) => table,
+        Err(diagnostic) => {
+            runtime.diagnostics.push(diagnostic);
+            return Err(runtime.diagnostics);
+        }
+    };
+    let Some(index) = table.column_index(column) else {
+        runtime.diagnostics.push(Diagnostic::error(
+            codes::E2012,
+            format!("unknown column `{column}` in choicesFrom source `{binding}`"),
+            Span::zero(),
+        ));
+        return Err(runtime.diagnostics);
+    };
+    let mut seen = BTreeSet::new();
+    let mut values = Vec::new();
+    for row in table.rows {
+        let value = row.values.get(index).cloned().unwrap_or(Value::Null);
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        if seen.insert(stable_choice_key(&value)) {
+            values.push(value);
+        }
+    }
+    Ok(values)
+}
+
 fn build_context_values(
     ir: &pdl_semantics::ProgramIr,
     mut overrides: BTreeMap<String, Value>,
@@ -342,6 +413,15 @@ fn build_context_values(
         ));
     }
     values
+}
+
+fn stable_choice_key(value: &Value) -> String {
+    match value {
+        Value::Null => "null:".to_string(),
+        Value::Bool(value) => format!("bool:{value}"),
+        Value::Number(value) => format!("number:{value:?}"),
+        Value::String(value) => format!("string:{value}"),
+    }
 }
 
 fn literal_ir_value(expr: &ExprIr) -> Option<Value> {

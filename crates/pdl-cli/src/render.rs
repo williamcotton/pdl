@@ -22,12 +22,14 @@ use pdl_syntax::Program;
 use serde::Serialize;
 
 mod ast_serialize;
+mod controls_render;
 mod ir_serialize;
 mod plan_render;
 mod schema_render;
 mod span_json;
 
 use ast_serialize::{program_json, ProgramJson};
+pub use controls_render::controls_json;
 use ir_serialize::{program_ir_json, ProgramIrJson};
 use plan_render::{
     driver_plan_json, execution_plan_json, execution_step_text, pipeline_label_text, sink_text,

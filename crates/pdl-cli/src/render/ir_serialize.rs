@@ -3,9 +3,9 @@
 
 use pdl_core::Span;
 use pdl_semantics::{
-    BinaryOpIr, CompleteFillItemIr, ContextDeclIr, ContextKindIr, ExprIr, FrameBoundIr, JoinKindIr,
-    PipelineStartIr, ProgramIr, SinkIr, SortDirectionIr, StageIr, UnaryOpIr, WindowFrameIr,
-    WindowSpecIr,
+    BinaryOpIr, CompleteFillItemIr, ContextDeclIr, ContextKindIr, ControlInitializerIr, ExprIr,
+    FrameBoundIr, JoinKindIr, PipelineStartIr, ProgramIr, SinkIr, SortDirectionIr, StageIr,
+    UnaryOpIr, WindowFrameIr, WindowSpecIr,
 };
 use serde::Serialize;
 
@@ -24,6 +24,14 @@ pub(crate) struct ContextDeclIrJson {
     pub(crate) name: String,
     pub(crate) span: Span,
     pub(crate) default: ExprIrJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) control: Option<ControlInitializerIrJson>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ControlInitializerIrJson {
+    pub(crate) kind: &'static str,
+    pub(crate) span: Span,
 }
 
 #[derive(Serialize)]
@@ -316,6 +324,14 @@ fn context_decl_ir_json(context: &ContextDeclIr) -> ContextDeclIrJson {
         name: context.name.clone(),
         span: context.span,
         default: expr_ir_json(&context.default),
+        control: context.control.as_ref().map(control_initializer_ir_json),
+    }
+}
+
+fn control_initializer_ir_json(control: &ControlInitializerIr) -> ControlInitializerIrJson {
+    ControlInitializerIrJson {
+        kind: control.kind.as_str(),
+        span: control.span,
     }
 }
 

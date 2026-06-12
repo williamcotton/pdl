@@ -396,6 +396,112 @@ fn schema_binding_json_inspects_lazy_binding() {
 }
 
 #[test]
+fn controls_json_reports_static_and_dynamic_control_metadata() {
+    let data_path = temp_path("controls-data", "csv");
+    let program_path = temp_path("controls-program", "pdl");
+    std::fs::write(
+        &data_path,
+        "id,region,amount\n1,West,120\n2,North,80\n3,West,20\n",
+    )
+    .expect("write controls data");
+    std::fs::write(
+        &program_path,
+        format!(
+            r#"param min_amount = input_range(label: "Min Amount", min: 0, max: 200, default: 50, step: 10)
+param active_region = input_select(label: "Region", choices: ["all"], choicesFrom: regions.region, default: "all")
+param include_low = input_checkbox(label: "Include Low", default: false)
+
+let regions =
+  load "{}"
+    | select region
+    | distinct region
+
+load "{}"
+  | filter amount >= $min_amount
+"#,
+            data_path.display(),
+            data_path.display()
+        ),
+    )
+    .expect("write controls program");
+
+    let output = command_output_owned(&[
+        "controls",
+        program_path.to_str().expect("utf-8 path"),
+        "--json",
+        "--context",
+        "min_amount=100",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("controls stdout is JSON");
+    assert_eq!(value["controls"][0]["kind"], "input_range");
+    assert_eq!(value["controls"][0]["current_value"], 100.0);
+    assert_eq!(value["controls"][1]["choices"][0]["value"], "all");
+    assert_eq!(
+        value["controls"][1]["dynamic_choices"]["choices"],
+        serde_json::json!(["West", "North"])
+    );
+    assert_eq!(
+        value["controls"][1]["dynamic_choices"]["current_value_present"],
+        false
+    );
+    assert_eq!(value["controls"][2]["default"], false);
+
+    let _ = std::fs::remove_file(data_path);
+    let _ = std::fs::remove_file(program_path);
+}
+
+#[test]
+fn run_context_overrides_control_defaults() {
+    let data_path = temp_path("context-run-data", "csv");
+    let program_path = temp_path("context-run-program", "pdl");
+    std::fs::write(&data_path, "id,amount\n1,10\n2,25\n3,40\n").expect("write run data");
+    std::fs::write(
+        &program_path,
+        format!(
+            r#"param min_amount = input_number(label: "Min Amount", default: 0)
+
+load "{}"
+  | filter amount >= $min_amount
+  | select id, amount
+"#,
+            data_path.display()
+        ),
+    )
+    .expect("write run program");
+
+    let output = command_output_owned(&[
+        "run",
+        program_path.to_str().expect("utf-8 path"),
+        "--stdout-format",
+        "csv",
+        "--context",
+        "min_amount=25",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout is UTF-8"),
+        "id,amount\n2,25\n3,40\n"
+    );
+    assert!(output.stderr.is_empty());
+
+    let _ = std::fs::remove_file(data_path);
+    let _ = std::fs::remove_file(program_path);
+}
+
+#[test]
 fn plan_command_prints_dry_run_execution_plan() {
     let output = command_output(&["plan", "examples/top_regions.pdl", "--stdout-format", "csv"]);
 
@@ -503,7 +609,7 @@ fn ast_ir_and_manifest_commands_emit_json() {
         String::from_utf8_lossy(&manifest.stderr)
     );
     let manifest_stdout = String::from_utf8(manifest.stdout).expect("manifest stdout is UTF-8");
-    assert!(manifest_stdout.contains("\"manifest_version\": \"0.50.0\""));
+    assert!(manifest_stdout.contains("\"manifest_version\": \"0.52.0\""));
     assert!(manifest_stdout.contains("\"observability\""));
     assert!(manifest_stdout.contains("\"stream_interop\""));
     assert!(manifest_stdout.contains("\"arrow-stream\""));

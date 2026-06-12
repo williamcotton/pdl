@@ -7,6 +7,7 @@ use pdl_syntax::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use crate::controls::{analyze_control_decl, ControlMetadata};
 use crate::ir::{lower_program, ProgramIr};
 use crate::registry::{
     accepts_arity, aggregate_function, format_info, scalar_function, window_function,
@@ -19,6 +20,7 @@ pub struct Analysis {
     pub ir: Option<ProgramIr>,
     pub traces: Vec<StageTrace>,
     pub outputs: Vec<PipelineSchema>,
+    pub controls: Vec<ControlMetadata>,
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +41,7 @@ where
         binding_schemas: BTreeMap::new(),
         traces: Vec::new(),
         outputs: Vec::new(),
+        controls: Vec::new(),
         next_stage_id: 0,
     };
     analyzer.analyze(program);
@@ -51,6 +54,7 @@ where
         ir: (!has_error).then(|| lower_program(program)),
         traces: analyzer.traces,
         outputs: analyzer.outputs,
+        controls: analyzer.controls,
     }
 }
 
@@ -65,6 +69,7 @@ where
     binding_schemas: BTreeMap<String, Vec<String>>,
     traces: Vec<StageTrace>,
     outputs: Vec<PipelineSchema>,
+    controls: Vec<ControlMetadata>,
     next_stage_id: usize,
 }
 
@@ -80,13 +85,13 @@ where
     F: FnMut(LoadRequest<'_>) -> Result<Vec<String>, Diagnostic>,
 {
     fn analyze(&mut self, program: &Program) {
-        self.analyze_context_decls(program);
-        self.check_top_level_names(program);
         for binding in &program.bindings {
             self.binding_decls
                 .entry(binding.name.value.clone())
                 .or_insert_with(|| binding.clone());
         }
+        self.analyze_context_decls(program);
+        self.check_top_level_names(program);
         if !program.outputs.is_empty() && program.main.is_some() {
             let span = program
                 .main
@@ -119,6 +124,7 @@ where
     }
 
     fn analyze_context_decls(&mut self, program: &Program) {
+        let mut pending_controls = Vec::new();
         for context in &program.contexts {
             if let Some(existing) = self.context_decls.get(&context.name.value) {
                 self.diagnostics.push(
@@ -130,6 +136,21 @@ where
                     .with_related(existing.span, "first declaration is here"),
                 );
             }
+            let control = if context.control.is_some() {
+                if context.kind != ContextKind::Param {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::E2006,
+                        "control initializers are valid only as top-level `param` defaults",
+                        context
+                            .control
+                            .as_ref()
+                            .map_or(context.span, |control| control.span),
+                    ));
+                }
+                analyze_control_decl(context, &mut self.diagnostics)
+            } else {
+                None
+            };
             let default = match literal_default_value(&context.default) {
                 Some(value) => value,
                 None => {
@@ -152,6 +173,33 @@ where
                     default,
                     span: context.name.span,
                 });
+            if let Some(control) = control {
+                pending_controls.push(control);
+            }
+        }
+        for control in &pending_controls {
+            self.validate_dynamic_choice_source(control);
+        }
+        self.controls = pending_controls;
+    }
+
+    fn validate_dynamic_choice_source(&mut self, control: &ControlMetadata) {
+        let Some(source) = &control.choices_from else {
+            return;
+        };
+        let Some(schema) = self.analyze_binding(&source.binding, source.span, &mut Vec::new())
+        else {
+            return;
+        };
+        if !schema.iter().any(|column| column == &source.column) {
+            self.diagnostics.push(Diagnostic::error(
+                codes::E2012,
+                format!(
+                    "unknown column `{}` in choicesFrom source `{}`",
+                    source.column, source.binding
+                ),
+                source.span,
+            ));
         }
     }
 
@@ -1396,6 +1444,85 @@ load "orders.csv"
         assert!(analysis.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "E2004"
                 && diagnostic.message == "parameter `output_name` cannot be used as a mutate target"
+        }));
+        assert!(analysis.ir.is_none());
+    }
+
+    #[test]
+    fn control_metadata_is_validated_and_exposed() {
+        let parse = pdl_syntax::parse(
+            r#"param min_amount = input_range(label: "Min Amount", min: 0, max: 100, default: 25, step: 5)
+param active_region = input_select(label: "Region", choices: ["all"], choicesFrom: regions.region, default: "all")
+
+let regions =
+  load "sales.csv"
+    | select region
+
+load "sales.csv"
+  | filter amount >= $min_amount"#,
+        );
+
+        let analysis = analyze_program(&parse.program, |_| {
+            Ok(vec!["region".to_string(), "amount".to_string()])
+        });
+
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
+        assert!(analysis.ir.is_some());
+        assert_eq!(analysis.controls.len(), 2);
+        assert_eq!(analysis.controls[0].name, "min_amount");
+        assert_eq!(analysis.controls[0].label, "Min Amount");
+        assert_eq!(
+            analysis.controls[1]
+                .choices_from
+                .as_ref()
+                .map(|source| (source.binding.as_str(), source.column.as_str())),
+            Some(("regions", "region"))
+        );
+    }
+
+    #[test]
+    fn invalid_control_metadata_blocks_ir() {
+        let parse = pdl_syntax::parse(
+            r#"param min_amount = input_range(label: "Min Amount", min: 100, max: 10, default: 25, step: 0)
+param active_region = input_select(label: "Region", choices: [], default: "all")
+
+load "sales.csv"
+  | filter amount >= $min_amount"#,
+        );
+
+        let analysis = analyze_program(&parse.program, |_| {
+            Ok(vec!["region".to_string(), "amount".to_string()])
+        });
+
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E2011" && diagnostic.message.contains("less than or equal")
+        }));
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E2011" && diagnostic.message.contains("must not be empty")
+        }));
+        assert!(analysis.ir.is_none());
+    }
+
+    #[test]
+    fn choices_from_checks_later_binding_schema() {
+        let parse = pdl_syntax::parse(
+            r#"param active_region = input_select(label: "Region", choicesFrom: regions.missing, default: "all")
+
+let regions =
+  load "sales.csv"
+    | select region
+
+regions"#,
+        );
+
+        let analysis = analyze_program(&parse.program, |_| Ok(vec!["region".to_string()]));
+
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E2012" && diagnostic.message.contains("unknown column `missing`")
         }));
         assert!(analysis.ir.is_none());
     }

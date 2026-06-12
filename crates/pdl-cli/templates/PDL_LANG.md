@@ -362,7 +362,12 @@ This is the current surface shape in compact form:
 
 ```ebnf
 Program          ::= ContextDecl* TopLevelItem*
-ContextDecl      ::= ("param" | "state") Ident "=" Literal
+ContextDecl      ::= ("param" | "state") Ident "=" (Literal | ControlInitializer)
+ControlInitializer ::= ControlName "(" ControlArg ("," ControlArg)* ")"
+ControlArg       ::= Ident ":" (Literal | "[" Literal ("," Literal)* "]" | Ident "." Ident)
+ControlName      ::= "input_text" | "input_textarea" | "input_number" | "input_range"
+                   | "input_checkbox" | "input_select" | "input_radio"
+                   | "input_date" | "input_time" | "input_datetime" | "input_color"
 TopLevelItem     ::= BindingDecl | OutputDecl | Pipeline
 BindingDecl      ::= "let" Ident "=" Pipeline
 OutputDecl       ::= "output" Ident "=" Pipeline
@@ -599,6 +604,20 @@ load "sales.csv"
 number, boolean, or null literals. Use `col($name)` when a string context value
 should be interpreted as a column name.
 
+Top-level `param` declarations may use standard control initializers. These
+forms are valid only as `param` defaults; do not use them in row expressions.
+
+```pdl
+param title_filter = input_text(label: "Title Filter", default: "")
+param min_amount = input_range(label: "Min Amount", min: 0, max: 500, default: 50, step: 10)
+param include_pending = input_checkbox(label: "Include Pending", default: false)
+param active_region = input_select(label: "Region", choices: ["all", "West"], default: "all")
+param active_author = input_select(label: "Author", choicesFrom: authors.author_name, default: "all")
+```
+
+Static `choices` are arrays of primitive literals. `choicesFrom` references a
+binding column and may reference a binding declared later in the file.
+
 ## Formats
 
 Built-in format names:
@@ -640,7 +659,10 @@ pdl check file.pdl
 pdl fmt file.pdl
 pdl fmt file.pdl --check
 pdl run file.pdl --stdout-format csv
+pdl run file.pdl --context name=value
 pdl run file.pdl --stdout-format arrow-stream > out.arrow
+pdl controls file.pdl --json
+pdl serve file.pdl
 pdl schema file.pdl
 pdl schema file.pdl --binding binding_name --json
 pdl plan file.pdl --json

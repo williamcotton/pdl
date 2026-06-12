@@ -1,19 +1,31 @@
 # PDL Detailed Specification
 
-Status: Draft 0.50.0
+Status: Draft 0.52.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.50.0`, tracked in
-`docs/V0_50_PLAN.md`. Version 0.50.0 is the post-parity performance release:
-it preserves the v0.49 native-parity contract while classifying native
-materialization reasons, caching dynamic-offset window partition/order work,
-adding homogeneous native fast paths for avoidable row bridges, tightening
-benchmark data discipline, and reducing row-runtime clone pressure. The
-release adds no new PDL syntax, stages, functions, primitive value classes, or
-diagnostic codes.
+The current repository implementation line is `0.52.0`, tracked in
+`docs/V0_52_PLAN.md`. Version 0.52.0 adds declaration-only parameter control
+initializers, stable control metadata extraction through `pdl controls --json`,
+runtime context overrides on `pdl run`, and a local `pdl serve` controls host.
+The release adds the minimal syntax needed by controls (`:`, `.`,
+declaration-only arrays, and named control arguments) without promoting general
+named-argument function calls or general array expressions.
+
+Version 0.51.0, tracked in `docs/V0_51_PLAN.md`, is an agent ergonomics
+release. It adds the `pdl init` command and a generated `PDL_LANG.md` template
+for downstream projects without changing PDL source syntax, runtime semantics,
+data formats, native coverage, LSP behavior, or browser package pins.
+
+Version 0.50.0, tracked in `docs/V0_50_PLAN.md`, is the post-parity
+performance release: it preserves the v0.49 native-parity contract while
+classifying native materialization reasons, caching dynamic-offset window
+partition/order work, adding homogeneous native fast paths for avoidable row
+bridges, tightening benchmark data discipline, and reducing row-runtime clone
+pressure. The release adds no new PDL syntax, stages, functions, primitive
+value classes, or diagnostic codes.
 
 Version 0.49.0, tracked in `docs/V0_49_PLAN.md`, completes the v0.43-v0.49
 native coverage arc: every shipped language feature is native-eligible on
@@ -1125,6 +1137,56 @@ a scalar value, authors MUST use `col(value)`, for example
 `col($metric_column) > 500`. Since version 0.49.0, the `col(value)` argument
 MAY be any row expression whose per-row value is the source column name to read.
 
+Since version 0.52.0, top-level `param` declarations MAY use declaration-only
+control initializers instead of plain literal defaults:
+
+```pdl
+param min_commits = input_range(label: "Min Commits", min: 0, max: 500, default: 50, step: 10)
+param active_author = input_select(label: "Author", choicesFrom: author_totals.author_name, default: "all")
+param include_bots = input_checkbox(label: "Include Bots", default: false)
+```
+
+Control initializers produce both a normal runtime default for `$name` and
+host-facing metadata. They are valid only on top-level `param` declarations;
+using one in `state`, row expressions, stage options, bindings, or any other
+position MUST produce `E2006`.
+
+The standard control suite is:
+
+| Initializer | Runtime value | Required fields | Optional fields |
+| --- | --- | --- | --- |
+| `input_text` | string | `label`, `default` | `placeholder` |
+| `input_textarea` | string | `label`, `default` | `placeholder`, `rows` |
+| `input_number` | number | `label`, `default` | `min`, `max`, `step` |
+| `input_range` | number | `label`, `min`, `max`, `default` | `step` |
+| `input_checkbox` | boolean | `label`, `default` | none |
+| `input_select` | string, number, or boolean | `label`, `default`, `choices` or `choicesFrom` | none |
+| `input_radio` | string, number, or boolean | `label`, `default`, `choices` or `choicesFrom` | none |
+| `input_date` | string | `label`, `default` | `min`, `max` |
+| `input_time` | string | `label`, `default` | `min`, `max`, `step` |
+| `input_datetime` | string | `label`, `default` | `min`, `max`, `step` |
+| `input_color` | string | `label`, `default` | none |
+
+Required fields missing from a control initializer MUST produce `E2008`.
+Unknown fields MUST produce `E2009`. Duplicate fields MUST produce `E2010`.
+Malformed control syntax MUST produce `E2007`. Wrong field shapes, invalid
+numeric bounds, invalid numeric steps, invalid textarea rows, empty or
+duplicate static choices, defaults outside numeric ranges, invalid temporal
+strings, and invalid color strings MUST produce `E2011`.
+
+Static `choices` arrays are declaration-only arrays of primitive scalar
+literals. Every choice MUST match the default value class, and duplicate choices
+MUST be rejected for deterministic UI rendering. When no `choicesFrom` source
+is present, the `default` MUST be one of the static choices.
+
+`choicesFrom` is a declaration-only binding-column reference written as
+`binding.column`. The binding MAY be declared later in the file. Unknown
+bindings use ordinary binding diagnostics; unknown source columns MUST produce
+`E2012`. Hosts that extract dynamic choices MUST execute the referenced binding,
+omit nulls, preserve first-seen order after binding evaluation, deduplicate
+after coercing to the parameter default class, and report `E2013` if a derived
+choice cannot be coerced to that class.
+
 ### 6.6 String Tokens And Escaped Column References
 
 Double-quoted tokens are string literals in expression context and path literals
@@ -1226,7 +1288,19 @@ Synthetic recovery tokens MUST be marked synthetic and MUST NOT claim source byt
 ### 7.1 Program
 
 ```ebnf
-Program       ::= Trivia* BindingDecl* OutputDecl* PipelineExpr? Trivia* EOF ;
+Program       ::= Trivia* ContextDecl* BindingDecl* OutputDecl* PipelineExpr? Trivia* EOF ;
+ContextDecl   ::= ("param" | "state") Ident "=" ContextDefault ;
+ContextDefault ::= Literal | ControlInitializer ;
+ControlInitializer ::= ControlName "(" ControlArgList? ")" ;
+ControlArgList ::= ControlArg ("," ControlArg)* ","? ;
+ControlArg    ::= Ident ":" ControlValue ;
+ControlValue  ::= Literal
+                | "[" Literal ("," Literal)* ","? "]"
+                | Ident "." Ident ;
+ControlName   ::= "input_text" | "input_textarea" | "input_number"
+                | "input_range" | "input_checkbox" | "input_select"
+                | "input_radio" | "input_date" | "input_time"
+                | "input_datetime" | "input_color" ;
 BindingDecl   ::= "let" Ident "=" PipelineExpr ;
 OutputDecl    ::= "output" Ident "=" PipelineExpr ;
 PipelineExpr  ::= PipelineStart PipelineTail* ;
@@ -1235,8 +1309,9 @@ PipelineTail  ::= "|" Stage ;
 Stage         ::= TransformStage | SaveStage ;
 ```
 
-A file contains zero or more `let` bindings followed by zero or more `output`
-declarations followed by an optional main pipeline expression.
+A file contains zero or more context declarations, then zero or more `let`
+bindings, then zero or more `output` declarations, followed by an optional main
+pipeline expression.
 
 The main pipeline expression is the default run target when no `output`
 declarations are present.
@@ -1255,6 +1330,12 @@ file or stream output boundary.
 If a valid stage starts where a pipeline tail is expected but the `|` token is
 missing, parsers MUST report `E0001` on the stage name and SHOULD recover as if
 the pipe were present.
+
+The `ControlInitializer`, named-argument, array, and `Ident "." Ident` forms in
+this grammar are valid only as declaration-only control syntax. Version 0.52.0
+does not add general named-argument calls, general arrays, or dotted row
+expressions to the ordinary expression language. Control initializers outside
+top-level `param` defaults MUST produce `E2006`.
 
 ### 7.2 Load Stage
 
@@ -2621,7 +2702,8 @@ The CLI SHOULD be a single binary.
 
 The CLI MUST support `run` and `check`.
 
-The CLI SHOULD support `fmt`, `schema`, `plan`, `ast`, `ir`, `manifest`, `init`, `lsp`, and `version`.
+The CLI SHOULD support `fmt`, `schema`, `plan`, `ast`, `ir`, `manifest`,
+`controls`, `serve`, `init`, `lsp`, and `version`.
 
 ### 14.2 pdl run
 
@@ -2636,6 +2718,7 @@ Recommended options:
 - `--output <path>`
 - `--manifest <path>`
 - `--dry-run`
+- `--context <name=value>`
 - `--strict`
 - `--permissive`
 
@@ -2675,6 +2758,13 @@ named output, or non-terminal save fan-out falls back to rows. The violation is
 a CLI-level error on stderr, not a new diagnostic code; plan observability
 reports `requested_engine` `native-strict` with `selected_engine` `native` when
 the strict run succeeds.
+
+Since version 0.52.0, `pdl run` accepts repeatable `--context name=value`
+overrides. Override values are parsed deterministically as JSON-style `null`,
+booleans, numbers, quoted JSON strings, or shell strings. Runtime execution
+MUST type-check overrides against declared `param` and `state` defaults using
+the same context rules as host APIs. Unknown names MUST produce `E2002`; type
+mismatches MUST produce `E2005`.
 
 ### 14.3 pdl check
 
@@ -2816,7 +2906,43 @@ The command MAY accept a positional target directory. If no directory is
 provided, it uses the current directory. At least one of `--codex`, `--claude`,
 or `--agy` is required.
 
-### 14.12 Exit Codes
+### 14.12 pdl controls
+
+`pdl controls file.pdl --json` emits deterministic JSON metadata for
+renderable v0.52 parameter controls. Plain literal `param` and `state`
+declarations are omitted from the renderable `controls` array and included in a
+separate `contexts` array with `renderable: false` or `renderable: true` for
+control-backed params. The command accepts repeatable `--context name=value`
+overrides so hosts can inspect current values and dynamic choices under the
+same context values that drive `pdl run`.
+
+The JSON payload MUST include the source path, context declarations, renderable
+controls, current values, defaults, control-specific fields, static choices,
+dynamic choice source metadata, dynamic choice status when available, source
+spans, and diagnostics. Dynamic choice extraction MUST use the same runtime and
+context coercion rules as `pdl run`. The command MUST exit non-zero when fatal
+parse, analysis, context, or dynamic-choice errors are present, while still
+emitting the JSON diagnostics payload.
+
+### 14.13 pdl serve
+
+`pdl serve file.pdl` starts a local controls host for a PDL file. The default
+bind address MUST be local-only (`127.0.0.1` in the reference implementation).
+The server MUST print the local URL. The reference protocol is:
+
+- `GET /` serves the generic controls app.
+- `GET /api/snapshot` returns the latest controls/run snapshot.
+- `GET /events` streams snapshots using Server-Sent Events.
+- `POST /api/context` updates context values.
+- `POST /api/run` requests a manual rerun.
+
+The served app SHOULD use native browser controls for the standard v0.52
+control suite. The server MUST use normal PDL execution for output writes, so
+`save` artifacts are generated through the same runtime path as `pdl run`.
+Server diagnostics MUST be reported in the browser snapshot without changing
+stdout behavior for normal `pdl run`.
+
+### 14.14 Exit Codes
 
 Exit code `0` means success.
 
@@ -3401,7 +3527,7 @@ The PDL LSP MUST provide diagnostics.
 
 The PDL LSP SHOULD provide completion, hover, formatting, semantic tokens, code actions, go to definition, references, rename, and document symbols.
 
-The current `0.50.0` LSP implementation provides diagnostics,
+The current `0.52.0` LSP implementation provides diagnostics,
 completion, driver-backed hover, formatting, parser-backed semantic tokens,
 document symbols, schema-aware output declarations, and same-document binding
 go-to-definition, references, and rename. Code actions, output selectors, and
@@ -3856,6 +3982,19 @@ versions and consumer pins stay on the latest verified published packages
 (`pdl-wasm@0.47.1` and `pdl-editor@0.47.0`) until a browser package release is
 cut.
 
+Version 0.51.0 is a native Rust/CLI ergonomics release: `pdl init` and the
+generated language guide do not change parser, runtime, editor-service, or
+WASM-visible behavior, so browser package versions and consumer pins stay on
+the latest verified published packages.
+
+Version 0.52.0 changes parser and semantic behavior for native Rust/CLI
+metadata extraction and the local server. The reference implementation exposes
+control metadata through `pdl controls --json` and `pdl serve`; a matching
+WASM/browser ABI for control metadata is explicitly deferred to a later browser
+package release. Browser package versions and consumer pins stay on the latest
+verified published packages unless `pdl-wasm` and `pdl-editor` are explicitly
+prepared and published for the new ABI.
+
 ## 19. Rust Crate Architecture
 
 ### 19.1 Workspace Layout
@@ -3928,7 +4067,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.50.0"
+version = "0.52.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -5343,6 +5482,22 @@ followed by an unexpected integer argument.
 
 `E2005` external context value type mismatch.
 
+`E2006` control initializer used outside a top-level `param` default.
+
+`E2007` malformed control initializer syntax.
+
+`E2008` missing required control argument.
+
+`E2009` unknown control argument.
+
+`E2010` duplicate control argument.
+
+`E2011` invalid control argument value.
+
+`E2012` invalid `choicesFrom` binding-column source.
+
+`E2013` dynamic choice value could not be coerced to the parameter value class.
+
 ### 20.13 Warning Diagnostics
 
 `W2001` active grouping state was not consumed by `agg`.
@@ -5534,7 +5689,7 @@ Regex functions, if added, MUST avoid catastrophic backtracking.
 
 ## 24. Versioning
 
-PDL source does not require an explicit version declaration in draft 0.50.0.
+PDL source does not require an explicit version declaration in draft 0.52.0.
 
 The implementation SHOULD report supported language version.
 

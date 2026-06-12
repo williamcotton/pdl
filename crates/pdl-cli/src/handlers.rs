@@ -1,14 +1,16 @@
 use clap::Parser;
 use pdl_core::has_errors;
+use pdl_data::Value;
 use pdl_driver::{
     prepare_file, prepare_file_for_binding_schema, prepare_file_for_run, prepare_file_with_options,
-    PrepareOptions,
+    OsDriverIo, PrepareOptions,
 };
 use pdl_exec::{
-    plan_prepared, planning::PlanningOptions, run_prepared_with_engine, ExecutionEngine,
-    PlannedEngine, RunOptions,
+    plan_prepared, planning::PlanningOptions, run_prepared_with_engine,
+    run_prepared_with_io_and_context_and_engine, ExecutionEngine, PlannedEngine, RunOptions,
 };
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -29,8 +31,10 @@ pub fn run_cli() -> Result<ExitCode, String> {
             stdin_format,
             stdout_format,
             dry_run,
+            context,
             engine,
         } => {
+            let context = parse_context_overrides(&context)?;
             let prepared = match prepare_file_for_run(&file, stdin_format) {
                 Ok(prepared) => prepared,
                 Err(diagnostic) => {
@@ -38,15 +42,30 @@ pub fn run_cli() -> Result<ExitCode, String> {
                     return Ok(ExitCode::from(1));
                 }
             };
-            let result = run_prepared_with_engine(
-                &prepared,
-                RunOptions {
-                    stdout_format,
-                    dry_run,
-                    allow_binary_stdout: true,
-                },
-                engine.into(),
-            );
+            let io = OsDriverIo;
+            let result = if context.is_empty() {
+                run_prepared_with_engine(
+                    &prepared,
+                    RunOptions {
+                        stdout_format,
+                        dry_run,
+                        allow_binary_stdout: true,
+                    },
+                    engine.into(),
+                )
+            } else {
+                run_prepared_with_io_and_context_and_engine(
+                    &prepared,
+                    RunOptions {
+                        stdout_format,
+                        dry_run,
+                        allow_binary_stdout: true,
+                    },
+                    &io,
+                    context,
+                    engine.into(),
+                )
+            };
             print_diagnostics(
                 &prepared.path.display().to_string(),
                 &prepared.source,
@@ -72,6 +91,33 @@ pub fn run_cli() -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Controls {
+            file,
+            json,
+            context,
+        } => {
+            if !json {
+                eprintln!("`pdl controls` currently requires `--json`");
+                return Ok(ExitCode::from(1));
+            }
+            let context = parse_context_overrides(&context)?;
+            let prepared = match prepare_file(&file) {
+                Ok(prepared) => prepared,
+                Err(diagnostic) => {
+                    eprintln!("{}", diagnostic.message);
+                    return Ok(ExitCode::from(1));
+                }
+            };
+            let output = crate::render::controls_json(&prepared, context);
+            let diagnostics = output.diagnostics().to_vec();
+            print_json(&output)?;
+            if has_errors(&diagnostics) {
+                Ok(ExitCode::from(1))
+            } else {
+                Ok(ExitCode::SUCCESS)
+            }
+        }
+        Command::Serve { file, host, port } => crate::serve::serve(file, host, port),
         Command::Check { file } => {
             let prepared = match prepare_file(&file) {
                 Ok(prepared) => prepared,
@@ -284,13 +330,48 @@ pub fn run_cli() -> Result<ExitCode, String> {
         }
         Command::Version => {
             println!(
-                "pdl {} (language draft 0.50.0, data engine {})",
+                "pdl {} (language draft 0.52.0, data engine {})",
                 env!("CARGO_PKG_VERSION"),
                 pdl_data::native_engine_name()
             );
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn parse_context_overrides(items: &[String]) -> Result<BTreeMap<String, Value>, String> {
+    let mut values = BTreeMap::new();
+    for item in items {
+        let Some((name, raw_value)) = item.split_once('=') else {
+            return Err(format!("context override `{item}` must be `name=value`"));
+        };
+        if name.is_empty() {
+            return Err(format!("context override `{item}` has an empty name"));
+        }
+        values.insert(name.to_string(), parse_context_value(raw_value)?);
+    }
+    Ok(values)
+}
+
+fn parse_context_value(raw: &str) -> Result<Value, String> {
+    if raw == "null" {
+        return Ok(Value::Null);
+    }
+    if raw == "true" {
+        return Ok(Value::Bool(true));
+    }
+    if raw == "false" {
+        return Ok(Value::Bool(false));
+    }
+    if raw.starts_with('"') {
+        return serde_json::from_str::<String>(raw)
+            .map(Value::String)
+            .map_err(|error| format!("invalid quoted context string `{raw}`: {error}"));
+    }
+    if let Ok(number) = raw.parse::<f64>() {
+        return Ok(Value::Number(number));
+    }
+    Ok(Value::String(raw.to_string()))
 }
 
 fn handle_fmt(file: &Path, check: bool) -> Result<ExitCode, String> {

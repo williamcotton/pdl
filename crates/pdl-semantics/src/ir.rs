@@ -1,8 +1,8 @@
 use pdl_core::Span;
 use pdl_syntax::{
-    AggItem, BinaryOp, CompleteFillItem, ContextKind, Expr, Pipeline, PipelineStart, Program,
-    SinkRef, SortItem, SourceRef, Stage, UnaryOp, UnionOptionKind, WindowFrame, WindowFrameKind,
-    WindowSpec,
+    AggItem, BinaryOp, CompleteFillItem, ContextKind, ControlKind, Expr, Pipeline, PipelineStart,
+    Program, SinkRef, SortItem, SourceRef, Stage, UnaryOp, UnionOptionKind, WindowFrame,
+    WindowFrameKind, WindowSpec,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -19,12 +19,52 @@ pub struct ContextDeclIr {
     pub name: String,
     pub span: Span,
     pub default: ExprIr,
+    pub control: Option<ControlInitializerIr>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextKindIr {
     Param,
     State,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ControlInitializerIr {
+    pub kind: ControlKindIr,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlKindIr {
+    Text,
+    Textarea,
+    Number,
+    Range,
+    Checkbox,
+    Select,
+    Radio,
+    Date,
+    Time,
+    Datetime,
+    Color,
+}
+
+impl ControlKindIr {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "input_text",
+            Self::Textarea => "input_textarea",
+            Self::Number => "input_number",
+            Self::Range => "input_range",
+            Self::Checkbox => "input_checkbox",
+            Self::Select => "input_select",
+            Self::Radio => "input_radio",
+            Self::Date => "input_date",
+            Self::Time => "input_time",
+            Self::Datetime => "input_datetime",
+            Self::Color => "input_color",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -349,6 +389,13 @@ pub fn lower_program(program: &Program) -> ProgramIr {
                 name: context.name.value.clone(),
                 span: context.name.span,
                 default: lower_expr(&context.default),
+                control: context
+                    .control
+                    .as_ref()
+                    .map(|control| ControlInitializerIr {
+                        kind: lower_control_kind(control.kind),
+                        span: control.span,
+                    }),
             })
             .collect(),
         bindings: program
@@ -377,6 +424,22 @@ fn lower_context_kind(kind: ContextKind) -> ContextKindIr {
     match kind {
         ContextKind::Param => ContextKindIr::Param,
         ContextKind::State => ContextKindIr::State,
+    }
+}
+
+fn lower_control_kind(kind: ControlKind) -> ControlKindIr {
+    match kind {
+        ControlKind::Text => ControlKindIr::Text,
+        ControlKind::Textarea => ControlKindIr::Textarea,
+        ControlKind::Number => ControlKindIr::Number,
+        ControlKind::Range => ControlKindIr::Range,
+        ControlKind::Checkbox => ControlKindIr::Checkbox,
+        ControlKind::Select => ControlKindIr::Select,
+        ControlKind::Radio => ControlKindIr::Radio,
+        ControlKind::Date => ControlKindIr::Date,
+        ControlKind::Time => ControlKindIr::Time,
+        ControlKind::Datetime => ControlKindIr::Datetime,
+        ControlKind::Color => ControlKindIr::Color,
     }
 }
 

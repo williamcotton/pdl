@@ -3,6 +3,7 @@ mod diagnostics;
 mod handlers;
 mod init;
 mod render;
+mod serve;
 
 use std::process::ExitCode;
 

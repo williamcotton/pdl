@@ -100,6 +100,10 @@
         {
           "name": "keyword.operator.context.pdl",
           "match": "[$@]"
+        },
+        {
+          "name": "keyword.operator.control.pdl",
+          "match": "[:.\\[\\]]"
         }
       ]
     },
@@ -169,6 +173,10 @@
     },
     "functions": {
       "patterns": [
+        {
+          "name": "support.function.control.pdl",
+          "match": "\\b(?:input_text|input_textarea|input_number|input_range|input_checkbox|input_select|input_radio|input_date|input_time|input_datetime|input_color)\\b(?=\\s*\\()"
+        },
         {
           "name": "support.function.window.pdl",
           "match": "\\b(?:count|count_distinct|sum|mean|min|max)\\b(?=\\s*\\([^)]*\\)\\s*over\\b)"
