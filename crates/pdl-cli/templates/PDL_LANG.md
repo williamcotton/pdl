@@ -481,6 +481,8 @@ col("column_name")
 
 `round(value, digits)` requires integer literal `digits` from 0 through 12.
 String concatenation should use `concat(...)`; do not rely on `+` for text.
+`col(value)` treats the row value as a column name. The argument may be a
+literal, context value, or row expression such as `col(metric_column)`.
 
 Temporal scalar functions return existing value classes:
 
@@ -559,6 +561,10 @@ sum(amount) over (
 Frame names include `whole_partition`, `running`, `remaining`, `trailing N`,
 `leading N`, and `centered N`.
 
+Inside `over (...)`, `partition_by` accepts comma-separated columns and
+`order_by` accepts comma-separated sort items with optional direction and null
+ordering, such as `order_by amount, customer_id` or `order_by score desc`.
+
 All shipped window functions:
 
 ```pdl
@@ -586,6 +592,10 @@ max(value)
 Window expressions are only valid in `mutate` assignments and must use
 `over (...)`.
 
+`lag` and `lead` default to offset `1`; their offset argument may be a row
+expression that evaluates to a non-negative integer, such as
+`lag(amount, offset, 0)`.
+
 ## Context Declarations
 
 Reactive host integrations may declare parameters and state before pipelines:
@@ -608,15 +618,40 @@ Top-level `param` declarations may use standard control initializers. These
 forms are valid only as `param` defaults; do not use them in row expressions.
 
 ```pdl
-param title_filter = input_text(label: "Title Filter", default: "")
-param min_amount = input_range(label: "Min Amount", min: 0, max: 500, default: 50, step: 10)
-param include_pending = input_checkbox(label: "Include Pending", default: false)
-param active_region = input_select(label: "Region", choices: ["all", "West"], default: "all")
-param active_author = input_select(label: "Author", choicesFrom: authors.author_name, default: "all")
+param title_filter = input_text(label: "Title Filter", default: "", placeholder: "substring match")
+param notes = input_textarea(label: "Notes", default: "Lines added per author.", rows: 3)
+param row_limit = input_number(label: "Row Limit", default: 25, min: 1, max: 1000, step: 1)
+param min_commits = input_range(label: "Min Commits", min: 0, max: 500, default: 50, step: 10)
+param include_bots = input_checkbox(label: "Include Bots", default: false)
+param period = input_select(label: "Period", choices: ["daily", "weekly", "monthly"], default: "monthly")
+param active_author = input_select(label: "Author", choices: ["all"], choicesFrom: authors.author_name, default: "all")
+param engine = input_radio(label: "Engine", choices: ["auto", "row", "native"], default: "auto")
+param since = input_date(label: "Since", default: "2026-01-01", min: "2020-01-01", max: "2026-12-31")
+param cutoff_time = input_time(label: "Cutoff Time", default: "09:30")
+param deadline = input_datetime(label: "Deadline", default: "2026-06-30T17:00")
+param accent = input_color(label: "Accent", default: "#4477AA")
+
+let authors =
+  load "authors.csv"
+    | select author_name
+    | distinct author_name
+
+output totals =
+  load "authors.csv"
+    | filter commits >= $min_commits
+    | filter $active_author == "all" or author_name == $active_author
+    | save "all_controls_totals.csv"
 ```
 
 Static `choices` are arrays of primitive literals. `choicesFrom` references a
 binding column and may reference a binding declared later in the file.
+
+Use `choicesFrom: binding.column` when an `input_select` or `input_radio`
+should derive choices from a table. Hosts execute the referenced binding,
+read the named column, omit nulls, preserve first-seen order, deduplicate
+values, and coerce them to the parameter default's scalar type. Include static
+sentinel choices such as `"all"` alongside `choicesFrom` when the sentinel does
+not appear in the source table.
 
 ## Formats
 
