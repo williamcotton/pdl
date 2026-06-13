@@ -340,6 +340,8 @@ fn value_json(value: &Value) -> JsonValue {
             .map(JsonValue::Number)
             .unwrap_or(JsonValue::Null),
         Value::String(value) => JsonValue::String(value.clone()),
+        // Context values are never geometry (PDL_SPEC §10.13).
+        Value::Geometry(_) => JsonValue::Null,
     }
 }
 

@@ -1319,10 +1319,22 @@ fn nullable_or(left: Value, right: Value) -> Value {
 }
 
 fn column_value(table: &Table, row: &Row, column: &str, span: Span) -> Result<Value, Diagnostic> {
-    table
-        .value(row, column)
-        .cloned()
-        .ok_or_else(|| Diagnostic::error(codes::E1005, format!("unknown column `{column}`"), span))
+    let value = table.value(row, column).cloned().ok_or_else(|| {
+        Diagnostic::error(codes::E1005, format!("unknown column `{column}`"), span)
+    })?;
+    // Geometry is opaque: it cannot be evaluated as a scalar in arithmetic,
+    // comparisons, functions, or control values (PDL_SPEC §10.13). Structural
+    // stages (`select`, `drop`, `rename`, `sort`, joins, unions) move geometry
+    // by column position and never route it through expression evaluation, so
+    // reaching this point means geometry was used where a scalar is required.
+    if value.is_geometry() {
+        return Err(Diagnostic::error(
+            codes::E1234,
+            format!("geometry column `{column}` cannot be used as a scalar value"),
+            span,
+        ));
+    }
+    Ok(value)
 }
 
 pub(crate) fn eval_aggregate(

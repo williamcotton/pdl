@@ -24,6 +24,9 @@ pub enum DataFormat {
     ArrowFile,
     ArrowStream,
     JsonLines,
+    GeoJson,
+    Shapefile,
+    TopoJson,
 }
 
 impl DataFormat {
@@ -34,6 +37,9 @@ impl DataFormat {
             DataFormat::ArrowFile => "arrow-file",
             DataFormat::ArrowStream => "arrow-stream",
             DataFormat::JsonLines => "jsonl",
+            DataFormat::GeoJson => "geojson",
+            DataFormat::Shapefile => "shapefile",
+            DataFormat::TopoJson => "topojson",
         }
     }
 
@@ -44,6 +50,9 @@ impl DataFormat {
             "arrow-file" | "ipc" => Some(DataFormat::ArrowFile),
             "arrow-stream" | "arrow" => Some(DataFormat::ArrowStream),
             "jsonl" | "ndjson" => Some(DataFormat::JsonLines),
+            "geojson" => Some(DataFormat::GeoJson),
+            "shapefile" => Some(DataFormat::Shapefile),
+            "topojson" => Some(DataFormat::TopoJson),
             _ => None,
         }
     }
@@ -58,6 +67,9 @@ impl DataFormat {
             Some("parquet") | Some("pq") => Some(DataFormat::Parquet),
             Some("arrow") | Some("feather") => Some(DataFormat::ArrowFile),
             Some("jsonl") | Some("ndjson") => Some(DataFormat::JsonLines),
+            Some("geojson") => Some(DataFormat::GeoJson),
+            Some("shp") => Some(DataFormat::Shapefile),
+            Some("topojson") => Some(DataFormat::TopoJson),
             _ => None,
         }
     }
@@ -68,6 +80,7 @@ impl DataFormat {
             DataFormat::ArrowFile | DataFormat::ArrowStream => cfg!(feature = "arrow-ipc"),
             DataFormat::Parquet => cfg!(feature = "parquet"),
             DataFormat::JsonLines => true,
+            DataFormat::GeoJson | DataFormat::Shapefile | DataFormat::TopoJson => true,
         }
     }
 
@@ -77,6 +90,10 @@ impl DataFormat {
             DataFormat::ArrowFile | DataFormat::ArrowStream => cfg!(feature = "arrow-ipc"),
             DataFormat::Parquet => cfg!(feature = "parquet"),
             DataFormat::JsonLines => true,
+            // GeoJSON is the only geospatial output in v0.53; shapefile and
+            // TopoJSON are load-only (PDL_SPEC §10.13).
+            DataFormat::GeoJson => true,
+            DataFormat::Shapefile | DataFormat::TopoJson => false,
         }
     }
 
@@ -84,6 +101,14 @@ impl DataFormat {
         matches!(
             self,
             DataFormat::Parquet | DataFormat::ArrowFile | DataFormat::ArrowStream
+        )
+    }
+
+    /// Whether this format carries opaque geometry values (PDL_SPEC §10.13).
+    pub fn is_geospatial(self) -> bool {
+        matches!(
+            self,
+            DataFormat::GeoJson | DataFormat::Shapefile | DataFormat::TopoJson
         )
     }
 }
@@ -124,6 +149,9 @@ pub fn read_schema_from_bytes(
         DataFormat::ArrowFile => read_arrow_file_schema(path, format, bytes),
         DataFormat::ArrowStream => read_arrow_stream_schema(path, format, bytes),
         DataFormat::JsonLines => read_json_lines_schema_from_bytes(path, bytes),
+        DataFormat::GeoJson => crate::geo::read_geojson_schema_from_bytes(path, bytes),
+        DataFormat::TopoJson => crate::geo::read_topojson_schema_from_bytes(path, bytes),
+        DataFormat::Shapefile => Ok(read_shapefile_table_from_path(path, bytes)?.columns),
     }
 }
 
@@ -138,16 +166,71 @@ pub fn read_table_from_bytes(
         DataFormat::ArrowFile => read_arrow_file_table(path, format, bytes),
         DataFormat::ArrowStream => read_arrow_stream_table(path, format, bytes),
         DataFormat::JsonLines => read_json_lines_from_bytes(path, bytes),
+        DataFormat::GeoJson => crate::geo::read_geojson_from_bytes(path, bytes),
+        DataFormat::TopoJson => crate::geo::read_topojson_from_bytes(path, bytes),
+        DataFormat::Shapefile => read_shapefile_table_from_path(path, bytes),
     }
 }
 
+/// Read a shapefile from a `.shp` path, resolving its `.dbf` (required) and
+/// `.shx` (optional) sidecars from disk next to it. Hosts that supply bytes
+/// directly (in-memory/WASM) read the bundle through their own IO layer and
+/// `crate::geo::read_shapefile_from_bundle` instead; this path-backed helper
+/// covers ordinary filesystem loads (PDL_SPEC §10.13).
+fn read_shapefile_table_from_path(shp_path: &Path, shp_bytes: &[u8]) -> Result<Table, Diagnostic> {
+    let dbf_path = shp_path.with_extension("dbf");
+    let dbf_bytes = fs::read(&dbf_path).map_err(|error| {
+        Diagnostic::error(
+            codes::E1820,
+            format!(
+                "shapefile `.dbf` sidecar `{}` could not be read: {error}",
+                dbf_path.display()
+            ),
+            Span::zero(),
+        )
+    })?;
+    let shx_path = shp_path.with_extension("shx");
+    let shx_bytes = fs::read(&shx_path).ok();
+    crate::geo::read_shapefile_from_bundle(crate::geo::ShapefileBundle {
+        shp: shp_bytes,
+        dbf: &dbf_bytes,
+        shx: shx_bytes.as_deref(),
+    })
+}
+
 pub fn write_table_to_bytes(format: DataFormat, table: &Table) -> Result<Vec<u8>, Diagnostic> {
+    // Geometry has no scalar text encoding. A geometry-bearing table must be
+    // saved as GeoJSON or have its geometry removed first; PDL never defines an
+    // ad hoc string encoding for geometry in scalar formats (PDL_SPEC §10.13).
+    if format != DataFormat::GeoJson {
+        let geometry_columns = table.geometry_columns();
+        if !geometry_columns.is_empty() {
+            return Err(Diagnostic::error(
+                codes::E1711,
+                format!(
+                    "format `{}` cannot encode geometry column(s) `{}`; save as `geojson` or drop the geometry first",
+                    format.canonical_name(),
+                    geometry_columns.join(", ")
+                ),
+                Span::zero(),
+            ));
+        }
+    }
     match format {
         DataFormat::Csv => crate::csv::write_csv_to_vec(table),
         DataFormat::Parquet => write_parquet_bytes(format, table),
         DataFormat::ArrowFile => write_arrow_file_bytes(format, table),
         DataFormat::ArrowStream => write_arrow_stream_bytes(format, table),
         DataFormat::JsonLines => write_json_lines_to_vec(table),
+        DataFormat::GeoJson => crate::geo::write_geojson_to_vec(table),
+        DataFormat::Shapefile | DataFormat::TopoJson => Err(Diagnostic::error(
+            codes::E1705,
+            format!(
+                "format `{}` is load-only in this release; GeoJSON is the only geospatial output format",
+                format.canonical_name()
+            ),
+            Span::zero(),
+        )),
     }
 }
 

@@ -635,6 +635,8 @@ fn stable_value_key(value: &Value) -> String {
         Value::Bool(value) => format!("bool:{value}"),
         Value::Number(value) => format!("number:{value:?}"),
         Value::String(value) => format!("string:{value}"),
+        // Geometry is never a valid control value (PDL_SPEC §10.13).
+        Value::Geometry(_) => "geometry:".to_string(),
     }
 }
 

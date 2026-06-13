@@ -433,5 +433,8 @@ pub(crate) fn value_to_data_literal(value: &Value) -> DataExpr {
         Value::Bool(value) => DataLiteral::Bool(*value),
         Value::Number(value) => DataLiteral::Number(*value),
         Value::String(value) => DataLiteral::String(value.clone()),
+        // Geometry never reaches native lowering: native eligibility rejects
+        // geometry-carrying pipelines (PDL_SPEC §10.13).
+        Value::Geometry(_) => DataLiteral::Null,
     })
 }

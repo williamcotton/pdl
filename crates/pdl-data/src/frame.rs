@@ -37,6 +37,30 @@ impl Table {
             .and_then(|index| row.values.get(index))
     }
 
+    /// Names of columns that carry geometry values, in table column order
+    /// (PDL_SPEC §10.13). A column is geometry-bearing when any of its cells is
+    /// a [`Value::Geometry`]; an all-null geometry column is indistinguishable
+    /// from an all-null scalar column and is reported as scalar.
+    pub fn geometry_columns(&self) -> Vec<String> {
+        self.columns
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                self.rows
+                    .iter()
+                    .any(|row| matches!(row.values.get(*index), Some(Value::Geometry(_))))
+            })
+            .map(|(_, column)| column.clone())
+            .collect()
+    }
+
+    /// Whether the column at `index` carries any geometry value.
+    pub fn column_is_geometry(&self, index: usize) -> bool {
+        self.rows
+            .iter()
+            .any(|row| matches!(row.values.get(index), Some(Value::Geometry(_))))
+    }
+
     pub fn select(self, items: &[(String, String)]) -> Self {
         let indices: Vec<usize> = items
             .iter()

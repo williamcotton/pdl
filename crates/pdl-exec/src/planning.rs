@@ -130,6 +130,10 @@ pub enum NativeUnsupportedReason {
     /// Input format has no native scan. JSON Lines is native-eligible since
     /// v0.49; this is reserved for genuinely unknown formats.
     InputFormat,
+    /// Geospatial input or geometry-carrying data. The native (Polars) engine
+    /// does not support geometry in v0.53; these pipelines run on the row
+    /// runtime (PDL_SPEC §10.13).
+    Geometry,
     /// Scalar function is outside the native allowlist.
     ScalarFunction,
     /// Scalar function arity is outside the native contract.
@@ -192,6 +196,7 @@ impl NativeUnsupportedReason {
         match self {
             NativeUnsupportedReason::NoRunnableMain => "no-runnable-main",
             NativeUnsupportedReason::InputFormat => "input-format",
+            NativeUnsupportedReason::Geometry => "geometry",
             NativeUnsupportedReason::ScalarFunction => "scalar-function",
             NativeUnsupportedReason::ScalarFunctionArity => "scalar-function-arity",
             NativeUnsupportedReason::AggregateFunction => "aggregate-function",
@@ -227,6 +232,7 @@ impl NativeUnsupportedReason {
         &[
             "no-runnable-main",
             "input-format",
+            "geometry",
             "scalar-function",
             "scalar-function-arity",
             "aggregate-function",

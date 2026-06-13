@@ -4,6 +4,7 @@ pub mod csv;
 pub mod engine;
 pub mod format;
 pub mod frame;
+pub mod geo;
 pub mod jsonl;
 #[cfg(feature = "parquet")]
 pub mod parquet;
@@ -25,6 +26,10 @@ pub use format::{
     write_table_to_bytes, write_table_to_path, DataFormat,
 };
 pub use frame::{compare_values, NullsOrder, Row, SortDirection, SortSpec, Table};
+pub use geo::{
+    read_geojson_from_bytes, read_shapefile_from_bundle, read_topojson_from_bytes,
+    write_geojson_to_vec, ShapefileBundle, GEOM_COLUMN,
+};
 pub use schema::{ColumnSchema, LogicalType, TableSchema};
 pub use temporal::{
     floor_temporal, format_temporal, normalize_date, normalize_datetime, parse_temporal,

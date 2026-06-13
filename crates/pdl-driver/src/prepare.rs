@@ -292,6 +292,9 @@ fn load_schema_for_request(
                 Some(&bytes),
                 path.span,
             )?;
+            if format == DataFormat::Shapefile {
+                return shapefile_schema(&resolved, &bytes, io);
+            }
             pdl_data::read_schema_from_bytes(&resolved, format, &bytes)
         }
         SourceRef::Stdin(span) => {
@@ -307,6 +310,35 @@ fn load_schema_for_request(
             pdl_data::read_schema_from_bytes(Path::new("stdin"), format, bytes)
         }
     }
+}
+
+/// Read a shapefile schema by resolving the `.dbf` (required) and `.shx`
+/// (optional) sidecars next to the `.shp` path through the driver IO layer, so
+/// schema analysis works for both filesystem loads and host-provided bundles
+/// (PDL_SPEC §10.13).
+fn shapefile_schema(
+    shp_path: &Path,
+    shp_bytes: &[u8],
+    io: &dyn DriverIo,
+) -> Result<Vec<String>, Diagnostic> {
+    let dbf_path = shp_path.with_extension("dbf");
+    let dbf = io.read_path_bytes(&dbf_path).map_err(|_| {
+        Diagnostic::error(
+            codes::E1820,
+            format!(
+                "shapefile `.dbf` sidecar `{}` could not be read",
+                dbf_path.display()
+            ),
+            Span::zero(),
+        )
+    })?;
+    let shx = io.read_path_bytes(&shp_path.with_extension("shx")).ok();
+    let table = pdl_data::read_shapefile_from_bundle(pdl_data::ShapefileBundle {
+        shp: shp_bytes,
+        dbf: &dbf,
+        shx: shx.as_deref(),
+    })?;
+    Ok(table.columns)
 }
 
 fn resolve_input_format(

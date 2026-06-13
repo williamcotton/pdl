@@ -1,0 +1,7 @@
+let metrics =
+  load "county_metrics.csv"
+  | select GEOID, unemployment_rate
+
+load "us_counties.geojson"
+  | join metrics on GEOID kind left
+  | save "us_counties_with_metrics.geojson"

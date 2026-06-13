@@ -421,6 +421,8 @@ fn stable_choice_key(value: &Value) -> String {
         Value::Bool(value) => format!("bool:{value}"),
         Value::Number(value) => format!("number:{value:?}"),
         Value::String(value) => format!("string:{value}"),
+        // Geometry is never a valid dynamic choice value (PDL_SPEC §10.13).
+        Value::Geometry(_) => "geometry:".to_string(),
     }
 }
 
@@ -818,6 +820,9 @@ impl Runtime<'_> {
                 let bytes = self.io.read_path_bytes(resolved_path)?;
                 let format =
                     resolve_input_format(input, explicit_format, None, Some(&bytes), stage_span)?;
+                if format == DataFormat::Shapefile {
+                    return self.load_shapefile(resolved_path, &bytes);
+                }
                 read_table_from_bytes(resolved_path, format, &bytes)
             }
             SourceDescriptor::Stdin => {
@@ -838,6 +843,37 @@ impl Runtime<'_> {
                 read_table_from_bytes(std::path::Path::new("stdin"), format, bytes)
             }
         }
+    }
+
+    /// Load a shapefile bundle, resolving the `.dbf` (required) and `.shx`
+    /// (optional) sidecars next to the named `.shp` path through the driver IO
+    /// layer so both path-backed CLI loads and host-provided bytes work
+    /// (PDL_SPEC §10.13).
+    fn load_shapefile(
+        &self,
+        shp_path: &std::path::Path,
+        shp_bytes: &[u8],
+    ) -> Result<Table, Diagnostic> {
+        let dbf_path = shp_path.with_extension("dbf");
+        let dbf = self.io.read_path_bytes(&dbf_path).map_err(|_| {
+            Diagnostic::error(
+                codes::E1820,
+                format!(
+                    "shapefile `.dbf` sidecar `{}` could not be read",
+                    dbf_path.display()
+                ),
+                Span::zero(),
+            )
+        })?;
+        let shx = self
+            .io
+            .read_path_bytes(&shp_path.with_extension("shx"))
+            .ok();
+        pdl_data::read_shapefile_from_bundle(pdl_data::ShapefileBundle {
+            shp: shp_bytes,
+            dbf: &dbf,
+            shx: shx.as_deref(),
+        })
     }
 
     fn execute_save(

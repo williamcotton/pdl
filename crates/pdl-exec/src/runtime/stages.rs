@@ -393,6 +393,20 @@ pub(crate) fn ensure_key_types_compatible(
 ) -> Result<(), Diagnostic> {
     let left_classes = column_value_classes(left, left_key);
     let right_classes = column_value_classes(right, right_key);
+    // Geometry is opaque and has no scalar key value (PDL_SPEC §10.13).
+    if left_classes.contains(&ValueClass::Geometry) || right_classes.contains(&ValueClass::Geometry)
+    {
+        let key = if left_classes.contains(&ValueClass::Geometry) {
+            left_key
+        } else {
+            right_key
+        };
+        return Err(Diagnostic::error(
+            codes::E1233,
+            format!("geometry column `{key}` cannot be used as a join key"),
+            span,
+        ));
+    }
     if left_classes.is_empty() || right_classes.is_empty() || left_classes == right_classes {
         return Ok(());
     }
@@ -451,6 +465,7 @@ pub(super) enum ValueClass {
     Bool,
     Number,
     String,
+    Geometry,
 }
 
 fn column_value_classes(table: &Table, column: &str) -> BTreeSet<ValueClass> {
@@ -465,6 +480,7 @@ fn column_value_classes(table: &Table, column: &str) -> BTreeSet<ValueClass> {
             Value::Bool(_) => Some(ValueClass::Bool),
             Value::Number(_) => Some(ValueClass::Number),
             Value::String(_) => Some(ValueClass::String),
+            Value::Geometry(_) => Some(ValueClass::Geometry),
         })
         .collect()
 }

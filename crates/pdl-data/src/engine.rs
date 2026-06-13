@@ -1686,6 +1686,18 @@ fn scan_rows(source: DataSource<'_>) -> Result<DataPlan, Diagnostic> {
     Ok(DataPlan::from_table(table))
 }
 
+/// Geometry pipelines run on the row runtime in v0.53; the native (Polars)
+/// engine has no geometry support (PDL_SPEC §10.13). Native eligibility
+/// rejects geospatial formats before execution, so this is a defensive guard.
+#[cfg(feature = "polars-engine")]
+fn geo_native_unsupported() -> Diagnostic {
+    Diagnostic::error(
+        codes::E1211,
+        "geospatial formats are not supported by native execution; geometry pipelines run on the row runtime",
+        Span::zero(),
+    )
+}
+
 #[cfg(feature = "polars-engine")]
 fn scan_native(source: DataSource<'_>) -> Result<DataPlan, Diagnostic> {
     let (format, plan) = match source {
@@ -1727,6 +1739,9 @@ fn scan_native(source: DataSource<'_>) -> Result<DataPlan, Diagnostic> {
                         )
                     })?;
                     return read_table_from_bytes(path, format, &bytes).map(DataPlan::from_table);
+                }
+                DataFormat::GeoJson | DataFormat::Shapefile | DataFormat::TopoJson => {
+                    return Err(geo_native_unsupported());
                 }
             };
             (format, plan)
@@ -1772,6 +1787,9 @@ fn scan_native(source: DataSource<'_>) -> Result<DataPlan, Diagnostic> {
                 DataFormat::JsonLines => {
                     return read_table_from_bytes(logical_path, format, bytes)
                         .map(DataPlan::from_table);
+                }
+                DataFormat::GeoJson | DataFormat::Shapefile | DataFormat::TopoJson => {
+                    return Err(geo_native_unsupported());
                 }
             };
             (format, plan)
@@ -1866,6 +1884,9 @@ fn write_native_to_writer(
         // encoders so the bytes stay identical without building a row table.
         DataFormat::Csv => write_native_csv(&frame, writer),
         DataFormat::JsonLines => write_native_json_lines(&frame, writer),
+        DataFormat::GeoJson | DataFormat::Shapefile | DataFormat::TopoJson => {
+            Err(geo_native_unsupported())
+        }
     }
 }
 
@@ -2339,6 +2360,8 @@ fn row_value_classes(table: &Table, column: &str) -> BTreeSet<RowValueClass> {
             Value::Bool(_) => Some(RowValueClass::Bool),
             Value::Number(_) => Some(RowValueClass::Number),
             Value::String(_) => Some(RowValueClass::String),
+            // Geometry never reaches native planning (PDL_SPEC §10.13).
+            Value::Geometry(_) => None,
         })
         .collect()
 }
@@ -3047,6 +3070,8 @@ fn data_window_key_value(value: &Value) -> Option<DataWindowKeyValue> {
             Some(DataWindowKeyValue::Number(value.to_bits()))
         }
         Value::String(value) => Some(DataWindowKeyValue::String(value.clone())),
+        // Geometry never reaches native planning (PDL_SPEC §10.13).
+        Value::Geometry(_) => None,
     }
 }
 

@@ -196,6 +196,33 @@ pdl run examples/stdout_arrow_stream.pdl --stdout-format arrow-stream \
   | algraf render chart.ag --data - --data-format arrow-stream --output chart.svg
 ```
 
+## 9. Counties: join metrics onto GeoJSON features
+
+PDL prepares local spatial datasets too. It loads a GeoJSON feature table into
+a `geom` geometry column plus ordinary scalar property columns, joins external
+attributes onto the features on a shared key, and writes a normalized GeoJSON
+`FeatureCollection` back out.
+
+```pdl
+let metrics =
+  load "county_metrics.csv"
+  | select GEOID, unemployment_rate
+
+load "us_counties.geojson"
+  | join metrics on GEOID kind left
+  | save "us_counties_with_metrics.geojson"
+```
+
+```bash
+pdl run examples/county_metric_join.pdl
+```
+
+Geometry is opaque: it rides through `filter`, `select`, `join`, and the other
+stages, but cannot be a join key, a scalar operand, or a control value, and only
+GeoJSON can encode it on output. `shapefile` and `topojson` are load-only.
+County FIPS/`GEOID` keys lose leading zeroes when a CSV cell such as `01001`
+parses as a number — author key columns as text where leading zeroes matter.
+
 ## Install and run
 
 Install the packaged binary with Homebrew:

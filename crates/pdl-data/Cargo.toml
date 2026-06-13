@@ -14,12 +14,15 @@ arrow-schema = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 chrono = { workspace = true }
 csv = { workspace = true }
+geo-types = { workspace = true }
+geojson = { workspace = true }
 indexmap = { workspace = true }
 parquet = { workspace = true, optional = true, features = ["arrow"] }
 polars = { workspace = true, optional = true }
 polars-buffer = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+shapefile = { workspace = true }
 thiserror = { workspace = true }
 
 [features]

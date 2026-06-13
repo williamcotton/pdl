@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.52.0"
+version = "0.53.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/williamcotton/pdl"
@@ -40,6 +40,8 @@ chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 csv = "1"
 dashmap = "6"
+geo-types = "0.7"
+geojson = { version = "0.24", features = ["geo-types"] }
 indexmap = "2"
 insta = "1"
 logos = "0.14"
@@ -52,6 +54,7 @@ polars-buffer = "0.53"
 pretty_assertions = "1"
 rowan = "0.16"
 serde = { version = "1", features = ["derive"] }
+shapefile = { version = "0.6", features = ["geo-types"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }

@@ -169,6 +169,13 @@ fn table_value_to_json(value: &Value) -> Result<serde_json::Value, Diagnostic> {
                 })
         }
         Value::String(value) => Ok(serde_json::Value::String(value.clone())),
+        // Geometry has no JSON Lines scalar encoding; geometry-bearing tables
+        // are rejected before this point (PDL_SPEC §10.13).
+        Value::Geometry(_) => Err(Diagnostic::error(
+            codes::E1711,
+            "JSON Lines output cannot encode geometry; save as `geojson` or drop the geometry first",
+            Span::zero(),
+        )),
     }
 }
 

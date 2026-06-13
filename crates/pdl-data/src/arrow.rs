@@ -299,6 +299,8 @@ fn infer_column_type(table: &Table, column_index: usize) -> ColumnArrowType {
             Value::Bool(_) => ColumnArrowType::Boolean,
             Value::Number(_) => ColumnArrowType::Float64,
             Value::String(_) => ColumnArrowType::Utf8,
+            // Geometry is rejected before Arrow encoding (PDL_SPEC §10.13).
+            Value::Geometry(_) => continue,
         };
         match observed {
             None => observed = Some(value_type),

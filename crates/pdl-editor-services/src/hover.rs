@@ -561,6 +561,7 @@ struct ColumnPreviewBuilder {
     saw_bool: bool,
     saw_number: bool,
     saw_string: bool,
+    saw_geometry: bool,
     samples: Vec<String>,
 }
 
@@ -572,6 +573,7 @@ impl ColumnPreviewBuilder {
             saw_bool: false,
             saw_number: false,
             saw_string: false,
+            saw_geometry: false,
             samples: Vec::new(),
         }
     }
@@ -582,6 +584,7 @@ impl ColumnPreviewBuilder {
             Value::Bool(_) => self.saw_bool = true,
             Value::Number(_) => self.saw_number = true,
             Value::String(_) => self.saw_string = true,
+            Value::Geometry(_) => self.saw_geometry = true,
         }
         if !matches!(value, Value::Null) && self.samples.len() < SAMPLE_VALUE_LIMIT {
             let sample = sample_text(value);
@@ -602,6 +605,11 @@ impl ColumnPreviewBuilder {
     }
 
     fn logical_type(&self) -> LogicalType {
+        // Geometry is opaque and is reported as a geometry column regardless of
+        // any null cells in the column (PDL_SPEC §10.13).
+        if self.saw_geometry {
+            return LogicalType::Geometry;
+        }
         match (
             self.saw_bool as u8 + self.saw_number as u8 + self.saw_string as u8,
             self.saw_bool,
@@ -1011,6 +1019,7 @@ fn logical_type_name(logical_type: &LogicalType) -> &'static str {
         LogicalType::DateTime => "date-time",
         LogicalType::Duration => "duration",
         LogicalType::Binary => "binary",
+        LogicalType::Geometry => "geometry",
         LogicalType::Null => "null",
         LogicalType::Unknown => "unknown",
     }

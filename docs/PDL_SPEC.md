@@ -1,13 +1,23 @@
 # PDL Detailed Specification
 
-Status: Draft 0.52.0
+Status: Draft 0.53.0
 Audience: implementers, language designers, data engineers, runtime engineers, LSP authors, WASM host authors, VS Code extension authors, test authors, and streaming consumers
 Scope: standalone Unix-pipeline-style DSL for deterministic tabular data loading, transformation, aggregation, streaming, and materialization
 
 ## Current Reference Implementation Status
 
-The current repository implementation line is `0.52.0`, tracked in
-`docs/V0_52_PLAN.md`. Version 0.52.0 adds declaration-only parameter control
+The current repository implementation line is `0.53.0`, tracked in
+`docs/V0_53_PLAN.md`. Version 0.53.0 adds geospatial table I/O: the `geojson`,
+`shapefile`, and `topojson` formats, an opaque geometry value class carried
+through tabular preparation in a `geom` column, normalized GeoJSON output, and
+conservative native-engine fallback to the row runtime for geometry pipelines.
+PDL copies the relevant geospatial loader behavior into its own crates rather
+than sharing a crate, Git dependency, or path dependency with Algraf or any
+other repository; v0.53 introduces no shared `datafarm-geo` crate. Shapefile
+and TopoJSON are load-only; GeoJSON is the only geospatial output format. See
+[§10.13](#1013-geospatial-table-io) for the normative rules.
+
+Version 0.52.0 adds declaration-only parameter control
 initializers, stable control metadata extraction through `pdl controls --json`,
 runtime context overrides on `pdl run`, and a local `pdl serve` controls host.
 The release adds the minimal syntax needed by controls (`:`, `.`,
@@ -1890,6 +1900,9 @@ Canonical format names:
 - `arrow-file`
 - `arrow-stream`
 - `jsonl`
+- `geojson`
+- `shapefile`
+- `topojson`
 
 Aliases MAY be accepted:
 
@@ -1898,6 +1911,12 @@ Aliases MAY be accepted:
 - `ndjson` as `jsonl`
 
 Aliases MUST be documented.
+
+Path inference MUST recognize `.geojson` as `geojson`, `.shp` as `shapefile`,
+and `.topojson` as `topojson`. `geojson` supports both load and save.
+`shapefile` and `topojson` are load-only; saving as `shapefile` or `topojson`
+MUST produce a stable unsupported-output diagnostic (`E1705`). The geospatial
+formats are described normatively in [§10.13](#1013-geospatial-table-io).
 
 ### 10.8 Format Sniffing
 
@@ -1963,6 +1982,108 @@ The implementation MUST document path resolution.
 Sandboxed runtimes MUST reject path traversal outside allowed roots.
 
 Network URLs MUST be rejected by default.
+
+### 10.11 Geometry Value Class
+
+PDL's table model includes an opaque **geometry** value class distinct from
+string, number, boolean, and null. Geometry exists so geospatial loaders can
+carry feature geometry through ordinary tabular preparation and write it back
+to GeoJSON.
+
+Geometry is opaque in this release:
+
+- It MUST NOT be used as a join key.
+- It MUST NOT be used in arithmetic, comparisons, or other scalar operators.
+- It MUST NOT be passed to scalar, aggregate, or window functions.
+- It MUST NOT be used as a parameter, state, or other control value.
+
+Invalid expression use of geometry MUST produce a targeted diagnostic
+(`E1234`) rather than stringifying or silently dropping geometry. A geometry
+column used as a join key MUST produce `E1233`.
+
+Geometry columns MAY be referenced in column-position syntax for `select`,
+`drop`, and `rename`. Schema reporting and editor services identify a geometry
+column with the type label `geometry`. A geometry column is one that carries at
+least one geometry value; a column whose every cell is a null geometry is
+indistinguishable from a null scalar column and is reported as scalar.
+
+### 10.12 Geometry Through Tabular Stages
+
+Geometry-bearing tables behave like ordinary tables except where an operation
+explicitly evaluates values as scalars. The following stages MUST preserve
+geometry columns: `filter`, `select`, `drop`, `rename`, `mutate`, `sort`,
+`limit`, `distinct`, `join`, `union`, and non-terminal and terminal `save`.
+
+`join` output follows the existing join contract. Geometry columns are
+ordinary output columns for collision purposes: a right-side non-key geometry
+column that collides with a left column receives the existing `_right` suffix.
+Geometry columns cannot be join keys (`E1233`). Differently named scalar keys,
+such as `on (GEOID, county_fips)`, join normally on a geometry-bearing table
+when both keys are scalar-compatible.
+
+### 10.13 Geospatial Table I/O
+
+This section is normative for the `geojson`, `shapefile`, and `topojson`
+formats. PDL copies or adapts the relevant geospatial loader behavior into its
+own crates; v0.53 introduces no shared `datafarm-geo` crate, Git dependency, or
+path dependency coupling PDL to Algraf or any other repository.
+
+A geospatial load produces one row per feature/record, scalar properties or
+DBF attributes as ordinary scalar columns through PDL's deterministic scalar
+inference (so a numeric property infers exactly as it would from CSV), and a
+single geometry column named `geom`.
+
+**GeoJSON load.** A GeoJSON load MUST accept a `FeatureCollection` or a lone
+`Feature`. A bare GeoJSON geometry is not a table and MUST be rejected with
+`E1822`. Feature order MUST be preserved. Property column order MUST be
+deterministic, using first-appearance order across features. A missing property
+produces a null cell. Null feature geometry MUST be preserved as null geometry.
+Unsupported or malformed geometry MUST produce `E1819`.
+
+**Shapefile load.** A shapefile load MUST read `.shp` geometry with its
+required `.dbf` attribute sidecar and optional `.shx` index sidecar. Path-backed
+loads resolve sidecars next to the named `.shp` path; host-provided loads
+resolve sidecars through the host IO layer when the host supplies a complete
+bundle. DBF attributes become scalar columns plus `geom`. A null shape is
+preserved as null geometry. A missing or unreadable required sidecar MUST
+produce `E1820`; unsupported geometry MUST produce `E1819`.
+
+**TopoJSON load.** A TopoJSON load MUST accept a `Topology` with exactly one
+object, decoded into one row per feature-like member. Quantized topology
+transforms MUST be applied. v0.53 adds no source options or named `load`
+arguments; a topology with multiple objects is ambiguous and MUST be rejected
+with `E1821`, whose message states that explicit object selection is not
+available in this release. Missing, malformed, or unsupported topology
+structures MUST produce `E1819`.
+
+**GeoJSON output.** GeoJSON output writes a `FeatureCollection`. Exactly one
+geometry column is required; a table with zero or more than one geometry column
+MUST be rejected with `E1712`. Non-geometry columns become feature `properties`
+in table column order. Row order becomes feature order. Geometry cells become
+feature `geometry`; a null geometry cell writes `"geometry": null`. Scalar null
+cells write JSON null property values; boolean, number, and string cells write
+JSON values of the corresponding class. Output MUST be deterministic and MUST
+NOT preserve source formatting, whitespace, original feature IDs, or foreign
+members.
+
+**Geometry-bearing scalar output.** v0.53 defines no ad hoc string encoding for
+geometry in CSV, JSON Lines, Parquet, Arrow IPC file, or Arrow IPC stream
+output. A table with any geometry column MUST be saved as GeoJSON or have its
+geometry removed first; otherwise the save MUST produce `E1711`. Saving to
+`stdout format "geojson"` succeeds only on text-capable stdout hosts. Binary and
+native output paths MUST NOT silently coerce geometry.
+
+**Native engine.** Geometry pipelines run on the row runtime in v0.53. Under
+`--engine auto`, a geospatial load or geometry-carrying binding MUST fall back
+to the row runtime. Forced native mode MUST produce a clear unsupported-geometry
+diagnostic (`E1211` with the `geometry` reason). Existing native coverage for
+non-geometry pipelines is unchanged.
+
+**Leading-zero keys.** County FIPS and `GEOID` values often require leading
+zeroes. v0.53 adds no CSV schema annotations or padded-string functions; key
+columns must be authored as text where leading zeroes matter. Numeric-looking
+CSV cells such as `01001` may be parsed as numbers unless represented as text.
+This is documented author responsibility.
 
 ## 11. Stage Semantics
 
@@ -5288,6 +5409,11 @@ required integer argument.
 `E1232` `frame whole_partition` / `frame running` / `frame remaining`
 followed by an unexpected integer argument.
 
+`E1233` geometry column used as a join key.
+
+`E1234` geometry value used where a scalar is required (arithmetic, comparison,
+function, control value, or other scalar expression context).
+
 ### 20.5 Type Diagnostics
 
 `E1301` unknown type.
@@ -5420,6 +5546,12 @@ followed by an unexpected integer argument.
 
 `E1710` output row or byte limit exceeded.
 
+`E1711` geometry-bearing table saved to a non-GeoJSON format; save as `geojson`
+or remove the geometry first.
+
+`E1712` GeoJSON output requires exactly one geometry column; the table has zero
+or more than one.
+
 ### 20.10 Data Source Runtime Diagnostics
 
 `E1801` source file not found.
@@ -5457,6 +5589,17 @@ followed by an unexpected integer argument.
 `E1817` source fingerprint changed during preparation.
 
 `E1818` source schema unavailable.
+
+`E1819` geospatial source load failed (malformed or unsupported geometry or
+topology structure).
+
+`E1820` shapefile sidecar (`.dbf`/`.shx`) missing or unreadable.
+
+`E1821` TopoJSON object selection unavailable; the topology defines multiple
+objects and explicit object selection is not available in this release.
+
+`E1822` GeoJSON input is not a feature table (a bare geometry was found where a
+`FeatureCollection` or `Feature` is required).
 
 ### 20.11 Stream Interop Diagnostics
 

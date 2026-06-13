@@ -90,6 +90,12 @@ pub fn example_config(name: &str) -> ExampleConfig {
                 stdout_format: None,
             }
         }
+        // Geometry-bearing pipelines save GeoJSON; geometry has no scalar
+        // stdout encoding, so do not request a stdout stream (PDL_SPEC §10.13).
+        "county_metric_join" => ExampleConfig {
+            stdin_format: None,
+            stdout_format: None,
+        },
         _ => ExampleConfig {
             stdin_format: None,
             stdout_format: Some("csv"),

@@ -13,6 +13,7 @@ pub enum LogicalType {
     DateTime,
     Duration,
     Binary,
+    Geometry,
     Null,
     Unknown,
 }

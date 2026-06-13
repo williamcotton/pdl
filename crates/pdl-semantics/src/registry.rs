@@ -535,6 +535,27 @@ pub const FORMATS: &[FormatInfo] = &[
         save_supported: true,
         stream_supported: true,
     },
+    FormatInfo {
+        name: "geojson",
+        documentation: "GeoJSON FeatureCollection or Feature; loads feature tables with a `geom` geometry column and saves a normalized FeatureCollection. Geometry pipelines run on the row runtime.",
+        load_supported: true,
+        save_supported: true,
+        stream_supported: true,
+    },
+    FormatInfo {
+        name: "shapefile",
+        documentation: "ESRI shapefile bundle (`.shp` plus `.dbf`/`.shx` sidecars); load-only, producing DBF attribute columns plus a `geom` geometry column.",
+        load_supported: true,
+        save_supported: false,
+        stream_supported: false,
+    },
+    FormatInfo {
+        name: "topojson",
+        documentation: "Single-object TopoJSON topology; load-only, decoding one row per feature with a `geom` geometry column. Multi-object topologies are rejected.",
+        load_supported: true,
+        save_supported: false,
+        stream_supported: false,
+    },
 ];
 
 pub const KEYWORDS: &[&str] = &[

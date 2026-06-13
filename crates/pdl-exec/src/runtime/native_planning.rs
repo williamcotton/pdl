@@ -335,6 +335,12 @@ pub(crate) fn check_native_load_eligibility(
             stage_span,
         )?,
     };
+    if format.is_geospatial() {
+        return Err(unsupported_native_pipeline(
+            NativeUnsupportedReason::Geometry,
+            "geospatial input is not supported by native execution; geometry pipelines run on the row runtime",
+        ));
+    }
     if !matches!(
         format,
         DataFormat::Csv
@@ -364,7 +370,13 @@ pub(crate) fn check_native_save_eligibility(
             stage_span,
         ));
     };
-    resolve_output_format(sink, explicit_format, stage_span)?;
+    let format = resolve_output_format(sink, explicit_format, stage_span)?;
+    if format.is_geospatial() {
+        return Err(unsupported_native_pipeline(
+            NativeUnsupportedReason::Geometry,
+            "geospatial output is not supported by native execution; geometry pipelines run on the row runtime",
+        ));
+    }
     Ok(())
 }
 

@@ -273,6 +273,15 @@ fn coerce_choice_value(
             ),
             source.span,
         )),
+        // Geometry is opaque and cannot be a control value (PDL_SPEC §10.13).
+        (Value::Geometry(_), _) => Err(Diagnostic::error(
+            codes::E2013,
+            format!(
+                "choicesFrom value in `{}.{}` cannot be a geometry",
+                source.binding, source.column
+            ),
+            source.span,
+        )),
     }
 }
 
@@ -309,6 +318,7 @@ fn value_json(value: &Value) -> JsonValue {
             .map(JsonValue::Number)
             .unwrap_or(JsonValue::Null),
         Value::String(value) => JsonValue::String(value.clone()),
+        Value::Geometry(_) => JsonValue::Null,
     }
 }
 
@@ -318,6 +328,7 @@ fn stable_value_key(value: &Value) -> String {
         Value::Bool(value) => format!("bool:{value}"),
         Value::Number(value) => format!("number:{value:?}"),
         Value::String(value) => format!("string:{value}"),
+        Value::Geometry(_) => "geometry:".to_string(),
     }
 }
 
